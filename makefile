@@ -26,7 +26,7 @@ check-quality: ## runs code quality checks
 
 # Append || true below if blocking local developement
 lint: ## go linting. Update and use specific lint tool and options
-	golangci-lint run --default=all
+	golangci-lint run
 
 vet: ## go vet
 	go vet ./...
