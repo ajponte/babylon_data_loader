@@ -22,7 +22,7 @@ jobs:
 
     # The official action handles installation of the latest version of golangci-lint
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v6
+      uses: golangci/golangci-lint-action@v8
       with:
         version: v1.55.2
 
