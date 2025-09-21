@@ -23,6 +23,7 @@ const (
 func main() {
 	err := godotenv.Load()
 	if err != nil {
+		//nolint:sloglint // We don't have logging setup yet.
 		slog.Info("Error loading .env file")
 		// Be rude for now.
 		os.Exit(0)

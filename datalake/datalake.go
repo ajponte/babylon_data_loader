@@ -195,7 +195,7 @@ func ProcessCSV(ctx context.Context, provider collectionProvider, filePath strin
 	var maxColumns = 4
 
 	for {
-		logger.Debug("Reading new record from CSV")
+		logger.DebugContext(ctx, "Reading new record from CSV")
 		//nolint:govet // We want to stay in the file.
 		record, err := reader.Read()
 		//nolint:errorlint // We want to continue if we've reached to the end of a file.
