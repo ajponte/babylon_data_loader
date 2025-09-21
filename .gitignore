@@ -37,3 +37,6 @@ out/
 # Unitests report
 report.json
 
+# Bablyon Data Lake Sink Dir (temporary)
+data/
+
