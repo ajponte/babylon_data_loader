@@ -5,8 +5,9 @@ APP_EXECUTABLE="./out/$(APP)"
 ALL_PACKAGES=$(shell go list ./... | grep -v /vendor)
 SHELL := /bin/bash # Use bash syntax
 
+
 # Optional if you need DB and migration commands
-MONGO_URI=mongodb://admin:password@localhost:27017
+# MONGO_URI=""
 # DB_HOST=$(shell cat config/application.yml | grep -m 1 -i HOST | cut -d ":" -f2)
 # DB_NAME=$(shell cat config/application.yml | grep -w -i NAME  | cut -d ":" -f2)
 # DB_USER=$(shell cat config/application.yml | grep -i USERNAME | cut -d ":" -f2)
@@ -54,8 +55,9 @@ build: ## build the go application
 	@echo "Build passed"
 
 run: ## runs the go binary. use additional options if required.
-	make build
-	chmod +x $(APP_EXECUTABLE)
+	@set -a && source .env && set +a && \
+	make build && \
+	chmod +x $(APP_EXECUTABLE) && \
 	$(APP_EXECUTABLE)
 
 clean: ## cleans binary and other generated files
@@ -81,6 +83,8 @@ migrate: build
 
 rollback: build
 	${APP_EXECUTABLE} migrate --config=config/application.test.yml
+
+
 
 .PHONY: all test build vendor
 ## All
