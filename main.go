@@ -12,7 +12,7 @@ import (
 
 const (
 	defaultTimeoutSeconds = 30
-	defaultMongoURI       = "mongodb://localhost:27017/"
+	defaultMongoURI       = "mongodb://localhost:27017/datalake"
 	defaultCSVDir         = "./data"
 	envMongoURI           = "MONGO_URI"
 	envCSVDirectory       = "CSV_DIR"
