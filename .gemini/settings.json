@@ -3,8 +3,10 @@
     "sessionRetention": {
       "enabled": true,
       "maxAge": "30d",
-      "maxCount": 10
+      "maxCount": 5
     }
-  }	
+  },
+  "context": {
+    "fileName": "./.gemini/Gemini.md"
+  }
 }
-

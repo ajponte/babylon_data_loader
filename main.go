@@ -7,16 +7,39 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 )
 
 const (
-	defaultTimeoutSeconds = 30
-	defaultMongoURI       = "mongodb://localhost:27017/datalake"
-	defaultCSVDir         = "./data"
-	envMongoURI           = "MONGO_URI"
-	envCSVDirectory       = "CSV_DIR"
-)
+
+	defaultTimeoutSeconds   = 30
+
+	defaultMongoURI         = "mongodb://localhost:27017/datalake"
+
+	defaultCSVDir           = "./data"
+
+	defaultProcessedDir     = "processed"
+
+	defaultUnprocessedDir   = "unprocessed"
+
+	defaultMoveProcessedFiles = false
+
+	envMongoURI             = "MONGO_URI"
+
+	envCSVDirectory         = "CSV_DIR"
+
+	envProcessedDirectory   = "PROCESSED_DIR"
+
+	envUnprocessedDirectory = "UNPROCESSED_DIR"
+
+		envMoveProcessedFiles   = "MOVE_PROCESSED_FILES"
+
+		envMongoUser            = "MONGO_USER"
+
+		envMongoPassword        = "MONGO_PASSWORD"
+
+	)
 
 func main() {
 	// Create the logger instance at the very beginning.
@@ -25,7 +48,7 @@ func main() {
 	// Fix for noinlineerr: Separate the assignment and the error check.
 	err := run(logger)
 	if err != nil {
-		logger.Error("Application terminated with an error", "error", err)
+		logger.Error("Application terminated with an error", "error", fmt.Sprintf("%+v", err))
 		os.Exit(1)
 	}
 }
@@ -39,13 +62,20 @@ func run(logger *slog.Logger) error {
 	defer cancel()
 
 	mongoURI := os.Getenv(envMongoURI)
+	mongoUser := os.Getenv(envMongoUser)
+	mongoPassword := os.Getenv(envMongoPassword)
+
 	if mongoURI == "" {
-		mongoURI = defaultMongoURI
-		logger.Info(
-			"MongoDB URI not found in environment variable, using default",
-			"env_var", envMongoURI,
-			"uri", mongoURI, // Log the actual URI being used
-		)
+		if mongoUser != "" && mongoPassword != "" {
+			mongoURI = fmt.Sprintf("mongodb://%s:%s@localhost:27017/datalake?authSource=admin", mongoUser, mongoPassword)
+		} else {
+			mongoURI = defaultMongoURI
+			logger.Info(
+				"MongoDB URI not found in environment variable, using default",
+				"env_var", envMongoURI,
+				"uri", mongoURI, // Log the actual URI being used
+			)
+		}
 	}
 
 	csvDirectory := os.Getenv(envCSVDirectory)
@@ -58,18 +88,57 @@ func run(logger *slog.Logger) error {
 		)
 	}
 
+	unprocessedDirName := os.Getenv(envUnprocessedDirectory)
+	if unprocessedDirName == "" {
+		unprocessedDirName = defaultUnprocessedDir
+		logger.Info(
+			"Unprocessed directory not found in environment variable, using default",
+			"env_var", envUnprocessedDirectory,
+			"dir", defaultUnprocessedDir,
+		)
+	}
+
+	processedDirName := os.Getenv(envProcessedDirectory)
+	if processedDirName == "" {
+		processedDirName = defaultProcessedDir
+		logger.Info(
+			"Processed directory not found in environment variable, using default",
+			"env_var", envProcessedDirectory,
+			"dir", defaultProcessedDir,
+		)
+	}
+
+	unprocessedDir := fmt.Sprintf("%s/%s", csvDirectory, unprocessedDirName)
+	processedDir := fmt.Sprintf("%s/%s", csvDirectory, processedDirName)
+
+	moveProcessedFilesStr := os.Getenv(envMoveProcessedFiles)
+	moveProcessedFiles := defaultMoveProcessedFiles
+	if moveProcessedFilesStr != "" {
+		parsedBool, err := strconv.ParseBool(moveProcessedFilesStr)
+		if err != nil {
+			logger.Warn(
+				"Invalid value for MOVE_PROCESSED_FILES environment variable, using default",
+				"env_var", envMoveProcessedFiles,
+				"value", moveProcessedFilesStr,
+				"error", err,
+			)
+		} else {
+			moveProcessedFiles = parsedBool
+		}
+	}
+
 	var err error
 
 	// Fix govet shadowing error. Use existing err variable.
-	_, err = os.Stat(csvDirectory)
+	_, err = os.Stat(unprocessedDir)
 	if err != nil || os.IsNotExist(err) {
 		logger.Error(
 			"The directory does not exist. Please create it and place your CSV files inside.",
-			"dir", csvDirectory,
+			"dir", unprocessedDir,
 			"error", err,
 		)
 		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("stat check for directory %s: %w", csvDirectory, err)
+		return fmt.Errorf("stat check for directory %s: %w", unprocessedDir, err)
 	}
 
 	// Fix govet shadowing error. Use existing err variable.
@@ -91,7 +160,7 @@ func run(logger *slog.Logger) error {
 	logger.Info("Successfully connected to MongoDB.")
 
 	// Fix govet shadowing error. Use existing err variable.
-	err = datalake.IngestCSVFiles(ctx, client, csvDirectory)
+	err = datalake.IngestCSVFiles(ctx, client, unprocessedDir, processedDir, moveProcessedFiles)
 	if err != nil {
 		logger.Error("Error ingesting CSV files", "error", err)
 		// Fix wrapcheck error. Wrap the error before returning.

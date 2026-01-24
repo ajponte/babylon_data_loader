@@ -38,7 +38,7 @@ type SyncLog struct {
 }
 
 const (
-	dbName        = "babylonDataLake"
+	dbName        = "datalake"
 	syncTableName = "dataSync"
 )
 
@@ -116,11 +116,11 @@ func (p *mongoProvider) Collection(name string) dataStore {
 // ---- Core Logic ----
 
 // IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
-func IngestCSVFiles(ctx context.Context, client *mongo.Client, dirPath string) error {
+func IngestCSVFiles(ctx context.Context, client *mongo.Client, unprocessedDir, processedDir string, moveProcessedFiles bool) error {
 	// Retrieve the logger from the context at the start of the function.
 	logger := LoggerFromContext(ctx)
-	logger.InfoContext(ctx, "Reading data from sink", "sink", dirPath)
-	files, err := os.ReadDir(dirPath)
+	logger.InfoContext(ctx, "Reading data from sink", "sink", unprocessedDir)
+	files, err := os.ReadDir(unprocessedDir)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
 	}
@@ -129,7 +129,7 @@ func IngestCSVFiles(ctx context.Context, client *mongo.Client, dirPath string) e
 
 	logger.InfoContext(ctx, "looping through files", "files", files)
 	for _, file := range files {
-		if !file.IsDir() && strings.HasSuffix(file.Name(), ".csv") {
+		if !file.IsDir() && (strings.HasSuffix(file.Name(), ".csv") || strings.HasSuffix(file.Name(), ".CSV")) {
 			//nolint:govet // We want to stay in the file.
 			externalDataSource, err := dataSource(file.Name())
 			if err != nil {
@@ -144,11 +144,18 @@ func IngestCSVFiles(ctx context.Context, client *mongo.Client, dirPath string) e
 				return ValidFileNotFoundError(file.Name())
 			}
 
-			filePath := filepath.Join(dirPath, cleanFileName)
+			filePath := filepath.Join(unprocessedDir, cleanFileName)
 
-			err = ProcessCSV(ctx, provider, filePath, externalDataSource)
+			err = ProcessCSV(ctx, provider, filePath, externalDataSource, processedDir)
 			if err != nil {
-				return ProcessCsvError(file.Name())
+				return err // Directly return the error from ProcessCSV
+			}
+
+			if moveProcessedFiles {
+				err = moveFile(filePath, processedDir)
+				if err != nil {
+					return fmt.Errorf("failed to move file: %w", err)
+				}
 			}
 		} else {
 			logger.WarnContext(ctx, "file was not processed", "fileName", file.Name())
@@ -161,7 +168,7 @@ func IngestCSVFiles(ctx context.Context, client *mongo.Client, dirPath string) e
 // ProcessCSV reads a CSV file from a given path and uploads the data to MongoDB.
 //
 //nolint:funlen // refactor this later
-func ProcessCSV(ctx context.Context, provider collectionProvider, filePath string, dataSource string) error {
+func ProcessCSV(ctx context.Context, provider collectionProvider, filePath string, dataSource string, processedDir string) error {
 	// Retrieve the logger from the context at the start of the function.
 	logger := LoggerFromContext(ctx)
 	logger.InfoContext(
@@ -178,11 +185,12 @@ func ProcessCSV(ctx context.Context, provider collectionProvider, filePath strin
 
 	reader := csv.NewReader(file)
 	reader.FieldsPerRecord = -1
+	reader.Comma = ','
 
 	// Skip header
 	_, err = reader.Read()
 	if err != nil {
-		return fmt.Errorf("failed to read CSV header: %w", err)
+		return fmt.Errorf("failed to read CSV header from file %s: %w", filePath, err)
 	}
 
 	var documents []mongo.WriteModel
@@ -204,7 +212,7 @@ func ProcessCSV(ctx context.Context, provider collectionProvider, filePath strin
 		}
 
 		if err != nil {
-			return fmt.Errorf("failed to read record from CSV: %w", err)
+			return fmt.Errorf("failed to read record from CSV in file %s: %w", filePath, err)
 		}
 
 		if len(record) < maxColumns {
@@ -326,4 +334,21 @@ func dataSource(fileName string) (string, error) {
 	}
 
 	return "", DataSourceParseError(fileName)
+}
+
+func moveFile(filePath, processedDir string) error {
+	if _, err := os.Stat(processedDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(processedDir, 0755); err != nil {
+			return fmt.Errorf("failed to create processed directory '%s': %w", processedDir, err)
+		}
+	}
+
+	fileName := filepath.Base(filePath)
+	newPath := filepath.Join(processedDir, fileName)
+
+	if err := os.Rename(filePath, newPath); err != nil {
+		return fmt.Errorf("failed to move file from '%s' to '%s': %w", filePath, newPath, err)
+	}
+
+	return nil
 }
