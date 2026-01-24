@@ -8,32 +8,22 @@ import (
 	"log/slog"
 	"os"
 	"time"
-
-	"github.com/joho/godotenv"
 )
 
 const (
 	defaultTimeoutSeconds = 30
-	defaultMongoURI       = "mongodb://localhost:27017"
+	defaultMongoURI       = "mongodb://localhost:27017/"
 	defaultCSVDir         = "./data"
 	envMongoURI           = "MONGO_URI"
 	envCSVDirectory       = "CSV_DIR"
 )
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		//nolint:sloglint // We don't have logging setup yet.
-		slog.Info("Error loading .env file")
-		// Be rude for now.
-		os.Exit(0)
-	}
-
 	// Create the logger instance at the very beginning.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	// Fix for noinlineerr: Separate the assignment and the error check.
-	err = run(logger)
+	err := run(logger)
 	if err != nil {
 		logger.Error("Application terminated with an error", "error", err)
 		os.Exit(1)
@@ -54,7 +44,7 @@ func run(logger *slog.Logger) error {
 		logger.Info(
 			"MongoDB URI not found in environment variable, using default",
 			"env_var", envMongoURI,
-			"uri", defaultMongoURI,
+			"uri", mongoURI, // Log the actual URI being used
 		)
 	}
 
@@ -79,7 +69,7 @@ func run(logger *slog.Logger) error {
 			"error", err,
 		)
 		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("stat check failed for directory %s: %w", csvDirectory, err)
+		return fmt.Errorf("stat check for directory %s: %w", csvDirectory, err)
 	}
 
 	// Fix govet shadowing error. Use existing err variable.

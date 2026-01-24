@@ -55,7 +55,6 @@ build: ## build the go application
 	@echo "Build passed"
 
 run: ## runs the go binary. use additional options if required.
-	@set -a && source .env && set +a && \
 	make build && \
 	chmod +x $(APP_EXECUTABLE) && \
 	$(APP_EXECUTABLE)
