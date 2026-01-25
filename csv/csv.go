@@ -77,14 +77,19 @@ func ParseCSV(
 	reader.FieldsPerRecord = -1
 	reader.Comma = ','
 
-	// Skip header
+	// Read header
 	_, err = reader.Read()
 	if err != nil {
+		// If there's an error reading the header, it could be an empty file.
+		// Return nil documents and nil error if EOF, otherwise return the error.
+		if err == io.EOF {
+			return nil, "", 0, nil
+		}
 		return nil, "", 0, fmt.Errorf("failed to read CSV header from file %s: %w", filePath, err)
 	}
 
 	var documents []Data
-	var collectionName string
+	var finalCollectionName string // Store the first valid collection name encountered
 	var recordsProcessed int64
 
 	// Mak number of columns required per record.
@@ -117,8 +122,12 @@ func ParseCSV(
 
 			continue
 		}
+		
+		currentCollectionName := fmt.Sprintf("%s-data-%s", dataSource, parsedDate.Format("2006-01-02"))
+		if finalCollectionName == "" {
+			finalCollectionName = currentCollectionName
+		}
 
-		collectionName = fmt.Sprintf("%s-data-%s", dataSource, parsedDate.Format("2006-01-02"))
 
 		amount, _ := strconv.ParseFloat(record[3], 64)
 
@@ -148,10 +157,10 @@ func ParseCSV(
 	}
 
 	if len(documents) == 0 {
-		return nil, "", 0, ValidFileNotFoundError(filePath)
+		return nil, "", 0, nil
 	}
 
-	return documents, collectionName, recordsProcessed, nil
+	return documents, finalCollectionName, recordsProcessed, nil
 }
 
 // safeGet retrieves slice[index] safely.
