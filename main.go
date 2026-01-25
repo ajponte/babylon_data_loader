@@ -2,7 +2,6 @@
 package main
 
 import (
-	"babylon/dataloader/datalake"
 	"context"
 	"fmt"
 	"log/slog"
@@ -10,6 +9,10 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	bcontext "babylon/dataloader/context"
+	"babylon/dataloader/datalake"
+	"babylon/dataloader/storage"
 )
 
 const (
@@ -47,7 +50,7 @@ func main() {
 func run(logger *slog.Logger) error {
 	logger.Info("Begin running data loading")
 	ctx, cancel := context.WithTimeout(
-		datalake.WithLogger(context.Background(), logger),
+		bcontext.WithLogger(context.Background(), logger),
 		defaultTimeoutSeconds*time.Second,
 	)
 	defer cancel()
@@ -68,7 +71,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	// Fix govet shadowing error. Use existing err variable.
-	client, err := datalake.ConnectToMongoDB(ctx, cfg.mongoURI)
+	client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
 	if err != nil {
 		logger.Error("Failed to connect to MongoDB", "error", err)
 		// Fix wrapcheck error. Wrap the error before returning.

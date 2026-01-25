@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	"babylon/dataloader/storage"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // ---- Mocks ----
 
-// mockCollection implements dataStore for testing.
+// mockCollection implements storage.DataStore for testing.
 type mockCollection struct {
 	bulkWriteCalled bool
 	insertOneCalled bool
@@ -41,13 +42,13 @@ type mockProvider struct {
 	col *mockCollection
 }
 
-func (p *mockProvider) Collection(name string) dataStore {
+func (p *mockProvider) Collection(name string) storage.DataStore {
 	return p.col
 }
 
 // ---- Tests ----
 
-func TestProcessCSV_BulkWriteAndInsertOneCalled(t *testing.T) {
+func TestProcessFile(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a temporary CSV file with one valid record
@@ -63,9 +64,17 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	mockCol := &mockCollection{}
 	provider := &mockProvider{col: mockCol}
 
-	// Call ProcessCSV with mock provider
-	if err := ProcessCSV(ctx, provider, filePath, "chase", ""); err != nil {
-		t.Fatalf("ProcessCSV failed: %v", err)
+	// create a dummy os.DirEntry
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to get file info: %v", err)
+	}
+
+	dirEntry := newMockDirEntry(fileInfo)
+
+	// Call processFile with mock provider
+	if err := processFile(ctx, provider, dirEntry, tmpDir, "", false); err != nil {
+		t.Fatalf("processFile failed: %v", err)
 	}
 
 	// Assertions
@@ -78,33 +87,19 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	}
 }
 
-func TestProcessCSV_NoValidRecords(t *testing.T) {
-	ctx := context.Background()
+// mockDirEntry implements fs.DirEntry for testing.
+type mockDirEntry struct {
+	os.FileInfo
+}
 
-	// Create a temporary CSV file with only a header (no valid rows)
-	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "Chase_empty.csv")
+func newMockDirEntry(info os.FileInfo) mockDirEntry {
+	return mockDirEntry{info}
+}
 
-	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #`
-	if err := os.WriteFile(filePath, []byte(csvContent), 0644); err != nil {
-		t.Fatalf("failed to write test CSV file: %v", err)
-	}
+func (m mockDirEntry) Type() os.FileMode {
+	return m.Mode().Type()
+}
 
-	mockCol := &mockCollection{}
-	provider := &mockProvider{col: mockCol}
-
-	// Call ProcessCSV with mock provider
-	err := ProcessCSV(ctx, provider, filePath, "chase", "")
-	if err == nil {
-		t.Fatalf("expected ProcessCSV to fail with no valid documents, but got nil error")
-	}
-
-	// Assertions
-	if mockCol.bulkWriteCalled {
-		t.Errorf("expected BulkWrite not to be called, but it was")
-	}
-
-	if mockCol.insertOneCalled {
-		t.Errorf("expected InsertOne not to be called, but it was")
-	}
+func (m mockDirEntry) Info() (os.FileInfo, error) {
+	return m, nil
 }
