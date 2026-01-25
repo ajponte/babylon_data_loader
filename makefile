@@ -1,7 +1,7 @@
 # Makefile
 
 # Export environment variables to be available in shell commands
-export MONGO_HOST ?= mongodb
+export MONGO_HOST ?= localhost
 export MONGO_USER ?= babylon
 export MONGO_PASSWORD ?= babylonpass
 
