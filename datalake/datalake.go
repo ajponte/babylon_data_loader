@@ -121,27 +121,42 @@ func IngestCSVFiles(
 	unprocessedDir string,
 	processedDir string,
 	moveProcessedFiles bool,
-) error {
+) (*Stats, error) {
 	logger := LoggerFromContext(ctx)
 	logger.InfoContext(ctx, "Reading data from sink", "sink", unprocessedDir)
 
 	files, err := os.ReadDir(unprocessedDir)
 	if err != nil {
-		return fmt.Errorf("failed to read directory: %w", err)
+		return nil, fmt.Errorf("failed to read directory: %w", err)
 	}
+
+	stats := NewStats()
+	stats.TotalFiles = len(files)
 
 	provider := &mongoProvider{client: client}
 	logger.InfoContext(ctx, "looping through files", "files", files)
 
 	for _, file := range files {
+		if file.IsDir() || (!strings.HasSuffix(file.Name(), ".csv") && !strings.HasSuffix(file.Name(), ".CSV")) {
+			reason := "Not a CSV file"
+			if file.IsDir() {
+				reason = "Is a directory"
+			}
+			stats.AddFailure(file.Name(), reason)
+			logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
+			continue
+		}
+
 		err = processFile(ctx, provider, file, unprocessedDir, processedDir, moveProcessedFiles)
 		if err != nil {
-			// Log the error and continue with the next file, or return the error if it's critical
+			stats.AddFailure(file.Name(), err.Error())
 			logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
+		} else {
+			stats.IncrementProcessed()
 		}
 	}
 
-	return nil
+	return stats, nil
 }
 
 func processFile(
@@ -152,13 +167,6 @@ func processFile(
 	processedDir string,
 	moveProcessedFiles bool,
 ) error {
-	logger := LoggerFromContext(ctx)
-
-	if !file.IsDir() && (strings.HasSuffix(file.Name(), ".csv") || strings.HasSuffix(file.Name(), ".CSV")) {
-		logger.WarnContext(ctx, "file was not processed", "fileName", file.Name())
-		return nil
-	}
-
 	externalDataSource, err := dataSource(file.Name())
 	if err != nil {
 		return fmt.Errorf("failed to retrieve data source: %w", err)

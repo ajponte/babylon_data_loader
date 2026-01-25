@@ -2,7 +2,7 @@
 package main
 
 import (
-	datalake "babylon/dataloader/datalake"
+	"babylon/dataloader/datalake"
 	"context"
 	"fmt"
 	"log/slog"
@@ -38,8 +38,7 @@ func main() {
 	}))
 
 	// Fix for noinlineerr: Separate the assignment and the error check.
-	err := run(logger)
-	if err != nil {
+	if err := run(logger); err != nil {
 		logger.Error("Application terminated with an error", "error", fmt.Sprintf("%+v", err))
 		os.Exit(1)
 	}
@@ -53,7 +52,57 @@ func run(logger *slog.Logger) error {
 	)
 	defer cancel()
 
-	// Fetch mongo uri from running environment.
+	cfg := loadConfig(logger)
+
+	logger.Debug("im here")
+
+	// Fix govet shadowing error. Use existing err variable.
+	if _, err := os.Stat(cfg.unprocessedDir); err != nil || os.IsNotExist(err) {
+		logger.Error(
+			"The directory does not exist. Please create it and place your CSV files inside.",
+			"dir", cfg.unprocessedDir,
+			"error", err,
+		)
+		// Fix wrapcheck error. Wrap the error before returning.
+		return fmt.Errorf("stat check for directory %s: %w", cfg.unprocessedDir, err)
+	}
+
+	// Fix govet shadowing error. Use existing err variable.
+	client, err := datalake.ConnectToMongoDB(ctx, cfg.mongoURI)
+	if err != nil {
+		logger.Error("Failed to connect to MongoDB", "error", err)
+		// Fix wrapcheck error. Wrap the error before returning.
+		return fmt.Errorf("connection to MongoDB failed: %w", err)
+	}
+
+	defer func() {
+		if deferErr := client.Disconnect(ctx); deferErr != nil {
+			logger.Error("Error disconnecting from MongoDB", "error", deferErr)
+		}
+	}()
+
+	logger.Info("Successfully connected to MongoDB.")
+
+	stats, err := datalake.IngestCSVFiles(ctx, client, cfg.unprocessedDir, cfg.processedDir, cfg.moveProcessedFiles)
+	if err != nil {
+		logger.Error("Error ingesting CSV files", "error", err)
+		return fmt.Errorf("ingestion of CSV files failed: %w", err)
+	}
+
+	logger.Info("Data ingestion process completed successfully.")
+	stats.Log(logger)
+
+	return nil
+}
+
+type config struct {
+	mongoURI           string
+	unprocessedDir     string
+	processedDir       string
+	moveProcessedFiles bool
+}
+
+func loadConfig(logger *slog.Logger) *config {
 	mongoURI := os.Getenv(envMongoURI)
 	mongoURI = formatMongoURI(mongoURI, logger)
 
@@ -104,50 +153,12 @@ func run(logger *slog.Logger) error {
 		logger.Debug("Using default value for moveProcessedFiles", "value", defaultMoveProcessedFiles)
 	}
 
-	logger.Debug("im here")
-	var err error
-
-	// Fix govet shadowing error. Use existing err variable.
-	_, err = os.Stat(unprocessedDir)
-	if err != nil || os.IsNotExist(err) {
-		logger.Error(
-			"The directory does not exist. Please create it and place your CSV files inside.",
-			"dir", unprocessedDir,
-			"error", err,
-		)
-		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("stat check for directory %s: %w", unprocessedDir, err)
+	return &config{
+		mongoURI:           mongoURI,
+		unprocessedDir:     unprocessedDir,
+		processedDir:       processedDir,
+		moveProcessedFiles: moveProcessedFiles,
 	}
-
-	// Fix govet shadowing error. Use existing err variable.
-	client, err := datalake.ConnectToMongoDB(ctx, mongoURI)
-	if err != nil {
-		logger.Error("Failed to connect to MongoDB", "error", err)
-		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("connection to MongoDB failed: %w", err)
-	}
-
-	defer func() {
-		var deferErr = client.Disconnect(ctx)
-		// Use a local err variable here to avoid shadowing the function-scoped err.
-		if deferErr != nil {
-			logger.Error("Error disconnecting from MongoDB", "error", err)
-		}
-	}()
-
-	logger.Info("Successfully connected to MongoDB.")
-
-	// Fix govet shadowing error. Use existing err variable.
-	err = datalake.IngestCSVFiles(ctx, client, unprocessedDir, processedDir, moveProcessedFiles)
-	if err != nil {
-		logger.Error("Error ingesting CSV files", "error", err)
-		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("ingestion of CSV files failed: %w", err)
-	}
-
-	logger.Info("Data ingestion process completed successfully.")
-
-	return nil
 }
 
 /**
