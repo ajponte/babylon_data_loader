@@ -1,3 +1,10 @@
+# Makefile
+
+# Export environment variables to be available in shell commands
+export MONGO_HOST ?= mongodb
+export MONGO_USER ?= babylon
+export MONGO_PASSWORD ?= babylonpass
+
 export GO111MODULE=on
 # update app name. this is the name of binary
 APP=data-loader

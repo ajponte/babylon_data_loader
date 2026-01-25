@@ -1,4 +1,3 @@
-// Package datalake holds methods for pushing new records to the Babylon data lake.
 package datalake
 
 import (
@@ -116,49 +115,70 @@ func (p *mongoProvider) Collection(name string) dataStore {
 // ---- Core Logic ----
 
 // IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
-func IngestCSVFiles(ctx context.Context, client *mongo.Client, unprocessedDir, processedDir string, moveProcessedFiles bool) error {
-	// Retrieve the logger from the context at the start of the function.
+func IngestCSVFiles(
+	ctx context.Context,
+	client *mongo.Client,
+	unprocessedDir string,
+	processedDir string,
+	moveProcessedFiles bool,
+) error {
 	logger := LoggerFromContext(ctx)
 	logger.InfoContext(ctx, "Reading data from sink", "sink", unprocessedDir)
+
 	files, err := os.ReadDir(unprocessedDir)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
 	}
 
 	provider := &mongoProvider{client: client}
-
 	logger.InfoContext(ctx, "looping through files", "files", files)
+
 	for _, file := range files {
-		if !file.IsDir() && (strings.HasSuffix(file.Name(), ".csv") || strings.HasSuffix(file.Name(), ".CSV")) {
-			//nolint:govet // We want to stay in the file.
-			externalDataSource, err := dataSource(file.Name())
-			if err != nil {
-				return fmt.Errorf("failed to retrieve data source: %w", err)
-			}
+		err = processFile(ctx, provider, file, unprocessedDir, processedDir, moveProcessedFiles)
+		if err != nil {
+			// Log the error and continue with the next file, or return the error if it's critical
+			logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
+		}
+	}
 
-			// Sanitize the file name to prevent directory traversal attacks
-			cleanFileName := filepath.Clean(file.Name())
+	return nil
+}
 
-			// Optional: Ensure the path is not attempting to go up the directory tree
-			if strings.HasPrefix(cleanFileName, "../") {
-				return ValidFileNotFoundError(file.Name())
-			}
+func processFile(
+	ctx context.Context,
+	provider collectionProvider,
+	file os.DirEntry,
+	unprocessedDir string,
+	processedDir string,
+	moveProcessedFiles bool,
+) error {
+	logger := LoggerFromContext(ctx)
 
-			filePath := filepath.Join(unprocessedDir, cleanFileName)
+	if !file.IsDir() && (strings.HasSuffix(file.Name(), ".csv") || strings.HasSuffix(file.Name(), ".CSV")) {
+		logger.WarnContext(ctx, "file was not processed", "fileName", file.Name())
+		return nil
+	}
 
-			err = ProcessCSV(ctx, provider, filePath, externalDataSource, processedDir)
-			if err != nil {
-				return err // Directly return the error from ProcessCSV
-			}
+	externalDataSource, err := dataSource(file.Name())
+	if err != nil {
+		return fmt.Errorf("failed to retrieve data source: %w", err)
+	}
 
-			if moveProcessedFiles {
-				err = moveFile(filePath, processedDir)
-				if err != nil {
-					return fmt.Errorf("failed to move file: %w", err)
-				}
-			}
-		} else {
-			logger.WarnContext(ctx, "file was not processed", "fileName", file.Name())
+	cleanFileName := filepath.Clean(file.Name())
+	if strings.HasPrefix(cleanFileName, "../") {
+		return ValidFileNotFoundError(file.Name())
+	}
+
+	filePath := filepath.Join(unprocessedDir, cleanFileName)
+	err = ProcessCSV(ctx, provider, filePath, externalDataSource, processedDir)
+	if err != nil {
+		return err
+	}
+
+	if moveProcessedFiles {
+		err = moveFile(filePath, processedDir)
+		if err != nil {
+			return fmt.Errorf("failed to move file: %w", err)
 		}
 	}
 
@@ -168,7 +188,12 @@ func IngestCSVFiles(ctx context.Context, client *mongo.Client, unprocessedDir, p
 // ProcessCSV reads a CSV file from a given path and uploads the data to MongoDB.
 //
 //nolint:funlen // refactor this later
-func ProcessCSV(ctx context.Context, provider collectionProvider, filePath string, dataSource string, processedDir string) error {
+func ProcessCSV(
+	ctx context.Context,
+	provider collectionProvider,
+	filePath string,
+	dataSource string,
+	_ string) error {
 	// Retrieve the logger from the context at the start of the function.
 	logger := LoggerFromContext(ctx)
 	logger.InfoContext(
@@ -313,6 +338,9 @@ func safeGet(slice []string, index int) string {
 
 // ConnectToMongoDB establishes a connection to MongoDB.
 func ConnectToMongoDB(ctx context.Context, uri string) (*mongo.Client, error) {
+	logger := LoggerFromContext(ctx)
+	logger.DebugContext(ctx, "Attempting to connect to MongoDB", "uri", uri)
+
 	clientOptions := options.Client().ApplyURI(uri)
 
 	client, err := mongo.Connect(ctx, clientOptions)
@@ -337,8 +365,9 @@ func dataSource(fileName string) (string, error) {
 }
 
 func moveFile(filePath, processedDir string) error {
-	if _, err := os.Stat(processedDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(processedDir, 0755); err != nil {
+	var err error
+	if _, err = os.Stat(processedDir); os.IsNotExist(err) {
+		if err = os.MkdirAll(processedDir, 0750); err != nil {
 			return fmt.Errorf("failed to create processed directory '%s': %w", processedDir, err)
 		}
 	}
@@ -346,7 +375,7 @@ func moveFile(filePath, processedDir string) error {
 	fileName := filepath.Base(filePath)
 	newPath := filepath.Join(processedDir, fileName)
 
-	if err := os.Rename(filePath, newPath); err != nil {
+	if err = os.Rename(filePath, newPath); err != nil {
 		return fmt.Errorf("failed to move file from '%s' to '%s': %w", filePath, newPath, err)
 	}
 

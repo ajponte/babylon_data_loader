@@ -64,7 +64,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	provider := &mockProvider{col: mockCol}
 
 	// Call ProcessCSV with mock provider
-	if err := ProcessCSV(ctx, provider, filePath, "chase"); err != nil {
+	if err := ProcessCSV(ctx, provider, filePath, "chase", ""); err != nil {
 		t.Fatalf("ProcessCSV failed: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestProcessCSV_NoValidRecords(t *testing.T) {
 	provider := &mockProvider{col: mockCol}
 
 	// Call ProcessCSV with mock provider
-	err := ProcessCSV(ctx, provider, filePath, "chase")
+	err := ProcessCSV(ctx, provider, filePath, "chase", "")
 	if err == nil {
 		t.Fatalf("expected ProcessCSV to fail with no valid documents, but got nil error")
 	}

@@ -6,44 +6,36 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"time"
 )
 
 const (
-
-	defaultTimeoutSeconds   = 30
-
-	defaultMongoURI         = "mongodb://localhost:27017/datalake"
-
-	defaultCSVDir           = "./data"
-
-	defaultProcessedDir     = "processed"
-
-	defaultUnprocessedDir   = "unprocessed"
-
+	defaultTimeoutSeconds     = 30
+	defaultMongoURI           = "mongodb://localhost:27017/datalake"
+	defaultMongoHost          = "localhost"
+	defaultMongoPort          = "27017"
+	defaultCSVDir             = "./data"
+	defaultProcessedDir       = "processed"
+	defaultUnprocessedDir     = "unprocessed"
 	defaultMoveProcessedFiles = false
-
-	envMongoURI             = "MONGO_URI"
-
-	envCSVDirectory         = "CSV_DIR"
-
-	envProcessedDirectory   = "PROCESSED_DIR"
-
-	envUnprocessedDirectory = "UNPROCESSED_DIR"
-
-		envMoveProcessedFiles   = "MOVE_PROCESSED_FILES"
-
-		envMongoUser            = "MONGO_USER"
-
-		envMongoPassword        = "MONGO_PASSWORD"
-
-	)
+	envMongoURI               = "MONGO_URI"
+	envMongoHost              = "MONGO_HOST"
+	envCSVDirectory           = "CSV_DIR"
+	envProcessedDirectory     = "PROCESSED_DIR"
+	envUnprocessedDirectory   = "UNPROCESSED_DIR"
+	envMoveProcessedFiles     = "MOVE_PROCESSED_FILES"
+	envMongoUser              = "MONGO_USER"
+	envMongoPassword          = "MONGO_PASSWORD"
+)
 
 func main() {
 	// Create the logger instance at the very beginning.
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
 
 	// Fix for noinlineerr: Separate the assignment and the error check.
 	err := run(logger)
@@ -61,55 +53,37 @@ func run(logger *slog.Logger) error {
 	)
 	defer cancel()
 
+	// Fetch mongo uri from running environment.
 	mongoURI := os.Getenv(envMongoURI)
-	mongoUser := os.Getenv(envMongoUser)
-	mongoPassword := os.Getenv(envMongoPassword)
-
-	if mongoURI == "" {
-		if mongoUser != "" && mongoPassword != "" {
-			mongoURI = fmt.Sprintf("mongodb://%s:%s@localhost:27017/datalake?authSource=admin", mongoUser, mongoPassword)
-		} else {
-			mongoURI = defaultMongoURI
-			logger.Info(
-				"MongoDB URI not found in environment variable, using default",
-				"env_var", envMongoURI,
-				"uri", mongoURI, // Log the actual URI being used
-			)
-		}
-	}
+	mongoURI = formatMongoURI(mongoURI, logger)
 
 	csvDirectory := os.Getenv(envCSVDirectory)
 	if csvDirectory == "" {
 		csvDirectory = defaultCSVDir
-		logger.Info(
-			"CSV directory not found in environment variable, using default",
-			"env_var", envCSVDirectory,
-			"dir", defaultCSVDir,
-		)
+		logger.Debug("Using default CSV directory", "dir", csvDirectory)
+	} else {
+		logger.Debug("Using CSV directory from environment variable", "dir", csvDirectory)
 	}
 
 	unprocessedDirName := os.Getenv(envUnprocessedDirectory)
 	if unprocessedDirName == "" {
 		unprocessedDirName = defaultUnprocessedDir
-		logger.Info(
-			"Unprocessed directory not found in environment variable, using default",
-			"env_var", envUnprocessedDirectory,
-			"dir", defaultUnprocessedDir,
-		)
+		logger.Debug("Using default unprocessed directory name", "dir", unprocessedDirName)
+	} else {
+		logger.Debug("Using unprocessed directory name from environment variable", "dir", unprocessedDirName)
 	}
 
 	processedDirName := os.Getenv(envProcessedDirectory)
 	if processedDirName == "" {
 		processedDirName = defaultProcessedDir
-		logger.Info(
-			"Processed directory not found in environment variable, using default",
-			"env_var", envProcessedDirectory,
-			"dir", defaultProcessedDir,
-		)
+		logger.Debug("Using default processed directory name", "dir", processedDirName)
+	} else {
+		logger.Debug("Using processed directory name from environment variable", "dir", processedDirName)
 	}
 
 	unprocessedDir := fmt.Sprintf("%s/%s", csvDirectory, unprocessedDirName)
 	processedDir := fmt.Sprintf("%s/%s", csvDirectory, processedDirName)
+	logger.Debug("Constructed directory paths", "unprocessed", unprocessedDir, "processed", processedDir)
 
 	moveProcessedFilesStr := os.Getenv(envMoveProcessedFiles)
 	moveProcessedFiles := defaultMoveProcessedFiles
@@ -117,16 +91,20 @@ func run(logger *slog.Logger) error {
 		parsedBool, err := strconv.ParseBool(moveProcessedFilesStr)
 		if err != nil {
 			logger.Warn(
-				"Invalid value for MOVE_PROCESSED_FILES environment variable, using default",
-				"env_var", envMoveProcessedFiles,
+				"Invalid value for MOVE_PROCESSED_FILES, using default",
 				"value", moveProcessedFilesStr,
+				"default", defaultMoveProcessedFiles,
 				"error", err,
 			)
 		} else {
 			moveProcessedFiles = parsedBool
+			logger.Debug("Set moveProcessedFiles from environment variable", "value", moveProcessedFiles)
 		}
+	} else {
+		logger.Debug("Using default value for moveProcessedFiles", "value", defaultMoveProcessedFiles)
 	}
 
+	logger.Debug("im here")
 	var err error
 
 	// Fix govet shadowing error. Use existing err variable.
@@ -170,4 +148,43 @@ func run(logger *slog.Logger) error {
 	logger.Info("Data ingestion process completed successfully.")
 
 	return nil
+}
+
+/**
+ * Format mongo settings to a url and return the result.
+ */
+func formatMongoURI(
+	mongoURI string,
+	logger *slog.Logger,
+) string {
+	if mongoURI != "" {
+		logger.Debug("Using MongoDB URI from environment variable", "uri", mongoURI)
+		return mongoURI
+	}
+
+	mongoHost := os.Getenv(envMongoHost)
+	if mongoHost == "" {
+		mongoHost = defaultMongoHost
+		logger.Debug("Using default MongoDB host", "host", mongoHost)
+	} else {
+		logger.Debug("Using MongoDB host from environment variable", "host", mongoHost)
+	}
+
+	mongoUser := os.Getenv(envMongoUser)
+	mongoPassword := os.Getenv(envMongoPassword)
+
+	if mongoUser != "" && mongoPassword != "" {
+		hostPort := net.JoinHostPort(mongoHost, defaultMongoPort)
+		mongoURI = fmt.Sprintf(
+			"mongodb://%s:%s@%s/datalake?authSource=admin",
+			mongoUser,
+			mongoPassword,
+			hostPort,
+		)
+		logger.Debug("Created MongoDB URI from user, password, and host", "uri", mongoURI)
+	} else {
+		mongoURI = defaultMongoURI
+		logger.Debug("Using default MongoDB URI", "uri", mongoURI)
+	}
+	return mongoURI
 }
