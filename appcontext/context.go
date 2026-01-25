@@ -1,5 +1,5 @@
-// Package datalake holds methods for pushing new records to the Babylon data lake.
-package datalake
+// Package appcontext holds methods for pushing new records to the Babylon data lake.
+package appcontext
 
 import (
 	"context"

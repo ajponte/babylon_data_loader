@@ -1,3 +1,10 @@
+# Makefile
+
+# Export environment variables to be available in shell commands
+export MONGO_HOST ?= localhost
+export MONGO_USER ?= babylon
+export MONGO_PASSWORD ?= babylonpass
+
 export GO111MODULE=on
 # update app name. this is the name of binary
 APP=data-loader
@@ -55,7 +62,6 @@ build: ## build the go application
 	@echo "Build passed"
 
 run: ## runs the go binary. use additional options if required.
-	@set -a && source .env && set +a && \
 	make build && \
 	chmod +x $(APP_EXECUTABLE) && \
 	$(APP_EXECUTABLE)
