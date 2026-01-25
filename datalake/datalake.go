@@ -8,12 +8,18 @@ import (
 	"strings"
 	"time"
 
-	bcontext "babylon/dataloader/context"
+	bcontext "babylon/dataloader/appcontext"
 	"babylon/dataloader/csv"
 	"babylon/dataloader/storage"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	dbName        = "datalake"
+	syncTableName = "dataSync" // Moved from csv.go
 )
 
 // IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
@@ -113,7 +119,7 @@ func processFile(
 		"collectionName", collectionName,
 	)
 
-	syncCollection := provider.Collection("dataSync")
+	syncCollection := provider.Collection(syncTableName)
 	syncLog := csv.SyncLog{
 		CollectionName:  collectionName,
 		SyncTimestamp:   time.Now(),

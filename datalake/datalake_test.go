@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"babylon/dataloader/storage"
+
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -73,8 +74,8 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	dirEntry := newMockDirEntry(fileInfo)
 
 	// Call processFile with mock provider
-	if err := processFile(ctx, provider, dirEntry, tmpDir, "", false); err != nil {
-		t.Fatalf("processFile failed: %v", err)
+	if processErr := processFile(ctx, provider, dirEntry, tmpDir, "", false); processErr != nil {
+		t.Fatalf("processFile failed: %v", processErr)
 	}
 
 	// Assertions

@@ -34,7 +34,7 @@ CREDIT,01/02/2024,"ONLINE PAYMENT THANK YOU",1000.00,PAYMENT,10114.36,`
 	if len(data) != 2 {
 		t.Errorf("Expected 2 documents, got %d", len(data))
 	}
-	if collectionName != "chase-data-2024-01-01" { 
+	if collectionName != "chase-data-2024-01-01" {
 		t.Errorf("Expected collection name 'chase-data-2024-01-01', got '%s'", collectionName)
 	}
 	if recordsProcessed != 2 {
@@ -95,7 +95,7 @@ DEBIT,InvalidDate,Test,-75.77,DEBIT_CARD,11190.76,`
 	dataSource := "chase"
 
 	data, _, _, err := ParseCSV(ctx, filePath, dataSource)
-	if err != nil { 
+	if err != nil {
 		t.Fatalf("ParseCSV failed: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestParseCSV_EmptyFile(t *testing.T) {
 	dataSource := "chase"
 
 	_, _, _, err := ParseCSV(ctx, filePath, dataSource)
-	if err != nil { 
+	if err != nil {
 		t.Fatalf("Expected ParseCSV to succeed for empty file, but got error: %v", err)
 	}
 }

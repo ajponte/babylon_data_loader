@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	bcontext "babylon/dataloader/context"
+	bcontext "babylon/dataloader/appcontext"
 )
 
 // Data represents a single row from the CSV file.
@@ -31,10 +31,6 @@ type SyncLog struct {
 	RecordsUploaded int64     `bson:"records_uploaded"`
 }
 
-const (
-	syncTableName = "dataSync"
-)
-
 var errTargetFileNotFound = errors.New("the valid target file was found")
 var errInvalidDataSource = errors.New("data source is not valid")
 var errProcessCsv = errors.New("error while parsing CSV file")
@@ -53,7 +49,7 @@ func ProcessCsvError(filename string) error {
 
 // ParseCSV reads a CSV file from a given path and returns the data.
 //
-//nolint:funlen // refactor this later
+//nolint:gocognit,funlen
 func ParseCSV(
 	ctx context.Context,
 	filePath string,
@@ -82,7 +78,7 @@ func ParseCSV(
 	if err != nil {
 		// If there's an error reading the header, it could be an empty file.
 		// Return nil documents and nil error if EOF, otherwise return the error.
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil, "", 0, nil
 		}
 		return nil, "", 0, fmt.Errorf("failed to read CSV header from file %s: %w", filePath, err)
@@ -97,15 +93,12 @@ func ParseCSV(
 
 	for {
 		logger.DebugContext(ctx, "Reading new record from CSV")
-		//nolint:govet // We want to stay in the file.
-		record, err := reader.Read()
-		//nolint:errorlint // We want to continue if we've reached to the end of a file.
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return nil, "", 0, fmt.Errorf("failed to read record from CSV in file %s: %w", filePath, err)
+		record, readErr := reader.Read() // Renamed err to readErr
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, "", 0, fmt.Errorf("failed to read record from CSV in file %s: %w", filePath, readErr)
 		}
 
 		if len(record) < maxColumns {
@@ -116,26 +109,37 @@ func ParseCSV(
 
 		postingDateStr := record[1]
 
-		parsedDate, err := time.Parse("01/02/2006", postingDateStr)
-		if err != nil {
-			logger.WarnContext(ctx, "skipping record with invalid date format '%s': %v", postingDateStr, err)
+		parsedDate, parseErr := time.Parse("01/02/2006", postingDateStr) // Renamed err to parseErr
+		if parseErr != nil {
+			logger.WarnContext(ctx, "skipping record with invalid date format '%s': %v", postingDateStr, parseErr)
 
 			continue
 		}
-		
+
 		currentCollectionName := fmt.Sprintf("%s-data-%s", dataSource, parsedDate.Format("2006-01-02"))
 		if finalCollectionName == "" {
 			finalCollectionName = currentCollectionName
 		}
 
-
-		amount, _ := strconv.ParseFloat(record[3], 64)
+		amount, convErr := strconv.ParseFloat(record[3], 64) // Renamed _ to convErr
+		if convErr != nil {
+			logger.WarnContext(ctx, "skipping record with invalid amount format '%s': %v", record[3], convErr)
+			continue
+		}
 
 		var minRecords = 5
 
 		balance := 0.0
 		if len(record) > minRecords {
-			balance, _ = strconv.ParseFloat(record[5], 64)
+			parsedBalance, balanceConvErr := strconv.ParseFloat(record[5], 64) // Renamed convErr to balanceConvErr
+			if balanceConvErr != nil {
+				logger.WarnContext(
+					ctx, "skipping record with invalid balance format '%s': %v",
+					record[5], balanceConvErr,
+				)
+				continue
+			}
+			balance = parsedBalance // Assign parsedBalance to balance
 		}
 
 		var typeColumnPos = 4
