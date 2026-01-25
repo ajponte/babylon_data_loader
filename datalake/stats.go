@@ -1,16 +1,16 @@
 package datalake
 
 import (
-	"fmt"
+	"encoding/json"
 	"log/slog"
 )
 
 // Stats holds statistics about the file processing.
 type Stats struct {
-	TotalFiles     int
-	ProcessedFiles int
-	FailedFiles    int
-	Failures       map[string]string
+	TotalFiles     int               `json:"totalFiles"`
+	ProcessedFiles int               `json:"processedFiles"`
+	FailedFiles    int               `json:"failedFiles"`
+	Failures       map[string]string `json:"failures"`
 }
 
 // NewStats creates and initializes a new Stats object.
@@ -31,17 +31,14 @@ func (s *Stats) IncrementProcessed() {
 	s.ProcessedFiles++
 }
 
-// Log prints the final statistics to the provided logger.
+// Log prints the final statistics to the provided logger in JSON format.
 func (s *Stats) Log(logger *slog.Logger) {
-	logger.Info("--- Ingestion Stats ---")
-	logger.Info(fmt.Sprintf("Total files found: %d", s.TotalFiles))
-	logger.Info(fmt.Sprintf("Files processed: %d", s.ProcessedFiles))
-	logger.Info(fmt.Sprintf("Files failed/skipped: %d", s.FailedFiles))
-	if s.FailedFiles > 0 {
-		logger.Info("Failed files:")
-		for file, reason := range s.Failures {
-			logger.Info(fmt.Sprintf("- %s: %s", file, reason))
-		}
+	jsonData, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		logger.Error("Failed to marshal stats to JSON", "error", err)
+		return
 	}
-	logger.Info("-----------------------")
+	logger.Info("--- Ingestion Stats (JSON) ---")
+	logger.Info(string(jsonData))
+	logger.Info("------------------------------")
 }
