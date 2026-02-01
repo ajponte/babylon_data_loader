@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -76,7 +77,7 @@ func processFile(
 	moveProcessedFiles bool,
 ) error {
 	logger := bcontext.LoggerFromContext(ctx)
-	externalDataSource, err := dataSource(file.Name())
+	dataSource, accountID, err := parseFileNameForSource(file.Name())
 	if err != nil {
 		return fmt.Errorf("failed to retrieve data source: %w", err)
 	}
@@ -87,18 +88,26 @@ func processFile(
 	}
 
 	filePath := filepath.Join(unprocessedDir, cleanFileName)
-	documents, collectionName, recordsProcessed, err := csv.ParseCSV(ctx, filePath, externalDataSource)
+	documents, _, recordsProcessed, err := csv.ParseCSV(ctx, filePath, dataSource, accountID)
 	if err != nil {
 		return err
 	}
 
 	var models []mongo.WriteModel
 	for _, doc := range documents {
-		filter := bson.M{"Details": doc.Details, "PostingDate": doc.PostingDate, "Description": doc.Description}
+		// Use dataSource and accountID in the filter for uniqueness
+		filter := bson.M{
+			"Details":     doc.Details,
+			"PostingDate": doc.PostingDate,
+			"Description": doc.Description,
+			"dataSource":  doc.DataSource,
+			"accountID":   doc.AccountID,
+		}
 		update := bson.M{"$set": doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 
+	collectionName := "transactions" // Hardcode collection name to "transactions"
 	collection := provider.Collection(collectionName)
 
 	logger.InfoContext(
@@ -141,15 +150,24 @@ func processFile(
 	return nil
 }
 
-func dataSource(fileName string) (string, error) {
-	if strings.Contains(strings.ToLower(fileName), "chase") {
-		return "chase", nil
-	}
-	if strings.Contains(strings.ToLower(fileName), "test") {
-		return "test", nil
+// parseFileNameForSource extracts the data source and account ID from the filename.
+func parseFileNameForSource(fileName string) (string, string, error) {
+	lowerFileName := strings.ToLower(fileName)
+
+	// Regex to match "chase" and then a 4-digit number
+	re := regexp.MustCompile(`chase(\d{4})`)
+	matches := re.FindStringSubmatch(lowerFileName)
+
+	if len(matches) > 1 {
+		return "chase", matches[1], nil
 	}
 
-	return "", csv.DataSourceParseError(fileName)
+	// Fallback for generic "test" data source without account ID
+	if strings.Contains(lowerFileName, "test") {
+		return "test", "0000", nil // Assign a default account ID for test files
+	}
+
+	return "", "", fmt.Errorf("could not parse data source and account ID from filename: %s", fileName)
 }
 
 func moveFile(filePath, processedDir string) error {

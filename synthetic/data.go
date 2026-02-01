@@ -15,19 +15,26 @@ import (
 )
 
 const (
-	maxAmount  = 1000
+	// Max amount for random account ID generation.
+	maxAmount = 1000
+	// Max balance for random account ID generation.
 	maxBalance = 10000
+	// Max value for random account ID generation.
+	maxAccountID = 10000
 )
 
 // Data represents a single row from the CSV file.
 type Data struct {
-	Details        string
-	PostingDate    string
-	Description    string
-	Amount         float64
-	Type           string
-	Balance        float64
-	CheckOrSlipNum string
+	Details        string  `bson:"Details"`
+	PostingDate    string  `bson:"PostingDate"`
+	Description    string  `bson:"Description"`
+	Amount         float64 `bson:"Amount"`
+	Category       string  `bson:"category"`   // New field
+	Type           string  `bson:"Type"`
+	Balance        float64 `bson:"Balance"`
+	CheckOrSlipNum string  `bson:"CheckOrSlipNum"`
+	DataSource     string  `bson:"dataSource"` // New field
+	AccountID      string  `bson:"accountID"`  // New field
 }
 
 // GenerateSyntheticDocuments generates a slice of synthetic data documents.
@@ -38,14 +45,19 @@ func GenerateSyntheticDocuments(rows int) []Data {
 		amount := rand.Float64() * maxAmount
 		//nolint:gosec // G404: Use of weak random number generator is acceptable for non-sensitive test data.
 		balance := rand.Float64() * maxBalance
+		//nolint:gosec // G404: Use of weak random number generator is acceptable for non-sensitive test data.
+		accountID := fmt.Sprintf("%04d", rand.IntN(maxAccountID)) // Random 4-digit account ID
 		documents[i] = Data{
 			Details:        "SALE",
 			PostingDate:    time.Now().Format("01/02/2006"),
 			Description:    fmt.Sprintf("Synthetic transaction %d", i),
 			Amount:         amount,
+			Category:       "synthetic",
 			Type:           "DEBIT",
 			Balance:        balance,
 			CheckOrSlipNum: "",
+			DataSource:     "synthetic",
+			AccountID:      accountID,
 		}
 	}
 	return documents
@@ -113,7 +125,7 @@ func GenerateSyntheticData(rows int, dir string) error {
 	defer writer.Flush()
 
 	// Write header
-	header := []string{"Details", "Posting Date", "Description", "Amount", "Type", "Balance", "Check or Slip #"}
+	header := []string{"Details", "Posting Date", "Description", "Category", "Amount", "Type", "Balance", "Check or Slip #"}
 	if err = writer.Write(header); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
@@ -125,6 +137,7 @@ func GenerateSyntheticData(rows int, dir string) error {
 			record.Details,
 			record.PostingDate,
 			record.Description,
+			record.Category,
 			fmt.Sprintf("%.2f", record.Amount),
 			record.Type,
 			fmt.Sprintf("%.2f", record.Balance),
