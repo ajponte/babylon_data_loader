@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -13,6 +14,7 @@ import (
 	bcontext "babylon/dataloader/appcontext"
 	"babylon/dataloader/datalake"
 	"babylon/dataloader/storage"
+	"babylon/dataloader/synthetic"
 )
 
 const (
@@ -24,6 +26,8 @@ const (
 	defaultProcessedDir       = "processed"
 	defaultUnprocessedDir     = "unprocessed"
 	defaultMoveProcessedFiles = false
+	defaultSyntheticDataDir   = "tmp/synthetic"
+	defaultSyntheticDataRows  = 100
 	envMongoURI               = "MONGO_URI"
 	envMongoHost              = "MONGO_HOST"
 	envCSVDirectory           = "CSV_DIR"
@@ -40,14 +44,22 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 
+	if len(os.Args) < 2 {
+		logger.Error("Usage: go run main.go <command> [options]")
+		os.Exit(1)
+	}
+
+	command := os.Args[1]
+	args := os.Args[2:]
+
 	// Fix for noinlineerr: Separate the assignment and the error check.
-	if err := run(logger); err != nil {
+	if err := run(logger, command, args); err != nil {
 		logger.Error("Application terminated with an error", "error", fmt.Sprintf("%+v", err))
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+func run(logger *slog.Logger, command string, args []string) error {
 	logger.Info("Begin running data loading")
 	ctx, cancel := context.WithTimeout(
 		bcontext.WithLogger(context.Background(), logger),
@@ -55,47 +67,65 @@ func run(logger *slog.Logger) error {
 	)
 	defer cancel()
 
-	cfg := loadConfig(logger)
+	switch command {
+	case "generate-synthetic-data":
+		genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
+		rows := genFlagSet.Int("rows", defaultSyntheticDataRows, "Number of rows to generate")
+		dir := genFlagSet.String("dir", defaultSyntheticDataDir, "Directory to write synthetic data to")
+		genFlagSet.Parse(args)
 
-	logger.Debug("im here")
-
-	// Fix govet shadowing error. Use existing err variable.
-	if _, err := os.Stat(cfg.unprocessedDir); err != nil || os.IsNotExist(err) {
-		logger.Error(
-			"The directory does not exist. Please create it and place your CSV files inside.",
-			"dir", cfg.unprocessedDir,
-			"error", err,
-		)
-		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("stat check for directory %s: %w", cfg.unprocessedDir, err)
-	}
-
-	// Fix govet shadowing error. Use existing err variable.
-	client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
-	if err != nil {
-		logger.Error("Failed to connect to MongoDB", "error", err)
-		// Fix wrapcheck error. Wrap the error before returning.
-		return fmt.Errorf("connection to MongoDB failed: %w", err)
-	}
-
-	defer func() {
-		if deferErr := client.Disconnect(ctx); deferErr != nil {
-			logger.Error("Error disconnecting from MongoDB", "error", deferErr)
+		logger.Info("Generating synthetic data")
+		err := synthetic.GenerateSyntheticData(*rows, *dir)
+		if err != nil {
+			return fmt.Errorf("failed to generate synthetic data: %w", err)
 		}
-	}()
+		logger.Info("Synthetic data generated successfully")
+		return nil
+	case "ingest":
+		cfg := loadConfig(logger)
 
-	logger.Info("Successfully connected to MongoDB.")
+		logger.Debug("im here")
 
-	stats, err := datalake.IngestCSVFiles(ctx, client, cfg.unprocessedDir, cfg.processedDir, cfg.moveProcessedFiles)
-	if err != nil {
-		logger.Error("Error ingesting CSV files", "error", err)
-		return fmt.Errorf("ingestion of CSV files failed: %w", err)
+		// Fix govet shadowing error. Use existing err variable.
+		if _, err := os.Stat(cfg.unprocessedDir); err != nil || os.IsNotExist(err) {
+			logger.Error(
+				"The directory does not exist. Please create it and place your CSV files inside.",
+				"dir", cfg.unprocessedDir,
+				"error", err,
+			)
+			// Fix wrapcheck error. Wrap the error before returning.
+			return fmt.Errorf("stat check for directory %s: %w", cfg.unprocessedDir, err)
+		}
+
+		// Fix govet shadowing error. Use existing err variable.
+		client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
+		if err != nil {
+			logger.Error("Failed to connect to MongoDB", "error", err)
+			// Fix wrapcheck error. Wrap the error before returning.
+			return fmt.Errorf("connection to MongoDB failed: %w", err)
+		}
+
+		defer func() {
+			if deferErr := client.Disconnect(ctx); deferErr != nil {
+				logger.Error("Error disconnecting from MongoDB", "error", deferErr)
+			}
+		}()
+
+		logger.Info("Successfully connected to MongoDB.")
+
+		stats, err := datalake.IngestCSVFiles(ctx, client, cfg.unprocessedDir, cfg.processedDir, cfg.moveProcessedFiles)
+		if err != nil {
+			logger.Error("Error ingesting CSV files", "error", err)
+			return fmt.Errorf("ingestion of CSV files failed: %w", err)
+		}
+
+		logger.Info("Data ingestion process completed successfully.")
+		stats.Log(logger)
+
+		return nil
+	default:
+		return fmt.Errorf("unknown command: %s", command)
 	}
-
-	logger.Info("Data ingestion process completed successfully.")
-	stats.Log(logger)
-
-	return nil
 }
 
 type config struct {
