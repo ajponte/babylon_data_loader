@@ -87,8 +87,8 @@ func GenerateAndPersistSyntheticData(
 	rows int,
 ) error {
 	logger := bcontext.LoggerFromContext(ctx)
-	logger.InfoContext(ctx, "Generating and persisting synthetic data to MongoDB", "collection", collectionName, "rows", rows)
-
+	logger.InfoContext(ctx, "Generating and persisting synthetic data to MongoDB",
+		"collection", collectionName, "rows", rows)
 	documents := GenerateSyntheticDocuments(rows)
 	return PersistSyntheticData(ctx, client, collectionName, documents)
 }

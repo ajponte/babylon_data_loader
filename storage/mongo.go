@@ -97,6 +97,7 @@ func ConnectToMongoDB(ctx context.Context, uri string) (*mongo.Client, error) {
 		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
+	logger.InfoContext(ctx, "Successfully established connection to MongoDB")
 	return client, nil
 }
 

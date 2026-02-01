@@ -44,9 +44,10 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
+	ctx := context.Background()
 
 	if len(os.Args) < minArgs {
-		logger.Error("Usage: go run main.go <command> [options]")
+		logger.ErrorContext(ctx, "Usage: go run main.go <command> [options]")
 		os.Exit(1)
 	}
 
@@ -55,101 +56,110 @@ func main() {
 
 	// Fix for noinlineerr: Separate the assignment and the error check.
 	if err := run(logger, command, args); err != nil {
-		logger.Error("Application terminated with an error", "error", fmt.Sprintf("%+v", err))
+		logger.ErrorContext(ctx, "Application terminated with an error", "error", fmt.Sprintf("%+v", err))
 		os.Exit(1)
 	}
 }
 
 func run(logger *slog.Logger, command string, args []string) error {
-	logger.Info("Begin running data loading")
 	ctx, cancel := context.WithTimeout(
 		bcontext.WithLogger(context.Background(), logger),
 		defaultTimeoutSeconds*time.Second,
 	)
 	defer cancel()
+	logger.InfoContext(ctx, "Begin running data loading")
 
 	switch command {
 	case "generate-synthetic-data":
-		genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
-		rows := genFlagSet.Int("rows", defaultSyntheticDataRows, "Number of rows to generate")
-		dir := genFlagSet.String("dir", defaultSyntheticDataDir, "Directory to write synthetic data to")
-		persistToMongo := genFlagSet.Bool("persist-to-mongo", false, "Persist synthetic data to MongoDB")
-		if err := genFlagSet.Parse(args); err != nil {
-			return fmt.Errorf("failed to parse flags: %w", err)
-		}
-
-		if *persistToMongo {
-			cfg := loadConfig(logger)
-			client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
-			if err != nil {
-				return fmt.Errorf("failed to connect to MongoDB: %w", err)
-			}
-			defer func() {
-				if deferErr := client.Disconnect(ctx); deferErr != nil {
-					logger.Error("Error disconnecting from MongoDB", "error", deferErr)
-				}
-			}()
-
-			err = synthetic.GenerateAndPersistSyntheticData(ctx, client, "synthetic-ingest", *rows)
-			if err != nil {
-				return fmt.Errorf("failed to generate and persist synthetic data: %w", err)
-			}
-			logger.Info("Synthetic data generated and persisted successfully")
-			return nil
-		}
-
-		logger.Info("Generating synthetic data")
-		err := synthetic.GenerateSyntheticData(*rows, *dir)
-		if err != nil {
-			return fmt.Errorf("failed to generate synthetic data: %w", err)
-		}
-		logger.Info("Synthetic data generated successfully")
-		return nil
+		return runGenerateSyntheticData(ctx, logger, args)
 	case "ingest":
-		cfg := loadConfig(logger)
-
-		logger.Debug("im here")
-
-		// Fix govet shadowing error. Use existing err variable.
-		if _, err := os.Stat(cfg.unprocessedDir); err != nil || os.IsNotExist(err) {
-			logger.Error(
-				"The directory does not exist. Please create it and place your CSV files inside.",
-				"dir", cfg.unprocessedDir,
-				"error", err,
-			)
-			// Fix wrapcheck error. Wrap the error before returning.
-			return fmt.Errorf("stat check for directory %s: %w", cfg.unprocessedDir, err)
-		}
-
-		// Fix govet shadowing error. Use existing err variable.
-		client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
-		if err != nil {
-			logger.Error("Failed to connect to MongoDB", "error", err)
-			// Fix wrapcheck error. Wrap the error before returning.
-			return fmt.Errorf("connection to MongoDB failed: %w", err)
-		}
-
-		defer func() {
-			if deferErr := client.Disconnect(ctx); deferErr != nil {
-				logger.Error("Error disconnecting from MongoDB", "error", deferErr)
-			}
-		}()
-
-		logger.Info("Successfully connected to MongoDB.")
-
-		stats, err := datalake.IngestCSVFiles(ctx, client, cfg.unprocessedDir, cfg.processedDir, cfg.moveProcessedFiles)
-		if err != nil {
-			logger.Error("Error ingesting CSV files", "error", err)
-			return fmt.Errorf("ingestion of CSV files failed: %w", err)
-		}
-
-		logger.Info("Data ingestion process completed successfully.")
-		stats.Log(logger)
-
-		return nil
+		return runIngest(ctx, logger)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
+}
+
+func runGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []string) error {
+	genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
+	rows := genFlagSet.Int("rows", defaultSyntheticDataRows, "Number of rows to generate")
+	dir := genFlagSet.String("dir", defaultSyntheticDataDir, "Directory to write synthetic data to")
+	persistToMongo := genFlagSet.Bool("persist-to-mongo", false, "Persist synthetic data to MongoDB")
+	if err := genFlagSet.Parse(args); err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+
+	if *persistToMongo {
+		cfg := loadConfig(ctx, logger)
+		client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
+		if err != nil {
+			return fmt.Errorf("failed to connect to MongoDB: %w", err)
+		}
+		defer func() {
+			if deferErr := client.Disconnect(ctx); deferErr != nil {
+				logger.ErrorContext(ctx, "Error disconnecting from MongoDB", "error", deferErr)
+			}
+		}()
+
+		err = synthetic.GenerateAndPersistSyntheticData(ctx, client, "synthetic-ingest", *rows)
+		if err != nil {
+			return fmt.Errorf("failed to generate and persist synthetic data: %w", err)
+		}
+		logger.InfoContext(ctx, "Synthetic data generated and persisted successfully")
+		return nil
+	}
+
+	logger.InfoContext(ctx, "Generating synthetic data")
+	err := synthetic.GenerateSyntheticData(*rows, *dir)
+	if err != nil {
+		return fmt.Errorf("failed to generate synthetic data: %w", err)
+	}
+	logger.InfoContext(ctx, "Synthetic data generated successfully")
+	return nil
+}
+
+func runIngest(ctx context.Context, logger *slog.Logger) error {
+	cfg := loadConfig(ctx, logger)
+
+	logger.DebugContext(ctx, "im here")
+
+	// Fix govet shadowing error. Use existing err variable.
+	if _, err := os.Stat(cfg.unprocessedDir); err != nil || os.IsNotExist(err) {
+		logger.ErrorContext(
+			ctx,
+			"The directory does not exist. Please create it and place your CSV files inside.",
+			"dir", cfg.unprocessedDir,
+			"error", err,
+		)
+		// Fix wrapcheck error. Wrap the error before returning.
+		return fmt.Errorf("stat check for directory %s: %w", cfg.unprocessedDir, err)
+	}
+
+	// Fix govet shadowing error. Use existing err variable.
+	client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
+	if err != nil {
+		logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", err)
+		// Fix wrapcheck error. Wrap the error before returning.
+		return fmt.Errorf("connection to MongoDB failed: %w", err)
+	}
+
+	defer func() {
+		if deferErr := client.Disconnect(ctx); deferErr != nil {
+			logger.ErrorContext(ctx, "Error disconnecting from MongoDB", "error", deferErr)
+		}
+	}()
+
+	logger.InfoContext(ctx, "Successfully connected to MongoDB.")
+
+	stats, err := datalake.IngestCSVFiles(ctx, client, cfg.unprocessedDir, cfg.processedDir, cfg.moveProcessedFiles)
+	if err != nil {
+		logger.ErrorContext(ctx, "Error ingesting CSV files", "error", err)
+		return fmt.Errorf("ingestion of CSV files failed: %w", err)
+	}
+
+	logger.InfoContext(ctx, "Data ingestion process completed successfully.")
+	stats.Log(logger)
+
+	return nil
 }
 
 type config struct {
@@ -159,44 +169,46 @@ type config struct {
 	moveProcessedFiles bool
 }
 
-func loadConfig(logger *slog.Logger) *config {
+func loadConfig(ctx context.Context, logger *slog.Logger) *config {
 	mongoURI := os.Getenv(envMongoURI)
-	mongoURI = formatMongoURI(mongoURI, logger)
+	mongoURI = formatMongoURI(ctx, mongoURI, logger)
 
 	csvDirectory := os.Getenv(envCSVDirectory)
 	if csvDirectory == "" {
 		csvDirectory = defaultCSVDir
-		logger.Debug("Using default CSV directory", "dir", csvDirectory)
+		logger.DebugContext(ctx, "Using default CSV directory", "dir", csvDirectory)
 	} else {
-		logger.Debug("Using CSV directory from environment variable", "dir", csvDirectory)
+		logger.DebugContext(ctx, "Using CSV directory from environment variable", "dir", csvDirectory)
 	}
 
 	unprocessedDirName := os.Getenv(envUnprocessedDirectory)
 	if unprocessedDirName == "" {
 		unprocessedDirName = defaultUnprocessedDir
-		logger.Debug("Using default unprocessed directory name", "dir", unprocessedDirName)
+		logger.DebugContext(ctx, "Using default unprocessed directory name", "dir", unprocessedDirName)
 	} else {
-		logger.Debug("Using unprocessed directory name from environment variable", "dir", unprocessedDirName)
+		logger.DebugContext(ctx, "Using unprocessed directory name from environment variable",
+			"dir", unprocessedDirName)
 	}
 
 	processedDirName := os.Getenv(envProcessedDirectory)
 	if processedDirName == "" {
 		processedDirName = defaultProcessedDir
-		logger.Debug("Using default processed directory name", "dir", processedDirName)
+		logger.DebugContext(ctx, "Using default processed directory name", "dir", processedDirName)
 	} else {
-		logger.Debug("Using processed directory name from environment variable", "dir", processedDirName)
+		logger.DebugContext(ctx, "Using processed directory name from environment variable", "dir", processedDirName)
 	}
 
 	unprocessedDir := fmt.Sprintf("%s/%s", csvDirectory, unprocessedDirName)
 	processedDir := fmt.Sprintf("%s/%s", csvDirectory, processedDirName)
-	logger.Debug("Constructed directory paths", "unprocessed", unprocessedDir, "processed", processedDir)
+	logger.DebugContext(ctx, "Constructed directory paths", "unprocessed", unprocessedDir, "processed", processedDir)
 
 	moveProcessedFilesStr := os.Getenv(envMoveProcessedFiles)
 	moveProcessedFiles := defaultMoveProcessedFiles
 	if moveProcessedFilesStr != "" {
 		parsedBool, err := strconv.ParseBool(moveProcessedFilesStr)
 		if err != nil {
-			logger.Warn(
+			logger.WarnContext(
+				ctx,
 				"Invalid value for MOVE_PROCESSED_FILES, using default",
 				"value", moveProcessedFilesStr,
 				"default", defaultMoveProcessedFiles,
@@ -204,10 +216,10 @@ func loadConfig(logger *slog.Logger) *config {
 			)
 		} else {
 			moveProcessedFiles = parsedBool
-			logger.Debug("Set moveProcessedFiles from environment variable", "value", moveProcessedFiles)
+			logger.DebugContext(ctx, "Set moveProcessedFiles from environment variable", "value", moveProcessedFiles)
 		}
 	} else {
-		logger.Debug("Using default value for moveProcessedFiles", "value", defaultMoveProcessedFiles)
+		logger.DebugContext(ctx, "Using default value for moveProcessedFiles", "value", defaultMoveProcessedFiles)
 	}
 
 	return &config{
@@ -222,20 +234,21 @@ func loadConfig(logger *slog.Logger) *config {
  * Format mongo settings to a url and return the result.
  */
 func formatMongoURI(
+	ctx context.Context,
 	mongoURI string,
 	logger *slog.Logger,
 ) string {
 	if mongoURI != "" {
-		logger.Debug("Using MongoDB URI from environment variable", "uri", mongoURI)
+		logger.DebugContext(ctx, "Using MongoDB URI from environment variable", "uri", mongoURI)
 		return mongoURI
 	}
 
 	mongoHost := os.Getenv(envMongoHost)
 	if mongoHost == "" {
 		mongoHost = defaultMongoHost
-		logger.Debug("Using default MongoDB host", "host", mongoHost)
+		logger.DebugContext(ctx, "Using default MongoDB host", "host", mongoHost)
 	} else {
-		logger.Debug("Using MongoDB host from environment variable", "host", mongoHost)
+		logger.DebugContext(ctx, "Using MongoDB host from environment variable", "host", mongoHost)
 	}
 
 	mongoUser := os.Getenv(envMongoUser)
@@ -249,10 +262,10 @@ func formatMongoURI(
 			mongoPassword,
 			hostPort,
 		)
-		logger.Debug("Created MongoDB URI from user, password, and host", "uri", mongoURI)
+		logger.DebugContext(ctx, "Created MongoDB URI from user, password, and host", "uri", mongoURI)
 	} else {
 		mongoURI = defaultMongoURI
-		logger.Debug("Using default MongoDB URI", "uri", mongoURI)
+		logger.DebugContext(ctx, "Using default MongoDB URI", "uri", mongoURI)
 	}
 	return mongoURI
 }
