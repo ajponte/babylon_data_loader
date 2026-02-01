@@ -28,6 +28,7 @@ const (
 	defaultMoveProcessedFiles = false
 	defaultSyntheticDataDir   = "tmp/synthetic"
 	defaultSyntheticDataRows  = 100
+	minArgs                   = 2
 	envMongoURI               = "MONGO_URI"
 	envMongoHost              = "MONGO_HOST"
 	envCSVDirectory           = "CSV_DIR"
@@ -44,7 +45,7 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 
-	if len(os.Args) < 2 {
+	if len(os.Args) < minArgs {
 		logger.Error("Usage: go run main.go <command> [options]")
 		os.Exit(1)
 	}
@@ -72,7 +73,30 @@ func run(logger *slog.Logger, command string, args []string) error {
 		genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
 		rows := genFlagSet.Int("rows", defaultSyntheticDataRows, "Number of rows to generate")
 		dir := genFlagSet.String("dir", defaultSyntheticDataDir, "Directory to write synthetic data to")
-		genFlagSet.Parse(args)
+		persistToMongo := genFlagSet.Bool("persist-to-mongo", false, "Persist synthetic data to MongoDB")
+		if err := genFlagSet.Parse(args); err != nil {
+			return fmt.Errorf("failed to parse flags: %w", err)
+		}
+
+		if *persistToMongo {
+			cfg := loadConfig(logger)
+			client, err := storage.ConnectToMongoDB(ctx, cfg.mongoURI)
+			if err != nil {
+				return fmt.Errorf("failed to connect to MongoDB: %w", err)
+			}
+			defer func() {
+				if deferErr := client.Disconnect(ctx); deferErr != nil {
+					logger.Error("Error disconnecting from MongoDB", "error", deferErr)
+				}
+			}()
+
+			err = synthetic.GenerateAndPersistSyntheticData(ctx, client, "synthetic-ingest", *rows)
+			if err != nil {
+				return fmt.Errorf("failed to generate and persist synthetic data: %w", err)
+			}
+			logger.Info("Synthetic data generated and persisted successfully")
+			return nil
+		}
 
 		logger.Info("Generating synthetic data")
 		err := synthetic.GenerateSyntheticData(*rows, *dir)

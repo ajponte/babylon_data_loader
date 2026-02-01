@@ -42,3 +42,7 @@ data/
 
 # Synthetic Data
 tmp/synthetic/
+
+# Agent session definition
+agent.md
+

@@ -61,10 +61,23 @@ build: ## build the go application
 	go build -o $(APP_EXECUTABLE)
 	@echo "Build passed"
 
-run: ## runs the go binary. use additional options if required.
+run: run-ingest ## runs the go binary. use additional options if required.
+
+run-ingest: ## runs the go binary to ingest data.
 	make build && \
 	chmod +x $(APP_EXECUTABLE) && \
-	$(APP_EXECUTABLE)
+	$(APP_EXECUTABLE) ingest
+
+run-generate: ## runs the go binary to generate synthetic data.
+	make build && \
+	chmod +x $(APP_EXECUTABLE) && \
+	$(APP_EXECUTABLE) generate-synthetic-data --rows 100 --dir tmp/synthetic
+
+run-generate-mongo: ## runs the go binary to generate synthetic data and persist to mongo.
+	make build && \
+	chmod +x $(APP_EXECUTABLE) && \
+	$(APP_EXECUTABLE) generate-synthetic-data --rows 100 --persist-to-mongo
+
 
 clean: ## cleans binary and other generated files
 	go clean
