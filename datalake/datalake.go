@@ -46,16 +46,13 @@ func IngestCSVFiles(
 	logger.InfoContext(ctx, "looping through files", "files", files)
 
 	for _, file := range files {
-		if file.IsDir() || (!strings.HasSuffix(file.Name(), ".csv") && !strings.HasSuffix(file.Name(), ".CSV")) {
-			reason := "Not a CSV file"
-			if file.IsDir() {
-				reason = "Is a directory"
-			}
+		// Validate that's it's a real CSV file.
+		if !validateFile(file) {
+			reason := "Not a valid CSV file"
 			stats.AddFailure(file.Name(), reason)
 			logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
-			continue
 		}
-
+		// Process the file.
 		err = processFile(ctx, provider, file, unprocessedDir, processedDir, moveProcessedFiles)
 		if err != nil {
 			stats.AddFailure(file.Name(), err.Error())
@@ -66,6 +63,16 @@ func IngestCSVFiles(
 	}
 
 	return stats, nil
+}
+
+// Return true only if the entry pointed to by FILE is valid.
+func validateFile(
+	file os.DirEntry,
+) bool {
+	if file.IsDir() || (!strings.HasSuffix(file.Name(), ".csv") && !strings.HasSuffix(file.Name(), ".CSV")) {
+		return false
+	}
+	return true
 }
 
 // Process the file.
