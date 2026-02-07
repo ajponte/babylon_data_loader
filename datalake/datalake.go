@@ -20,7 +20,7 @@ import (
 
 const (
 	dbName        = "datalake"
-	syncTableName = "dataSync" // Moved from csv.go
+	syncTableName = "dataSync"
 )
 
 // IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
@@ -68,6 +68,7 @@ func IngestCSVFiles(
 	return stats, nil
 }
 
+// Process the file.
 func processFile(
 	ctx context.Context,
 	provider storage.CollectionProvider,

@@ -127,7 +127,6 @@ func TestParseCSV_DifferentColumnOrder(t *testing.T) {
 	}
 }
 
-
 func TestParseCSV_InvalidRecord(t *testing.T) {
 	ctx := context.Background()
 	csvContent := `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #

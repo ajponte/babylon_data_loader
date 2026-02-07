@@ -29,7 +29,7 @@ type Data struct {
 	PostingDate    string  `bson:"PostingDate"`
 	Description    string  `bson:"Description"`
 	Amount         float64 `bson:"Amount"`
-	Category       string  `bson:"category"`   // New field
+	Category       string  `bson:"category"` // New field
 	Type           string  `bson:"Type"`
 	Balance        float64 `bson:"Balance"`
 	CheckOrSlipNum string  `bson:"CheckOrSlipNum"`
@@ -125,7 +125,16 @@ func GenerateSyntheticData(rows int, dir string) error {
 	defer writer.Flush()
 
 	// Write header
-	header := []string{"Details", "Posting Date", "Description", "Category", "Amount", "Type", "Balance", "Check or Slip #"}
+	header := []string{
+		"Details",
+		"Posting Date",
+		"Description",
+		"Category",
+		"Amount",
+		"Type",
+		"Balance",
+		"Check or Slip #",
+	}
 	if err = writer.Write(header); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}

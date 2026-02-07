@@ -26,6 +26,9 @@ WHITE  := $(shell tput -Txterm setaf 7)
 CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
+# run goimports formatting from url.
+FMT := $(shell go env GOPATH)/bin/goimports
+
 ## Quality
 check-quality: ## runs code quality checks
 	make lint
@@ -40,6 +43,7 @@ vet: ## go vet
 	go vet ./...
 
 fmt: ## runs go formatter
+	$(FMT) -w .
 	go fmt ./...
 
 tidy: ## runs tidy to fix go.mod dependencies

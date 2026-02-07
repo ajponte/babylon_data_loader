@@ -20,7 +20,7 @@ type Data struct {
 	PostingDate    string  `bson:"PostingDate"`
 	Description    string  `bson:"Description"`
 	Amount         float64 `bson:"Amount"`
-	Category       string  `bson:"category"`   // New field
+	Category       string  `bson:"category"` // New field
 	Type           string  `bson:"Type"`
 	Balance        float64 `bson:"Balance"`
 	CheckOrSlipNum string  `bson:"CheckOrSlipNum"`
@@ -128,7 +128,12 @@ func ParseCSV(
 
 		amount, convErr := strconv.ParseFloat(safeGet(record, colIndex["amount"]), 64)
 		if convErr != nil {
-			logger.WarnContext(ctx, "skipping record with invalid amount format", "value", safeGet(record, colIndex["amount"]), "error", convErr)
+			logger.WarnContext(
+				ctx,
+				"skipping record with invalid amount format",
+				"value", safeGet(record, colIndex["amount"]),
+				"error", convErr,
+			)
 			continue
 		}
 
@@ -137,7 +142,12 @@ func ParseCSV(
 			if balanceStr := safeGet(record, balanceIndex); balanceStr != "" {
 				parsedBalance, balanceConvErr := strconv.ParseFloat(balanceStr, 64)
 				if balanceConvErr != nil {
-					logger.WarnContext(ctx, "skipping record with invalid balance format", "value", balanceStr, "error", balanceConvErr)
+					logger.WarnContext(
+						ctx,
+						"skipping record with invalid balance format",
+						"value", balanceStr,
+						"error", balanceConvErr,
+					)
 				} else {
 					balance = parsedBalance
 				}
@@ -145,15 +155,15 @@ func ParseCSV(
 		}
 
 		doc := Data{
-			Details:        safeGet(record, colIndex["details"]),
-			PostingDate:    postingDateStr,
-			Description:    safeGet(record, colIndex["description"]),
-			Category:       safeGet(record, colIndex["category"]),
-			Amount:         amount,
-			Type:           safeGet(record, colIndex["type"]),
-			Balance:        balance,
-			DataSource:     dataSource,
-			AccountID:      accountID,
+			Details:     safeGet(record, colIndex["details"]),
+			PostingDate: postingDateStr,
+			Description: safeGet(record, colIndex["description"]),
+			Category:    safeGet(record, colIndex["category"]),
+			Amount:      amount,
+			Type:        safeGet(record, colIndex["type"]),
+			Balance:     balance,
+			DataSource:  dataSource,
+			AccountID:   accountID,
 		}
 		if checkOrSlipNumIndex, ok := colIndex["check or slip #"]; ok {
 			doc.CheckOrSlipNum = safeGet(record, checkOrSlipNumIndex)
