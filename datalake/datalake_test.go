@@ -2,49 +2,54 @@ package datalake
 
 import (
 	"context"
+
 	"os"
 	"path/filepath"
 	"testing"
 
-	"babylon/dataloader/storage"
-
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	_ "babylon/dataloader/csv"
+	"babylon/dataloader/datalake/datasource"
+	"babylon/dataloader/datalake/model"
+	_ "babylon/dataloader/datalake/repository"
 )
 
 // ---- Mocks ----
 
-// mockCollection implements storage.DataStore for testing.
-type mockCollection struct {
-	bulkWriteCalled bool
-	insertOneCalled bool
+// mockRepository implements repository.Repository for testing.
+type mockRepository struct {
+	bulkUpsertTransactionsCalled bool
+	transactions                 []model.Transaction
+	err                          error
 }
 
-func (m *mockCollection) BulkWrite(
-	ctx context.Context,
-	models []mongo.WriteModel,
-	opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
-	m.bulkWriteCalled = true
-
-	return &mongo.BulkWriteResult{UpsertedCount: int64(len(models))}, nil
+func (m *mockRepository) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) error {
+	m.bulkUpsertTransactionsCalled = true
+	m.transactions = transactions
+	return m.err
 }
 
-func (m *mockCollection) InsertOne(
-	ctx context.Context,
-	document interface{},
-	opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
-	m.insertOneCalled = true
-
-	return &mongo.InsertOneResult{}, nil
+// mockInfoExtractor implements datasource.InfoExtractor for testing.
+type mockInfoExtractor struct {
+	extractInfoCalled bool
+	info              *datasource.SourceInfo
+	err               error
 }
 
-// mockProvider always returns the same mockCollection.
-type mockProvider struct {
-	col *mockCollection
+func (m *mockInfoExtractor) ExtractInfo(filename string) (*datasource.SourceInfo, error) {
+	m.extractInfoCalled = true
+	return m.info, m.err
 }
 
-func (p *mockProvider) Collection(name string) storage.DataStore {
-	return p.col
+// mockCSVParser implements csv.Parser for testing.
+type mockCSVParser struct {
+	parseCalled bool
+	records     []map[string]string
+	err         error
+}
+
+func (m *mockCSVParser) Parse(ctx context.Context, filePath string, dataSource string, accountID string) ([]map[string]string, int64, error) {
+	m.parseCalled = true
+	return m.records, int64(len(m.records)), m.err
 }
 
 // ---- Tests ----
@@ -62,29 +67,76 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		t.Fatalf("failed to write test CSV file: %v", err)
 	}
 
-	mockCol := &mockCollection{}
-	provider := &mockProvider{col: mockCol}
+	// Setup Mocks
+	mockRepo := &mockRepository{}
+	mockExtractor := &mockInfoExtractor{
+		info: &datasource.SourceInfo{
+			DataSource: "chase",
+			AccountID:  "1234",
+		},
+	}
+	mockParser := &mockCSVParser{
+		records: []map[string]string{
+			{
+				"details":         "DEBIT",
+				"posting date":    "01/31/2023",
+				"description":     "WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",
+				"category":        "", // Assuming Category is empty in the CSV content
+				"amount":          "-75.77",
+				"type":            "DEBIT_CARD",
+				"balance":         "11190.76",
+				"check or slip #": "",
+			},
+		},
+	}
 
-	// create a dummy os.DirEntry
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		t.Fatalf("failed to get file info: %v", err)
 	}
-
 	dirEntry := newMockDirEntry(fileInfo)
 
-	// Call processFile with mock provider
-	if processErr := processFile(ctx, provider, dirEntry, tmpDir, "", false); processErr != nil {
+	// Call processFile with mocks
+	if processErr := processFile(ctx, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
 		t.Fatalf("processFile failed: %v", processErr)
 	}
 
 	// Assertions
-	if !mockCol.bulkWriteCalled {
-		t.Errorf("expected BulkWrite to be called at least once, but it wasn't")
+	if !mockRepo.bulkUpsertTransactionsCalled {
+		t.Errorf("expected BulkUpsertTransactions to be called, but it wasn't")
+	}
+	if !mockExtractor.extractInfoCalled {
+		t.Errorf("expected ExtractInfo to be called, but it wasn't")
+	}
+	if !mockParser.parseCalled {
+		t.Errorf("expected Parse to be called, but it wasn't")
 	}
 
-	if !mockCol.insertOneCalled {
-		t.Errorf("expected InsertOne to be called at least once, but it wasn't")
+	if len(mockRepo.transactions) != 1 {
+		t.Errorf("Expected 1 transaction to be upserted, got %d", len(mockRepo.transactions))
+	}
+	expectedTransaction := model.Transaction{
+		Details:        "DEBIT",
+		PostingDate:    "01/31/2023",
+		Description:    "WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",
+		Amount:         -75.77,
+		Type:           "DEBIT_CARD",
+		Balance:        11190.76,
+		CheckOrSlipNum: "",
+		DataSource:     "chase",
+		AccountID:      "1234",
+	}
+
+	if mockRepo.transactions[0].Details != expectedTransaction.Details ||
+		mockRepo.transactions[0].PostingDate != expectedTransaction.PostingDate ||
+		mockRepo.transactions[0].Description != expectedTransaction.Description ||
+		mockRepo.transactions[0].Amount != expectedTransaction.Amount ||
+		mockRepo.transactions[0].Type != expectedTransaction.Type ||
+		mockRepo.transactions[0].Balance != expectedTransaction.Balance ||
+		mockRepo.transactions[0].CheckOrSlipNum != expectedTransaction.CheckOrSlipNum ||
+		mockRepo.transactions[0].DataSource != expectedTransaction.DataSource ||
+		mockRepo.transactions[0].AccountID != expectedTransaction.AccountID {
+		t.Errorf("Expected transaction %+v, got %+v", expectedTransaction, mockRepo.transactions[0])
 	}
 }
 

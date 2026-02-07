@@ -40,3 +40,9 @@ report.json
 # Bablyon Data Lake Sink Dir (temporary)
 data/
 
+# Synthetic Data
+tmp/synthetic/
+
+# Agent session definition
+agent.md
+

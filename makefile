@@ -26,6 +26,9 @@ WHITE  := $(shell tput -Txterm setaf 7)
 CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
+# run goimports formatting from url.
+FMT := $(shell go env GOPATH)/bin/goimports
+
 ## Quality
 check-quality: ## runs code quality checks
 	make lint
@@ -40,6 +43,7 @@ vet: ## go vet
 	go vet ./...
 
 fmt: ## runs go formatter
+	$(FMT) -w .
 	go fmt ./...
 
 tidy: ## runs tidy to fix go.mod dependencies
@@ -49,7 +53,8 @@ tidy: ## runs tidy to fix go.mod dependencies
 test: ## runs tests and create generates coverage report
 	make tidy
 	make vendor
-	go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
+	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
+	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
 
 coverage: ## displays test coverage report in html mode
 	make test
@@ -61,10 +66,23 @@ build: ## build the go application
 	go build -o $(APP_EXECUTABLE)
 	@echo "Build passed"
 
-run: ## runs the go binary. use additional options if required.
+run: run-ingest ## runs the go binary. use additional options if required.
+
+run-ingest: ## runs the go binary to ingest data.
 	make build && \
 	chmod +x $(APP_EXECUTABLE) && \
-	$(APP_EXECUTABLE)
+	$(APP_EXECUTABLE) ingest
+
+run-generate: ## runs the go binary to generate synthetic data.
+	make build && \
+	chmod +x $(APP_EXECUTABLE) && \
+	$(APP_EXECUTABLE) generate-synthetic-data --rows 100 --dir tmp/synthetic
+
+run-generate-mongo: ## runs the go binary to generate synthetic data and persist to mongo.
+	make build && \
+	chmod +x $(APP_EXECUTABLE) && \
+	$(APP_EXECUTABLE) generate-synthetic-data --rows 100 --persist-to-mongo
+
 
 clean: ## cleans binary and other generated files
 	go clean
