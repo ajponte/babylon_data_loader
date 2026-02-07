@@ -27,7 +27,10 @@ CYAN   := $(shell tput -Txterm setaf 6)
 RESET  := $(shell tput -Txterm sgr0)
 
 # run goimports formatting from url.
-FMT := $(shell go env GOPATH)/bin/goimports
+GO_IMPORTS_FMT := $(shell go env GOPATH)/bin/goimports
+
+# use the `gofumpt` package for strict formatting.
+GO_FMT_STRICT := $(shell go env GOPATH)/bin/gofumpt
 
 ## Quality
 check-quality: ## runs code quality checks
@@ -42,9 +45,11 @@ lint: ## go linting. Update and use specific lint tool and options
 vet: ## go vet
 	go vet ./...
 
-fmt: ## runs go formatter
-	$(FMT) -w .
-	go fmt ./...
+fmt: ## runs go formatters
+	$(GO_IMPORTS_FMT) -w .
+	# go fmt ./...
+
+	$(GO_FMT_STRICT) -l -w .
 
 tidy: ## runs tidy to fix go.mod dependencies
 	go mod tidy

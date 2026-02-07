@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-
 	"strings"
 )
 
-var errTargetFileNotFound = errors.New("the valid target file was found")
-var errInvalidDataSource = errors.New("data source is not valid")
-var errProcessCsv = errors.New("error while parsing CSV file")
+var (
+	errTargetFileNotFound = errors.New("the valid target file was found")
+	errInvalidDataSource  = errors.New("data source is not valid")
+	errProcessCsv         = errors.New("error while parsing CSV file")
+)
 
 func ValidFileNotFoundError(path string) error {
 	return fmt.Errorf("%w, %s", errTargetFileNotFound, path)
@@ -42,7 +43,6 @@ func (p *DefaultParser) Parse(
 	_ string,
 	_ string,
 ) ([]map[string]string, int64, error) {
-
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)

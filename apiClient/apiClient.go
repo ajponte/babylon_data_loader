@@ -20,11 +20,13 @@ const (
 )
 
 // httpUnexpectedStatusCodeError is a custom error.
-var errHTTPUnexpectedStatusCode = errors.New("unexpected http status code")
-var errHTTPBasePathFormatting = errors.New("error formatting HTTP base path")
-var errHTTPBodyUnmarshall = errors.New("errror unmarshalling HTTP response body")
-var errHTTPBodyClose = errors.New("error closing io stream for HTTP response body")
-var errHTTPBabylonAPI = errors.New("error returned from babylon api")
+var (
+	errHTTPUnexpectedStatusCode = errors.New("unexpected http status code")
+	errHTTPBasePathFormatting   = errors.New("error formatting HTTP base path")
+	errHTTPBodyUnmarshall       = errors.New("errror unmarshalling HTTP response body")
+	errHTTPBodyClose            = errors.New("error closing io stream for HTTP response body")
+	errHTTPBabylonAPI           = errors.New("error returned from babylon api")
+)
 
 // APIClient manages all endpoints of the Babylon API.
 type APIClient struct {
@@ -186,7 +188,8 @@ func (c *APIClient) DoEcho(ctx context.Context, inputVal string) (*http.Response
 func (c *APIClient) GetTransactionByID(
 	ctx context.Context,
 	transactionID string,
-	transactionType string) (*http.Response, *HistoryTransaction, error) {
+	transactionType string,
+) (*http.Response, *HistoryTransaction, error) {
 	// Use ResolveReference to correctly combine the base URL with the endpoint path.
 	localVarPath := c.BasePath.ResolveReference(&url.URL{Path: "/history/transaction"})
 
@@ -242,7 +245,8 @@ func (c *APIClient) GetTransactionByID(
 // AddTransaction sends a PUT request to the /history/transaction endpoint.
 func (c *APIClient) AddTransaction(
 	ctx context.Context,
-	transaction Transaction) (*http.Response, *TransactionPutResponse, error) {
+	transaction Transaction,
+) (*http.Response, *TransactionPutResponse, error) {
 	// Marshal the request body.
 	bodyBytes, err := json.Marshal(transaction)
 	if err != nil {
@@ -302,7 +306,8 @@ func (c *APIClient) GetTransactionHistory(
 	ctx context.Context,
 	transactionType string,
 	start,
-	end int64) (*http.Response, *TransactionHistorySearchResponse, error) {
+	end int64,
+) (*http.Response, *TransactionHistorySearchResponse, error) {
 	// Use ResolveReference to correctly combine the base URL with the endpoint path.
 	localVarPath := c.BasePath.ResolveReference(
 		&url.URL{Path: "/history/transactions/" + url.PathEscape(transactionType)})
@@ -355,7 +360,8 @@ func (c *APIClient) GetTransactionHistory(
 // historySearchResponseUnmarshall validates the http response and unmarshalls the result.
 // Return an error if one exists.
 func historySearchResponseUnmarshall(
-	resp *http.Response) (*http.Response, *TransactionHistorySearchResponse, error) {
+	resp *http.Response,
+) (*http.Response, *TransactionHistorySearchResponse, error) {
 	var result TransactionHistorySearchResponse
 
 	body, err := io.ReadAll(resp.Body)
@@ -374,7 +380,8 @@ func historySearchResponseUnmarshall(
 // transactionPutResponseUnmarshall validates the http response and unmarshalls the result.
 // Return an error if one exists.
 func transactionPutResponseUnmarshall(
-	resp *http.Response) (*http.Response, *TransactionPutResponse, error) {
+	resp *http.Response,
+) (*http.Response, *TransactionPutResponse, error) {
 	var result TransactionPutResponse
 
 	body, err := io.ReadAll(resp.Body)
@@ -393,7 +400,8 @@ func transactionPutResponseUnmarshall(
 // historyTransactionGetResponseUnmarshall validates the http response and unmarshalls the result.
 // Return an error if one exists.
 func historyTransactionGetResponseUnmarshall(
-	resp *http.Response) (*http.Response, *HistoryTransaction, error) {
+	resp *http.Response,
+) (*http.Response, *HistoryTransaction, error) {
 	var result HistoryTransaction
 
 	body, err := io.ReadAll(resp.Body)

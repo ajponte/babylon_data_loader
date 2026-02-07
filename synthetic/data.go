@@ -109,7 +109,7 @@ func GenerateAndPersistSyntheticData(
 func GenerateSyntheticData(rows int, dir string) error {
 	var err error
 	if _, err = os.Stat(dir); os.IsNotExist(err) {
-		if err = os.MkdirAll(dir, 0750); err != nil {
+		if err = os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("failed to create directory '%s': %w", dir, err)
 		}
 	}

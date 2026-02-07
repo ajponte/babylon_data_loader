@@ -38,7 +38,7 @@ func main() {
 	command := os.Args[1]
 	args := os.Args[2:]
 
-	// Check for application startup.
+	// Execute commands.
 	if err := run(logger, command, args); err != nil {
 		logger.ErrorContext(ctx, "Application terminated with an error", "error", fmt.Sprintf("%+v", err))
 		os.Exit(1)
@@ -105,7 +105,6 @@ func runGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []s
 
 // Main entry point for data ingestion.
 func runIngest(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
-
 	logger.DebugContext(ctx, "im here")
 
 	// Fix govet shadowing error. Use existing err variable.
