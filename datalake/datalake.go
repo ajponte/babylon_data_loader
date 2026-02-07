@@ -5,28 +5,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
+
+	"strconv"
 	"strings"
 	"time"
 
 	bcontext "babylon/dataloader/appcontext"
 	"babylon/dataloader/csv"
-	"babylon/dataloader/storage"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-)
-
-const (
-	dbName        = "datalake"
-	syncTableName = "dataSync"
+	"babylon/dataloader/datalake/datasource"
+	"babylon/dataloader/datalake/model"
+	"babylon/dataloader/datalake/repository"
 )
 
 // IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
 func IngestCSVFiles(
 	ctx context.Context,
-	client *mongo.Client,
+	repo repository.Repository,
+	extractor datasource.InfoExtractor,
+	parser csv.Parser,
 	unprocessedDir string,
 	processedDir string,
 	moveProcessedFiles bool,
@@ -42,7 +39,6 @@ func IngestCSVFiles(
 	stats := NewStats()
 	stats.TotalFiles = len(files)
 
-	provider := storage.NewMongoProvider(client)
 	logger.InfoContext(ctx, "looping through files", "files", files)
 
 	for _, file := range files {
@@ -53,7 +49,7 @@ func IngestCSVFiles(
 			logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
 		}
 		// Process the file.
-		err = processFile(ctx, provider, file, unprocessedDir, processedDir, moveProcessedFiles)
+		err = processFile(ctx, repo, extractor, parser, file, unprocessedDir, processedDir, moveProcessedFiles)
 		if err != nil {
 			stats.AddFailure(file.Name(), err.Error())
 			logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
@@ -78,17 +74,20 @@ func validateFile(
 // Process the file.
 func processFile(
 	ctx context.Context,
-	provider storage.CollectionProvider,
+	repo repository.Repository,
+	extractor datasource.InfoExtractor,
+	parser csv.Parser,
 	file os.DirEntry,
 	unprocessedDir string,
 	processedDir string,
 	moveProcessedFiles bool,
 ) error {
-	logger := bcontext.LoggerFromContext(ctx)
-	dataSource, accountID, err := parseFileNameForSource(file.Name())
+	sourceInfo, err := extractor.ExtractInfo(file.Name())
 	if err != nil {
-		return fmt.Errorf("failed to retrieve data source: %w", err)
+		return fmt.Errorf("failed to extract source info: %w", err)
 	}
+	dataSource := sourceInfo.DataSource
+	accountID := sourceInfo.AccountID
 
 	cleanFileName := filepath.Clean(file.Name())
 	if strings.HasPrefix(cleanFileName, "../") {
@@ -96,56 +95,18 @@ func processFile(
 	}
 
 	filePath := filepath.Join(unprocessedDir, cleanFileName)
-	documents, _, recordsProcessed, err := csv.ParseCSV(ctx, filePath, dataSource, accountID)
+	rawRecords, _, err := parser.Parse(ctx, filePath, dataSource, accountID)
 	if err != nil {
 		return err
 	}
 
-	var models []mongo.WriteModel
-	for _, doc := range documents {
-		// Use dataSource and accountID in the filter for uniqueness
-		filter := bson.M{
-			"Details":     doc.Details,
-			"PostingDate": doc.PostingDate,
-			"Description": doc.Description,
-			"dataSource":  doc.DataSource,
-			"accountID":   doc.AccountID,
-		}
-		update := bson.M{"$set": doc}
-		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
-	}
-
-	collectionName := "transactions" // Hardcode collection name to "transactions"
-	collection := provider.Collection(collectionName)
-
-	logger.InfoContext(
-		ctx,
-		"writing documents to collection",
-		"collectionName", collectionName,
-	)
-
-	result, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	transactions, err := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
 	if err != nil {
-		return fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
+		return err
 	}
 
-	logger.InfoContext(
-		ctx,
-		"Successfully upserted documents into collection.",
-		"upsertedCount", int(result.UpsertedCount),
-		"collectionName", collectionName,
-	)
-
-	syncCollection := provider.Collection(syncTableName)
-	syncLog := csv.SyncLog{
-		CollectionName:  collectionName,
-		SyncTimestamp:   time.Now(),
-		RecordsUploaded: recordsProcessed,
-	}
-
-	_, err = syncCollection.InsertOne(ctx, syncLog)
-	if err != nil {
-		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
+	if err = repo.BulkUpsertTransactions(ctx, transactions); err != nil {
+		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
 	}
 
 	if moveProcessedFiles {
@@ -158,24 +119,74 @@ func processFile(
 	return nil
 }
 
-// parseFileNameForSource extracts the data source and account ID from the filename.
-func parseFileNameForSource(fileName string) (string, string, error) {
-	lowerFileName := strings.ToLower(fileName)
+// mapRawRecordsToTransactions converts a slice of raw CSV records (map[string]string)
+// into a slice of model.Transaction structs, performing necessary type conversions and validations.
+//
+//nolint:unparam // error is always nil for now, but may be used later
+func mapRawRecordsToTransactions(
+	ctx context.Context,
+	rawRecords []map[string]string,
+	dataSource string,
+	accountID string,
+) ([]model.Transaction, error) {
+	logger := bcontext.LoggerFromContext(ctx)
+	var transactions []model.Transaction
 
-	// Regex to match "chase" and then a 4-digit number
-	re := regexp.MustCompile(`chase(\d{4})`)
-	matches := re.FindStringSubmatch(lowerFileName)
+	for _, record := range rawRecords {
+		postingDateStr := record["posting date"]
+		if postingDateStr == "" {
+			logger.WarnContext(ctx, "Skipping record with empty posting date", "record", record)
+			continue
+		}
 
-	if len(matches) > 1 {
-		return "chase", matches[1], nil
+		parsedDate, parseErr := time.Parse("01/02/2006", postingDateStr)
+		if parseErr != nil {
+			logger.WarnContext(
+				ctx,
+				"Skipping record with invalid date format",
+				"date", postingDateStr,
+				"error", parseErr,
+			)
+			continue
+		}
+
+		amountStr := record["amount"]
+		amount, convErr := strconv.ParseFloat(amountStr, 64)
+		if convErr != nil {
+			logger.WarnContext(ctx, "Skipping record with invalid amount format", "amount", amountStr, "error", convErr)
+			continue
+		}
+
+		balance := 0.0
+		if balanceStr, ok := record["balance"]; ok && balanceStr != "" {
+			parsedBalance, balanceConvErr := strconv.ParseFloat(balanceStr, 64)
+			if balanceConvErr != nil {
+				logger.WarnContext(
+					ctx,
+					"Skipping record with invalid balance format",
+					"balance", balanceStr,
+					"error", balanceConvErr,
+				)
+			} else {
+				balance = parsedBalance
+			}
+		}
+
+		transactions = append(transactions, model.Transaction{
+			Details:        record["details"],
+			PostingDate:    parsedDate.Format("01/02/2006"), // Store as formatted string
+			Description:    record["description"],
+			Amount:         amount,
+			Category:       record["category"],
+			Type:           record["type"],
+			Balance:        balance,
+			CheckOrSlipNum: record["check or slip #"],
+			DataSource:     dataSource,
+			AccountID:      accountID,
+		})
 	}
 
-	// Fallback for generic "test" data source without account ID
-	if strings.Contains(lowerFileName, "test") {
-		return "test", "0000", nil // Assign a default account ID for test files
-	}
-
-	return "", "", fmt.Errorf("could not parse data source and account ID from filename: %s", fileName)
+	return transactions, nil
 }
 
 func moveFile(filePath, processedDir string) error {

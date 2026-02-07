@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -12,7 +11,10 @@ import (
 	"time"
 
 	bcontext "babylon/dataloader/appcontext"
+	"babylon/dataloader/csv"
 	"babylon/dataloader/datalake"
+	"babylon/dataloader/datalake/datasource"
+	_ "babylon/dataloader/datalake/repository"
 	"babylon/dataloader/storage"
 	"babylon/dataloader/synthetic"
 )
@@ -40,7 +42,7 @@ const (
 )
 
 func main() {
-	// Create the logger instance at the very beginning.
+	// Create the logger instance.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
@@ -54,13 +56,14 @@ func main() {
 	command := os.Args[1]
 	args := os.Args[2:]
 
-	// Fix for noinlineerr: Separate the assignment and the error check.
+	// Check for application startup.
 	if err := run(logger, command, args); err != nil {
 		logger.ErrorContext(ctx, "Application terminated with an error", "error", fmt.Sprintf("%+v", err))
 		os.Exit(1)
 	}
 }
 
+// Hanlde user input and exectue appropriate behavior.
 func run(logger *slog.Logger, command string, args []string) error {
 	ctx, cancel := context.WithTimeout(
 		bcontext.WithLogger(context.Background(), logger),
@@ -79,6 +82,7 @@ func run(logger *slog.Logger, command string, args []string) error {
 	}
 }
 
+// Generate synthetic data for testing.
 func runGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []string) error {
 	genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
 	rows := genFlagSet.Int("rows", defaultSyntheticDataRows, "Number of rows to generate")
@@ -117,6 +121,7 @@ func runGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []s
 	return nil
 }
 
+// Main entry point for data ingestion.
 func runIngest(ctx context.Context, logger *slog.Logger) error {
 	cfg := loadConfig(ctx, logger)
 
@@ -150,7 +155,21 @@ func runIngest(ctx context.Context, logger *slog.Logger) error {
 
 	logger.InfoContext(ctx, "Successfully connected to MongoDB.")
 
-	stats, err := datalake.IngestCSVFiles(ctx, client, cfg.unprocessedDir, cfg.processedDir, cfg.moveProcessedFiles)
+	// Instantiate dependencies
+	mongoProvider := storage.NewMongoProvider(client)
+	repo := storage.NewMongoRepository(mongoProvider)
+	chaseExtractor := datasource.NewChaseExtractor()
+	csvParser := csv.NewDefaultParser()
+
+	stats, err := datalake.IngestCSVFiles(
+		ctx,
+		repo,
+		chaseExtractor,
+		csvParser,
+		cfg.unprocessedDir,
+		cfg.processedDir,
+		cfg.moveProcessedFiles,
+	)
 	if err != nil {
 		logger.ErrorContext(ctx, "Error ingesting CSV files", "error", err)
 		return fmt.Errorf("ingestion of CSV files failed: %w", err)
@@ -162,6 +181,7 @@ func runIngest(ctx context.Context, logger *slog.Logger) error {
 	return nil
 }
 
+// Config map.
 type config struct {
 	mongoURI           string
 	unprocessedDir     string
@@ -169,6 +189,7 @@ type config struct {
 	moveProcessedFiles bool
 }
 
+// Load app-specific config.
 func loadConfig(ctx context.Context, logger *slog.Logger) *config {
 	mongoURI := os.Getenv(envMongoURI)
 	mongoURI = formatMongoURI(ctx, mongoURI, logger)
@@ -230,9 +251,7 @@ func loadConfig(ctx context.Context, logger *slog.Logger) *config {
 	}
 }
 
-/**
- * Format mongo settings to a url and return the result.
- */
+// Format mongo settings to a url and return the result.
 func formatMongoURI(
 	ctx context.Context,
 	mongoURI string,

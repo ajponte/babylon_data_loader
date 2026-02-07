@@ -53,7 +53,8 @@ tidy: ## runs tidy to fix go.mod dependencies
 test: ## runs tests and create generates coverage report
 	make tidy
 	make vendor
-	go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
+	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
+	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
 
 coverage: ## displays test coverage report in html mode
 	make test
