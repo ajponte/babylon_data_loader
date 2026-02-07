@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
 	"strconv"
 	"strings"
 	"time"
@@ -192,7 +191,7 @@ func mapRawRecordsToTransactions(
 func moveFile(filePath, processedDir string) error {
 	var err error
 	if _, err = os.Stat(processedDir); os.IsNotExist(err) {
-		if err = os.MkdirAll(processedDir, 0750); err != nil {
+		if err = os.MkdirAll(processedDir, 0o750); err != nil {
 			return fmt.Errorf("failed to create processed directory '%s': %w", processedDir, err)
 		}
 	}

@@ -12,7 +12,7 @@ import (
 func createTempCSV(t *testing.T, filename, content string) string {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, filename)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write test CSV file: %v", err)
 	}
 	return filePath

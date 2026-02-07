@@ -2,7 +2,6 @@ package datalake
 
 import (
 	"context"
-
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,7 +62,7 @@ func TestProcessFile(t *testing.T) {
 
 	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
 DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEBIT_CARD,11190.76,`
-	if err := os.WriteFile(filePath, []byte(csvContent), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
 		t.Fatalf("failed to write test CSV file: %v", err)
 	}
 

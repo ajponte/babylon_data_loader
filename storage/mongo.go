@@ -43,7 +43,8 @@ type MongoCollection struct {
 func (c *MongoCollection) BulkWrite(
 	ctx context.Context,
 	models []mongo.WriteModel,
-	opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
+	opts ...*options.BulkWriteOptions,
+) (*mongo.BulkWriteResult, error) {
 	result, err := c.Collection.BulkWrite(ctx, models, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform BulkWrite: %w", err)
@@ -56,7 +57,8 @@ func (c *MongoCollection) BulkWrite(
 func (c *MongoCollection) InsertOne(
 	ctx context.Context,
 	document interface{},
-	opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
+	opts ...*options.InsertOneOptions,
+) (*mongo.InsertOneResult, error) {
 	result, err := c.Collection.InsertOne(ctx, document, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform InsertOne: %w", err)
