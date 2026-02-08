@@ -37,6 +37,41 @@ func MoveFileError(source string, target string) error {
 	return fmt.Errorf("%w, %s, %s", errMoveFile, source, target)
 }
 
+// CSVFileProcessor encapsulates dependencies and configuration for processing CSV files.
+type CSVFileProcessor struct {
+	Repo               repository.Repository
+	Extractor          datasource.InfoExtractor
+	Parser             csv.Parser
+	UnprocessedDir     string
+	ProcessedDir       string
+	MoveProcessedFiles bool
+	Stats              *Stats
+	Logger             slog.Logger
+}
+
+// NewCSVFileProcessor creates a new CSVFileProcessor instance.
+func NewCSVFileProcessor(
+	repo repository.Repository,
+	extractor datasource.InfoExtractor,
+	parser csv.Parser,
+	unprocessedDir string,
+	processedDir string,
+	moveProcessedFiles bool,
+	stats *Stats,
+	logger slog.Logger,
+) *CSVFileProcessor {
+	return &CSVFileProcessor{
+		Repo:               repo,
+		Extractor:          extractor,
+		Parser:             parser,
+		UnprocessedDir:     unprocessedDir,
+		ProcessedDir:       processedDir,
+		MoveProcessedFiles: moveProcessedFiles,
+		Stats:              stats,
+		Logger:             logger,
+	}
+}
+
 // IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
 func IngestCSVFiles(
 	ctx context.Context,
@@ -55,25 +90,28 @@ func IngestCSVFiles(
 		return nil, fmt.Errorf("failed to read directory: %w", err)
 	}
 
-	// Initialize new stats counter with the number of files to process.
 	stats := NewStats()
 	stats.TotalFiles = len(files)
 
 	logger.InfoContext(ctx, "looping through files", "files", files)
 
+	// Create a new CSVFileProcessor instance.
+	processor := NewCSVFileProcessor(
+		repo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		moveProcessedFiles,
+		stats,
+		*logger,
+	)
+
 	// Ingest all files.
 	for _, file := range files {
-		err = ingestCSVFile( // Fix 1: changed := to =
+		err = processor.ingestCSVFile( // Now calling the method on the processor
 			ctx,
-			repo,
-			extractor,
-			parser,
-			file,
-			unprocessedDir,
-			processedDir,
-			moveProcessedFiles,
-			*stats,
-			*logger)
+			file)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to ingest CSV file", "file", file.Name(), "error", err)
 			stats.AddFailure(file.Name(), err.Error())
@@ -84,43 +122,43 @@ func IngestCSVFiles(
 }
 
 // Ingest a CSV file into the datalake.
-func ingestCSVFile(
+
+func (p *CSVFileProcessor) ingestCSVFile(
 	ctx context.Context,
-	repo repository.Repository,
-	extractor datasource.InfoExtractor,
-	parser csv.Parser,
+
 	file os.DirEntry,
-	unprocessedDir string,
-	processedDir string,
-	moveProcessedFiles bool,
-	stats Stats,
-	logger slog.Logger,
 ) error {
 	if !validateCSVFile(file) {
+
 		reason := "Not a valid CSV file"
-		stats.AddFailure(file.Name(), reason)
-		logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
-		return fmt.Errorf("file %s is not a valid CSV file", file.Name()) // Fix 4
+
+		p.Stats.AddFailure(file.Name(), reason)
+
+		p.Logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
+
+		return fmt.Errorf("file %s is not a valid CSV file", file.Name())
+
 	}
 
 	// Process the file.
-	err := processFile(
+
+	err := p.processFile(
+
 		ctx,
-		logger,
-		repo,
-		extractor,
-		parser,
-		file,
-		unprocessedDir,
-		processedDir,
-		moveProcessedFiles)
+
+		file)
 	if err != nil {
-		stats.AddFailure(file.Name(), err.Error())
-		logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
-		return fmt.Errorf("failed to process file %s: %w", file.Name(), err) // Fix 4
+
+		p.Stats.AddFailure(file.Name(), err.Error())
+
+		p.Logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
+
+		return fmt.Errorf("failed to process file %s: %w", file.Name(), err)
+
 	}
-	// Fix 5: Removed else block
-	stats.IncrementProcessed()
+
+	p.Stats.IncrementProcessed()
+
 	return nil
 }
 
@@ -131,28 +169,21 @@ func ingestCSVFile(
 //   - Upsert the models to appropriate collections.
 //   - Move the file to the unprocessedDir, only if the moveProcessedFiles
 //     flag is enabled.
-func processFile(
+func (p *CSVFileProcessor) processFile(
 	ctx context.Context,
-	logger slog.Logger,
-	repo repository.Repository,
-	extractor datasource.InfoExtractor,
-	parser csv.Parser,
 	unprocessedFile os.DirEntry,
-	unprocessedDir string,
-	processedDir string,
-	moveProcessedFiles bool,
 ) error {
-	sourceInfo, err := extractor.ExtractInfo(unprocessedFile.Name())
+	sourceInfo, err := p.Extractor.ExtractInfo(unprocessedFile.Name())
 	if err != nil {
 		return fmt.Errorf("failed to extract source info: %w", err)
 	}
 	dataSource := sourceInfo.DataSource
 	accountID := sourceInfo.AccountID
 
-	unprocessedFilePath := sanitizeFilePath(unprocessedFile, unprocessedDir)
+	unprocessedFilePath := sanitizeFilePath(unprocessedFile, p.UnprocessedDir)
 
 	// Parse raw records.
-	rawRecords, _, err := parser.Parse(ctx, unprocessedFilePath, dataSource, accountID)
+	rawRecords, _, err := p.Parser.Parse(ctx, unprocessedFilePath, dataSource, accountID)
 	if err != nil {
 		return err
 	}
@@ -164,13 +195,13 @@ func processFile(
 	}
 
 	// Upsert documents to datalake collection.
-	if err = repo.BulkUpsertTransactions(ctx, transactions); err != nil {
+	if err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
 		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
 	}
 
 	// Move the file, only if moveProcessedFiles is enabled.
-	if moveProcessedFiles {
-		err = moveFile(ctx, unprocessedFilePath, processedDir, logger)
+	if p.MoveProcessedFiles {
+		err = p.moveFile(ctx, unprocessedFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to move file: %w", err)
 		}
@@ -278,13 +309,11 @@ func mapRawRecordsToTransactions(
 }
 
 // Move the file from processedFilePath to processedDir.
-func moveFile(
+func (p *CSVFileProcessor) moveFile(
 	ctx context.Context,
 	processedFilePath string,
-	processedDir string,
-	logger slog.Logger,
 ) error {
-	if err := checkProcessedDir(ctx, processedDir, logger); err != nil { // Fix 2
+	if err := checkProcessedDir(ctx, p.ProcessedDir, p.Logger); err != nil {
 		return fmt.Errorf("failed to check/create processed directory: %w", err)
 	}
 
@@ -292,12 +321,12 @@ func moveFile(
 	fileName := filepath.Base(processedFilePath)
 
 	// Build processed file path.
-	newPath := filepath.Join(processedDir, fileName)
+	newPath := filepath.Join(p.ProcessedDir, fileName)
 
 	// Cleanup the processed file.
-	moveErr := moveProcessedFile(fileName, newPath) // Fix 3: Renamed 'error' to 'moveErr'
+	moveErr := moveProcessedFile(fileName, newPath)
 	if moveErr != nil {
-		return MoveFileError(fileName, processedDir)
+		return MoveFileError(fileName, p.ProcessedDir)
 	}
 
 	return nil
