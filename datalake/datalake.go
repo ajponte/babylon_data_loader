@@ -63,7 +63,7 @@ func IngestCSVFiles(
 
 	// Ingest all files.
 	for _, file := range files {
-		ingestCSVFile(
+		err = ingestCSVFile( // Fix 1: changed := to =
 			ctx,
 			repo,
 			extractor,
@@ -74,6 +74,10 @@ func IngestCSVFiles(
 			moveProcessedFiles,
 			*stats,
 			*logger)
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to ingest CSV file", "file", file.Name(), "error", err)
+			stats.AddFailure(file.Name(), err.Error())
+		}
 	}
 
 	return stats, nil
@@ -92,15 +96,15 @@ func ingestCSVFile(
 	stats Stats,
 	logger slog.Logger,
 ) error {
-	var err error
 	if !validateCSVFile(file) {
 		reason := "Not a valid CSV file"
 		stats.AddFailure(file.Name(), reason)
 		logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
+		return fmt.Errorf("file %s is not a valid CSV file", file.Name()) // Fix 4
 	}
 
 	// Process the file.
-	err = processFile(
+	err := processFile(
 		ctx,
 		logger,
 		repo,
@@ -110,13 +114,13 @@ func ingestCSVFile(
 		unprocessedDir,
 		processedDir,
 		moveProcessedFiles)
-
 	if err != nil {
 		stats.AddFailure(file.Name(), err.Error())
 		logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
-	} else {
-		stats.IncrementProcessed()
+		return fmt.Errorf("failed to process file %s: %w", file.Name(), err) // Fix 4
 	}
+	// Fix 5: Removed else block
+	stats.IncrementProcessed()
 	return nil
 }
 
@@ -205,7 +209,7 @@ func mapRawRecordsToTransactions(
 	var transactions []model.Transaction
 
 	// ValidPostingDateHeaders is a list of valid header names for the posting date column.
-	var validPostingDateHeaders = []string{
+	validPostingDateHeaders := []string{
 		"Post Date",
 		"Posting Date",
 		"post date",
@@ -280,7 +284,9 @@ func moveFile(
 	processedDir string,
 	logger slog.Logger,
 ) error {
-	checkProcessedDir(ctx, processedDir, logger)
+	if err := checkProcessedDir(ctx, processedDir, logger); err != nil { // Fix 2
+		return fmt.Errorf("failed to check/create processed directory: %w", err)
+	}
 
 	// Make sure we're at the base-path of the source directory.
 	fileName := filepath.Base(processedFilePath)
@@ -289,8 +295,8 @@ func moveFile(
 	newPath := filepath.Join(processedDir, fileName)
 
 	// Cleanup the processed file.
-	error := moveProcessedFile(fileName, newPath)
-	if error != nil {
+	moveErr := moveProcessedFile(fileName, newPath) // Fix 3: Renamed 'error' to 'moveErr'
+	if moveErr != nil {
 		return MoveFileError(fileName, processedDir)
 	}
 

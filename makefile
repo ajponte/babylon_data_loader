@@ -55,14 +55,19 @@ tidy: ## runs tidy to fix go.mod dependencies
 	go mod tidy
 
 ## Test
-test: ## runs tests and create generates coverage report
+test-ci: ## runs tests and create generates coverage report
 	make tidy
 	make vendor
 	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
 	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
+	go test
+unit-test: ## runs unit tests and creates a coverage report
+	make tidy
+	make vendor
+	go test -v -timeout 10m ./... -coverprofile=coverage.out
 
 coverage: ## displays test coverage report in html mode
-	make test
+	make unit-test
 	go tool cover -html=coverage.out
 
 ## Build
@@ -115,11 +120,11 @@ rollback: build
 
 
 
-.PHONY: all test build vendor
+.PHONY: all test-ci build vendor unit-test
 ## All
 all: ## runs setup, quality checks and builds
 	make check-quality
-	make test
+	make unit-test
 	make build
 
 .PHONY: help

@@ -2,6 +2,8 @@ package datalake
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -94,9 +96,10 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		t.Fatalf("failed to get file info: %v", err)
 	}
 	dirEntry := newMockDirEntry(fileInfo)
+	mockLogger := *slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Call processFile with mocks
-	if processErr := processFile(ctx, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
+	if processErr := processFile(ctx, mockLogger, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
 		t.Fatalf("processFile failed: %v", processErr)
 	}
 
@@ -180,9 +183,10 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		t.Fatalf("failed to get file info: %v", err)
 	}
 	dirEntry := newMockDirEntry(fileInfo)
+	mockLogger := *slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Call processFile with mocks
-	if processErr := processFile(ctx, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
+	if processErr := processFile(ctx, mockLogger, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
 		t.Fatalf("processFile failed: %v", processErr)
 	}
 
