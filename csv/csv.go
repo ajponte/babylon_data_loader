@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	errTargetFileNotFound = errors.New("the valid target file was found")
+	errTargetFileNotFound = errors.New("the valid target file was not found")
 	errInvalidDataSource  = errors.New("data source is not valid")
 	errProcessCsv         = errors.New("error while parsing CSV file")
 )
