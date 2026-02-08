@@ -118,10 +118,15 @@ func processFile(
 	return nil
 }
 
-// mapRawRecordsToTransactions converts a slice of raw CSV records (map[string]string)
-// into a slice of model.Transaction structs, performing necessary type conversions and validations.
-//
-//nolint:unparam // error is always nil for now, but may be used later
+func getPostingDate(record map[string]string, validHeaders []string) string {
+	for _, header := range validHeaders {
+		if date, ok := record[header]; ok && date != "" {
+			return date
+		}
+	}
+	return ""
+}
+
 func mapRawRecordsToTransactions(
 	ctx context.Context,
 	rawRecords []map[string]string,
@@ -131,8 +136,16 @@ func mapRawRecordsToTransactions(
 	logger := bcontext.LoggerFromContext(ctx)
 	var transactions []model.Transaction
 
+	// ValidPostingDateHeaders is a list of valid header names for the posting date column.
+	var validPostingDateHeaders = []string{
+		"Post Date",
+		"Posting Date",
+		"post date",
+		"posting date",
+	}
+
 	for _, record := range rawRecords {
-		postingDateStr := record["posting date"]
+		postingDateStr := getPostingDate(record, validPostingDateHeaders)
 		if postingDateStr == "" {
 			logger.WarnContext(ctx, "Skipping record with empty posting date", "record", record)
 			continue
@@ -183,6 +196,10 @@ func mapRawRecordsToTransactions(
 			DataSource:     dataSource,
 			AccountID:      accountID,
 		})
+	}
+
+	if len(rawRecords) > 0 && len(transactions) == 0 {
+		return nil, fmt.Errorf("no valid transactions could be processed from %d raw records", len(rawRecords))
 	}
 
 	return transactions, nil
