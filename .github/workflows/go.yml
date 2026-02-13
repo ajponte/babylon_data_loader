@@ -20,14 +20,14 @@ jobs:
       with:
         go-version: '1.24'
 
-    - name: Install golangci-lint
-      run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.57.1
-
-    - name: Run make lint
-      run: make lint
+    # The official action handles installation of the latest version of golangci-lint
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v8
+      with:
+        version: v2.4.0
 
     - name: Run make build
       run: make build
 
-    - name: Run make test-ci
-      run: make test-ci
+    - name: Run make test
+      run: make test
