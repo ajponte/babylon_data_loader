@@ -32,6 +32,9 @@ GO_IMPORTS_FMT := $(shell go env GOPATH)/bin/goimports
 # use the `gofumpt` package for strict formatting.
 GO_FMT_STRICT := $(shell go env GOPATH)/bin/gofumpt
 
+GOLANGCI_LINT ?= golangci-lint
+
+
 ## Quality
 check-quality: ## runs code quality checks
 	make lint
@@ -40,7 +43,7 @@ check-quality: ## runs code quality checks
 
 # Append || true below if blocking local developement
 lint: ## go linting. Update and use specific lint tool and options
-	golangci-lint run
+	$(GOLANGCI_LINT) run
 
 vet: ## go vet
 	go vet ./...
