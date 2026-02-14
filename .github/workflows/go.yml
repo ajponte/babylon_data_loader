@@ -18,7 +18,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.24'
+        go-version: '1.26'
 
     # The official action handles installation of the latest version of golangci-lint
     - name: Run golangci-lint
