@@ -129,11 +129,8 @@ func (p *CSVFileProcessor) ingestCSVFile(
 	file os.DirEntry,
 ) error {
 	if !validateCSVFile(file) {
-
 		reason := "Not a valid CSV file"
-
 		p.Stats.AddFailure(file.Name(), reason)
-
 		p.Logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
 
 		return fmt.Errorf("file %s is not a valid CSV file", file.Name())
@@ -141,16 +138,11 @@ func (p *CSVFileProcessor) ingestCSVFile(
 	}
 
 	// Process the file.
-
 	err := p.processFile(
-
 		ctx,
-
 		file)
 	if err != nil {
-
 		p.Stats.AddFailure(file.Name(), err.Error())
-
 		p.Logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
 
 		return fmt.Errorf("failed to process file %s: %w", file.Name(), err)

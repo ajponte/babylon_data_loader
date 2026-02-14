@@ -59,7 +59,7 @@ func TestProcessFile(t *testing.T) {
 
 	// Create a temporary CSV file with one valid record
 	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "Chase_test.csv")
+	filePath := filepath.Join(tmpDir, "generic_test.csv")
 
 	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
 DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEBIT_CARD,11190.76,`
@@ -71,7 +71,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	mockRepo := &mockRepository{}
 	mockExtractor := &mockInfoExtractor{
 		info: &datasource.SourceInfo{
-			DataSource: "chase",
+			DataSource: string(datasource.Generic),
 			AccountID:  "1234",
 		},
 	}
@@ -137,7 +137,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		Type:           "DEBIT_CARD",
 		Balance:        11190.76,
 		CheckOrSlipNum: "",
-		DataSource:     "chase",
+		DataSource:     string(datasource.Generic),
 		AccountID:      "1234",
 	}
 

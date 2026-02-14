@@ -75,11 +75,11 @@ func run(logger *slog.Logger, command string, args []string) error {
 
 		mongoProvider := storage.NewMongoProvider(client)
 		repo := storage.NewMongoRepository(mongoProvider)
-		chaseExtractor := datasource.NewChaseExtractor()
+		genericExtractor := datasource.NewGenericExtractor()
 		csvParser := csvparser.NewDefaultParser()
 
 		// Create and run sink
-		sink := ingest.NewSink(logger, cfg, repo, chaseExtractor, csvParser)
+		sink := ingest.NewSink(logger, cfg, repo, genericExtractor, csvParser)
 		return sink.Ingest(ctx)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
