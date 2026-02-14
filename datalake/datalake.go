@@ -2,7 +2,9 @@ package datalake
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,112 +12,156 @@ import (
 	"time"
 
 	bcontext "babylon/dataloader/appcontext"
-	"babylon/dataloader/csv"
+	csvparser "babylon/dataloader/csv"
 
 	"babylon/dataloader/datalake/datasource"
 	"babylon/dataloader/datalake/model"
 	"babylon/dataloader/datalake/repository"
 )
 
-// IngestCSVFiles processes all CSV files in a given directory and uploads them to MongoDB.
-func IngestCSVFiles(
-	ctx context.Context,
+var (
+	errTargetFileNotFound = errors.New("the valid directory target was not found")
+	errCreateDirectory    = errors.New("the valid directory target was not found")
+	errMoveFile           = errors.New("failed to move file")
+)
+
+func ValidFileNotFoundError(filePath string) error {
+	return fmt.Errorf("%w, %s", errTargetFileNotFound, filePath)
+}
+
+func CreateDirectoryError(directoryPath string) error {
+	return fmt.Errorf("%w, %s", errCreateDirectory, directoryPath)
+}
+
+func MoveFileError(source string, target string) error {
+	return fmt.Errorf("%w, %s, %s", errMoveFile, source, target)
+}
+
+// CSVFileProcessor encapsulates dependencies and configuration for processing CSV files.
+type CSVFileProcessor struct {
+	Repo               repository.Repository
+	Extractor          datasource.InfoExtractor
+	Parser             csvparser.Parser
+	UnprocessedDir     string
+	ProcessedDir       string
+	MoveProcessedFiles bool
+	Stats              *Stats
+	Logger             slog.Logger
+}
+
+// NewCSVFileProcessor creates a new CSVFileProcessor instance.
+func NewCSVFileProcessor(
 	repo repository.Repository,
 	extractor datasource.InfoExtractor,
-	parser csv.Parser,
+	parser csvparser.Parser,
 	unprocessedDir string,
 	processedDir string,
 	moveProcessedFiles bool,
-) (*Stats, error) {
-	logger := bcontext.LoggerFromContext(ctx)
-	logger.InfoContext(ctx, "Reading data from sink", "sink", unprocessedDir)
-
-	files, err := os.ReadDir(unprocessedDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
+	stats *Stats,
+	logger slog.Logger,
+) *CSVFileProcessor {
+	return &CSVFileProcessor{
+		Repo:               repo,
+		Extractor:          extractor,
+		Parser:             parser,
+		UnprocessedDir:     unprocessedDir,
+		ProcessedDir:       processedDir,
+		MoveProcessedFiles: moveProcessedFiles,
+		Stats:              stats,
+		Logger:             logger,
 	}
-
-	stats := NewStats()
-	stats.TotalFiles = len(files)
-
-	logger.InfoContext(ctx, "looping through files", "files", files)
-
-	for _, file := range files {
-		// Validate that's it's a real CSV file.
-		if !validateFile(file) {
-			reason := "Not a valid CSV file"
-			stats.AddFailure(file.Name(), reason)
-			logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
-		}
-		// Process the file.
-		err = processFile(ctx, repo, extractor, parser, file, unprocessedDir, processedDir, moveProcessedFiles)
-		if err != nil {
-			stats.AddFailure(file.Name(), err.Error())
-			logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
-		} else {
-			stats.IncrementProcessed()
-		}
-	}
-
-	return stats, nil
 }
 
-// Return true only if the entry pointed to by FILE is valid.
-func validateFile(
-	file os.DirEntry,
-) bool {
-	if file.IsDir() || (!strings.HasSuffix(file.Name(), ".csv") && !strings.HasSuffix(file.Name(), ".CSV")) {
-		return false
-	}
-	return true
-}
+// Ingest a CSV file into the datalake.
 
-// Process the file.
-func processFile(
+func (p *CSVFileProcessor) ingestCSVFile(
 	ctx context.Context,
-	repo repository.Repository,
-	extractor datasource.InfoExtractor,
-	parser csv.Parser,
+
 	file os.DirEntry,
-	unprocessedDir string,
-	processedDir string,
-	moveProcessedFiles bool,
 ) error {
-	sourceInfo, err := extractor.ExtractInfo(file.Name())
+	if !validateCSVFile(file) {
+		reason := "Not a valid CSV file"
+		p.Stats.AddFailure(file.Name(), reason)
+		p.Logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
+
+		return fmt.Errorf("file %s is not a valid CSV file", file.Name())
+
+	}
+
+	// Process the file.
+	err := p.processFile(
+		ctx,
+		file)
+	if err != nil {
+		p.Stats.AddFailure(file.Name(), err.Error())
+		p.Logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
+
+		return fmt.Errorf("failed to process file %s: %w", file.Name(), err)
+
+	}
+
+	p.Stats.IncrementProcessed()
+
+	return nil
+}
+
+// Process the file in the directory.
+// This function will:
+//   - Parse the unprocessedFile csv in unprocessedDir row by row.
+//   - Map each row to mongo datalake models.
+//   - Upsert the models to appropriate collections.
+//   - Move the file to the unprocessedDir, only if the moveProcessedFiles
+//     flag is enabled.
+func (p *CSVFileProcessor) processFile(
+	ctx context.Context,
+	unprocessedFile os.DirEntry,
+) error {
+	sourceInfo, err := p.Extractor.ExtractInfo(unprocessedFile.Name())
 	if err != nil {
 		return fmt.Errorf("failed to extract source info: %w", err)
 	}
 	dataSource := sourceInfo.DataSource
 	accountID := sourceInfo.AccountID
 
-	cleanFileName := filepath.Clean(file.Name())
-	if strings.HasPrefix(cleanFileName, "../") {
-		return csv.ValidFileNotFoundError(file.Name())
-	}
+	unprocessedFilePath := sanitizeFilePath(unprocessedFile, p.UnprocessedDir)
 
-	filePath := filepath.Join(unprocessedDir, cleanFileName)
-	rawRecords, _, err := parser.Parse(ctx, filePath, dataSource, accountID)
+	// Parse raw records.
+	rawRecords, _, err := p.Parser.Parse(ctx, unprocessedFilePath, dataSource, accountID)
 	if err != nil {
 		return err
 	}
 
+	// Create transaction mappings.
 	transactions, err := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
 	if err != nil {
 		return err
 	}
 
-	if err = repo.BulkUpsertTransactions(ctx, transactions); err != nil {
+	// Upsert documents to datalake collection.
+	if err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
 		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
 	}
 
-	if moveProcessedFiles {
-		err = moveFile(filePath, processedDir)
+	// Move the file, only if moveProcessedFiles is enabled.
+	if p.MoveProcessedFiles {
+		err = p.moveFile(ctx, unprocessedFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to move file: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// Return a sanitized path to the file.
+func sanitizeFilePath(file os.DirEntry, dir string) string {
+	// Return the shortest path name to the file.
+	sanitizedFileName := filepath.Clean(file.Name())
+
+	// Build unprocessed file path.
+	filePath := filepath.Join(dir, sanitizedFileName)
+
+	return filePath
 }
 
 func getPostingDate(record map[string]string, validHeaders []string) string {
@@ -134,16 +180,40 @@ func mapRawRecordsToTransactions(
 	accountID string,
 ) ([]model.Transaction, error) {
 	logger := bcontext.LoggerFromContext(ctx)
-	var transactions []model.Transaction
 
-	// ValidPostingDateHeaders is a list of valid header names for the posting date column.
-	var validPostingDateHeaders = []string{
+	validPostingDateHeaders := []string{
 		"Post Date",
 		"Posting Date",
 		"post date",
 		"posting date",
 	}
 
+	transactions := fromRecords(
+		ctx,
+		dataSource,
+		accountID,
+		rawRecords,
+		validPostingDateHeaders,
+		*logger,
+	)
+
+	if len(rawRecords) > 0 && len(transactions) == 0 {
+		return nil, fmt.Errorf("no valid transactions could be processed from %d raw records", len(rawRecords))
+	}
+
+	return transactions, nil
+}
+
+// Map raw records to transaction DTOs.
+func fromRecords(
+	ctx context.Context,
+	dataSource string,
+	accountID string,
+	rawRecords []map[string]string,
+	validPostingDateHeaders []string,
+	logger slog.Logger,
+) []model.Transaction {
+	var transactions []model.Transaction
 	for _, record := range rawRecords {
 		postingDateStr := getPostingDate(record, validPostingDateHeaders)
 		if postingDateStr == "" {
@@ -197,28 +267,61 @@ func mapRawRecordsToTransactions(
 			AccountID:      accountID,
 		})
 	}
-
-	if len(rawRecords) > 0 && len(transactions) == 0 {
-		return nil, fmt.Errorf("no valid transactions could be processed from %d raw records", len(rawRecords))
-	}
-
-	return transactions, nil
+	return transactions
 }
 
-func moveFile(filePath, processedDir string) error {
-	var err error
-	if _, err = os.Stat(processedDir); os.IsNotExist(err) {
-		if err = os.MkdirAll(processedDir, 0o750); err != nil {
-			return fmt.Errorf("failed to create processed directory '%s': %w", processedDir, err)
-		}
+// Move the file from processedFilePath to processedDir.
+func (p *CSVFileProcessor) moveFile(
+	ctx context.Context,
+	processedFilePath string,
+) error {
+	if err := checkProcessedDir(ctx, p.ProcessedDir, p.Logger); err != nil {
+		return fmt.Errorf("failed to check/create processed directory: %w", err)
 	}
 
-	fileName := filepath.Base(filePath)
-	newPath := filepath.Join(processedDir, fileName)
+	// Make sure we're at the base-path of the source directory.
+	fileName := filepath.Base(processedFilePath)
 
-	if err = os.Rename(filePath, newPath); err != nil {
-		return fmt.Errorf("failed to move file from '%s' to '%s': %w", filePath, newPath, err)
+	// Build processed file path.
+	newPath := filepath.Join(p.ProcessedDir, fileName)
+
+	// Cleanup the processed file.
+	moveErr := moveProcessedFile(fileName, newPath)
+	if moveErr != nil {
+		return MoveFileError(fileName, p.ProcessedDir)
 	}
 
 	return nil
+}
+
+// Attempt to permanently move the moveProcessedFile file by renaming it.
+func moveProcessedFile(processedFilePath string, newPath string) error {
+	var err error
+	if err = os.Rename(processedFilePath, newPath); err != nil {
+		return CreateDirectoryError(err.Error())
+	}
+
+	return nil
+}
+
+func checkProcessedDir(ctx context.Context, processedDir string, logger slog.Logger) error {
+	var err error
+	if _, err = os.Stat(processedDir); os.IsNotExist(err) {
+		if err = os.MkdirAll(processedDir, 0o750); err != nil {
+			logger.DebugContext(ctx, "failed to create processed directory")
+			return ValidFileNotFoundError(processedDir)
+		}
+	}
+	logger.DebugContext(ctx, "Processed Directory already exists.")
+	return nil
+}
+
+// Return true only if the entry is a valid csv.
+func validateCSVFile(
+	file os.DirEntry,
+) bool {
+	if file.IsDir() || (!strings.HasSuffix(file.Name(), ".csv") && !strings.HasSuffix(file.Name(), ".CSV")) {
+		return false
+	}
+	return true
 }

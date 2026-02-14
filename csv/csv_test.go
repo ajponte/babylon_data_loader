@@ -1,4 +1,4 @@
-package csv
+package csvparser_test
 
 import (
 	"context"
@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	. "babylon/dataloader/csv"
+	"babylon/dataloader/datalake/datasource"
 )
 
 // createTempCSV creates a temporary CSV file with the given content.
@@ -23,8 +26,8 @@ func TestParseCSV_Success(t *testing.T) {
 	csvContent := `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
 DEBIT,01/01/2024,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",Shopping,-75.77,DEBIT_CARD,11190.76,
 CREDIT,01/02/2024,"ONLINE PAYMENT THANK YOU",Payment,1000.00,PAYMENT,10114.36,`
-	filePath := createTempCSV(t, "chase_valid.csv", csvContent)
-	dataSource := "chase"
+	filePath := createTempCSV(t, "generic_valid.csv", csvContent)
+	dataSource := string(datasource.Generic)
 	accountID := "1234"
 
 	parser := NewDefaultParser()
@@ -96,8 +99,8 @@ func TestParseCSV_DifferentColumnOrder(t *testing.T) {
 	csvContent := `Amount,Description,Posting Date,Details,Category,Type,Balance
 -75.77,"Transaction 1","01/01/2024","DEBIT","Shopping","DEBIT_CARD","100.00"
 100.00,"Transaction 2","01/02/2024","CREDIT","Payment","PAYMENT","200.00"`
-	filePath := createTempCSV(t, "chase_reordered.csv", csvContent)
-	dataSource := "chase"
+	filePath := createTempCSV(t, "generic_reordered.csv", csvContent)
+	dataSource := string(datasource.Generic)
 	accountID := "5678"
 
 	parser := NewDefaultParser()
@@ -146,8 +149,8 @@ func TestParseCSV_InvalidRecord(t *testing.T) {
 	ctx := context.Background()
 	csvContent := `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
 DEBIT,01/01/2024,Test,Shopping,-75.77` // Missing columns
-	filePath := createTempCSV(t, "chase_invalid_record.csv", csvContent)
-	dataSource := "chase"
+	filePath := createTempCSV(t, "generic_invalid_record.csv", csvContent)
+	dataSource := string(datasource.Generic)
 
 	parser := NewDefaultParser()
 	data, _, err := parser.Parse(ctx, filePath, dataSource, "0000")
@@ -163,8 +166,8 @@ func TestParseCSV_InvalidDateFormat(t *testing.T) {
 	ctx := context.Background()
 	csvContent := `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
 DEBIT,InvalidDate,Test,Shopping,-75.77,DEBIT_CARD,11190.76,`
-	filePath := createTempCSV(t, "chase_invalid_date.csv", csvContent)
-	dataSource := "chase"
+	filePath := createTempCSV(t, "generic_invalid_date.csv", csvContent)
+	dataSource := string(datasource.Generic)
 
 	parser := NewDefaultParser()
 	data, _, err := parser.Parse(ctx, filePath, dataSource, "0000")
@@ -184,8 +187,8 @@ DEBIT,InvalidDate,Test,Shopping,-75.77,DEBIT_CARD,11190.76,`
 
 func TestParseCSV_EmptyFile(t *testing.T) {
 	ctx := context.Background()
-	filePath := createTempCSV(t, "chase_empty.csv", "")
-	dataSource := "chase"
+	filePath := createTempCSV(t, "generic_empty.csv", "")
+	dataSource := string(datasource.Generic)
 
 	parser := NewDefaultParser()
 	data, recordsProcessed, err := parser.Parse(ctx, filePath, dataSource, "0000")
@@ -203,7 +206,7 @@ func TestParseCSV_EmptyFile(t *testing.T) {
 func TestParseCSV_FileNotFound(t *testing.T) {
 	ctx := context.Background()
 	filePath := "non_existent_file.csv"
-	dataSource := "chase"
+	dataSource := string(datasource.Generic)
 
 	parser := NewDefaultParser()
 	_, _, err := parser.Parse(ctx, filePath, dataSource, "0000")

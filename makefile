@@ -32,6 +32,9 @@ GO_IMPORTS_FMT := $(shell go env GOPATH)/bin/goimports
 # use the `gofumpt` package for strict formatting.
 GO_FMT_STRICT := $(shell go env GOPATH)/bin/gofumpt
 
+GOLANGCI_LINT ?= golangci-lint
+
+
 ## Quality
 check-quality: ## runs code quality checks
 	make lint
@@ -40,7 +43,7 @@ check-quality: ## runs code quality checks
 
 # Append || true below if blocking local developement
 lint: ## go linting. Update and use specific lint tool and options
-	golangci-lint run
+	$(GOLANGCI_LINT) run
 
 vet: ## go vet
 	go vet ./...
@@ -54,15 +57,21 @@ fmt: ## runs go formatters
 tidy: ## runs tidy to fix go.mod dependencies
 	go mod tidy
 
-## Test
-test: ## runs tests and create generates coverage report
+## Temporary fix for running tests with coverage report.
+## Right now these are exactly the same as `unit-test`.
+test-ci: ## runs tests and create generates coverage report
 	make tidy
 	make vendor
 	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
 	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
+	go test
+unit-test: ## runs unit tests and creates a coverage report
+	make tidy
+	make vendor
+	go test -v -timeout 10m ./... -coverprofile=coverage.out
 
 coverage: ## displays test coverage report in html mode
-	make test
+	make unit-test
 	go tool cover -html=coverage.out
 
 ## Build
@@ -115,11 +124,11 @@ rollback: build
 
 
 
-.PHONY: all test build vendor
+.PHONY: all test-ci build vendor unit-test
 ## All
 all: ## runs setup, quality checks and builds
 	make check-quality
-	make test
+	make unit-test
 	make build
 
 .PHONY: help

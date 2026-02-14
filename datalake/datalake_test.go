@@ -2,11 +2,12 @@ package datalake
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
-	_ "babylon/dataloader/csv"
 	"babylon/dataloader/datalake/datasource"
 	"babylon/dataloader/datalake/model"
 	_ "babylon/dataloader/datalake/repository"
@@ -58,7 +59,7 @@ func TestProcessFile(t *testing.T) {
 
 	// Create a temporary CSV file with one valid record
 	tmpDir := t.TempDir()
-	filePath := filepath.Join(tmpDir, "Chase_test.csv")
+	filePath := filepath.Join(tmpDir, "generic_test.csv")
 
 	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
 DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEBIT_CARD,11190.76,`
@@ -70,7 +71,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	mockRepo := &mockRepository{}
 	mockExtractor := &mockInfoExtractor{
 		info: &datasource.SourceInfo{
-			DataSource: "chase",
+			DataSource: string(datasource.Generic),
 			AccountID:  "1234",
 		},
 	}
@@ -88,6 +89,20 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 			},
 		},
 	}
+	mockStats := NewStats()
+	mockLogger := *slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Create CSVFileProcessor
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		mockExtractor,
+		mockParser,
+		tmpDir, // unprocessedDir
+		"",     // processedDir
+		false,  // moveProcessedFiles
+		mockStats,
+		mockLogger,
+	)
 
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
@@ -96,7 +111,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	dirEntry := newMockDirEntry(fileInfo)
 
 	// Call processFile with mocks
-	if processErr := processFile(ctx, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
+	if processErr := processor.processFile(ctx, dirEntry); processErr != nil { // Call method on processor
 		t.Fatalf("processFile failed: %v", processErr)
 	}
 
@@ -122,7 +137,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		Type:           "DEBIT_CARD",
 		Balance:        11190.76,
 		CheckOrSlipNum: "",
-		DataSource:     "chase",
+		DataSource:     string(datasource.Generic),
 		AccountID:      "1234",
 	}
 
@@ -174,6 +189,20 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 			},
 		},
 	}
+	mockStats := NewStats()
+	mockLogger := *slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Create CSVFileProcessor
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		mockExtractor,
+		mockParser,
+		tmpDir, // unprocessedDir
+		"",     // processedDir
+		false,  // moveProcessedFiles
+		mockStats,
+		mockLogger,
+	)
 
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
@@ -182,7 +211,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	dirEntry := newMockDirEntry(fileInfo)
 
 	// Call processFile with mocks
-	if processErr := processFile(ctx, mockRepo, mockExtractor, mockParser, dirEntry, tmpDir, "", false); processErr != nil {
+	if processErr := processor.processFile(ctx, dirEntry); processErr != nil { // Call method on processor
 		t.Fatalf("processFile failed: %v", processErr)
 	}
 

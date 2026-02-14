@@ -69,11 +69,11 @@ func (c *MongoCollection) InsertOne(
 
 // MongoProvider adapts *mongo.Client to CollectionProvider.
 type MongoProvider struct {
-	client *mongo.Client
+	client MongoClient
 }
 
 // NewMongoProvider creates a new MongoProvider.
-func NewMongoProvider(client *mongo.Client) *MongoProvider {
+func NewMongoProvider(client MongoClient) *MongoProvider {
 	return &MongoProvider{client: client}
 }
 
@@ -82,8 +82,14 @@ func (p *MongoProvider) Collection(name string) DataStore {
 	return &MongoCollection{p.client.Database(dbName).Collection(name)}
 }
 
+// ConnectToMongoDBFunc is a variable that holds the ConnectToMongoDB function.
+// This is used to allow mocking the function in tests.
+//
+//nolint:gochecknoglobals // This is a deliberate choice to allow mocking.
+var ConnectToMongoDBFunc = ConnectToMongoDB
+
 // ConnectToMongoDB establishes a connection to MongoDB.
-func ConnectToMongoDB(ctx context.Context, uri string) (*mongo.Client, error) {
+func ConnectToMongoDB(ctx context.Context, uri string) (MongoClient, error) {
 	logger := bcontext.LoggerFromContext(ctx) // Changed to use bcontext
 	logger.DebugContext(ctx, "Attempting to connect to MongoDB", "uri", uri)
 
@@ -100,7 +106,7 @@ func ConnectToMongoDB(ctx context.Context, uri string) (*mongo.Client, error) {
 	}
 
 	logger.InfoContext(ctx, "Successfully established connection to MongoDB")
-	return client, nil
+	return NewMongoClient(client), nil
 }
 
 // WithLogger returns a new context with the provided logger.

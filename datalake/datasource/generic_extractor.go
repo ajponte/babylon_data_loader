@@ -1,6 +1,7 @@
 package datasource
 
 import (
+	"regexp"
 	"strings"
 )
 
@@ -16,10 +17,23 @@ func NewGenericExtractor() *GenericExtractor {
 func (e *GenericExtractor) ExtractInfo(filename string) (*SourceInfo, error) {
 	lowerFileName := strings.ToLower(filename)
 
-	if strings.Contains(lowerFileName, "test") {
+	if strings.Contains(lowerFileName, "chase") {
+		// Use a regular expression to find the 4-digit account number after "chase"
+		re := regexp.MustCompile(`chase(\d{4})`)
+		matches := re.FindStringSubmatch(lowerFileName)
+
+		if len(matches) > 1 {
+			return &SourceInfo{
+				DataSource: string(Chase),
+				AccountID:  matches[1],
+			}, nil
+		}
+	}
+
+	if strings.Contains(lowerFileName, "synthetic") {
 		return &SourceInfo{
-			DataSource: "test",
-			AccountID:  "0000", // Assign a default account ID for test files
+			DataSource: string(Synthetic),
+			AccountID:  "0000", // Assign a default account ID for synthetic files
 		}, nil
 	}
 
