@@ -8,4 +8,6 @@ const (
 	Generic DataSource = "generic"
 	// Chase represents the Chase data source.
 	Chase DataSource = "chase"
+	// Synthetic represents a synthetic data source.
+	Synthetic DataSource = "synthetic"
 )

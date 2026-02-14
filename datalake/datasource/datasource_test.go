@@ -21,10 +21,10 @@ func TestGenericExtractor_ExtractInfo_Success(t *testing.T) {
 		expectedDS  datasource.DataSource
 		expectedAcc string
 	}{
-		{"test_file.csv", datasource.Generic, "0000"},
-		{"my_test_statement.pdf", datasource.Generic, "0000"},
-		{"TEST_transactions.xls", datasource.Generic, "0000"},
-		{"another_file_test.txt", datasource.Generic, "0000"},
+		{"synthetic_file.csv", datasource.Synthetic, "0000"},
+		{"my_synthetic_statement.pdf", datasource.Synthetic, "0000"},
+		{"SYNTHETIC_transactions.xls", datasource.Synthetic, "0000"},
+		{"another_file_synthetic.txt", datasource.Synthetic, "0000"},
 	}
 
 	for _, test := range tests {

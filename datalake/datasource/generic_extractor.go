@@ -30,10 +30,10 @@ func (e *GenericExtractor) ExtractInfo(filename string) (*SourceInfo, error) {
 		}
 	}
 
-	if strings.Contains(lowerFileName, "test") {
+	if strings.Contains(lowerFileName, "synthetic") {
 		return &SourceInfo{
-			DataSource: "test",
-			AccountID:  "0000", // Assign a default account ID for test files
+			DataSource: string(Synthetic),
+			AccountID:  "0000", // Assign a default account ID for synthetic files
 		}, nil
 	}
 
