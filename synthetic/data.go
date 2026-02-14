@@ -10,8 +10,7 @@ import (
 	"time"
 
 	bcontext "babylon/dataloader/appcontext"
-
-	"go.mongodb.org/mongo-driver/mongo"
+	"babylon/dataloader/storage"
 )
 
 const (
@@ -66,7 +65,7 @@ func GenerateSyntheticDocuments(rows int) []Data {
 // PersistSyntheticData persists a slice of synthetic data to MongoDB.
 func PersistSyntheticData(
 	ctx context.Context,
-	client *mongo.Client,
+	client storage.MongoClient,
 	collectionName string,
 	documents []Data,
 ) error {
@@ -94,7 +93,7 @@ func PersistSyntheticData(
 // GenerateAndPersistSyntheticData generates synthetic data and persists it directly to MongoDB.
 func GenerateAndPersistSyntheticData(
 	ctx context.Context,
-	client *mongo.Client,
+	client storage.MongoClient,
 	collectionName string,
 	rows int,
 ) error {

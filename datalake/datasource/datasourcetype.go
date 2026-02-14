@@ -6,4 +6,6 @@ type DataSource string
 const (
 	// Generic represents a generic data source.
 	Generic DataSource = "generic"
+	// Chase represents the Chase data source.
+	Chase DataSource = "chase"
 )

@@ -11,10 +11,10 @@ import (
 	bcontext "babylon/dataloader/appcontext"
 	"babylon/dataloader/config"
 	csvparser "babylon/dataloader/csv"
+	"babylon/dataloader/datalake"
 	"babylon/dataloader/datalake/datasource"
 	_ "babylon/dataloader/datalake/repository"
 	"babylon/dataloader/ingest"
-
 	"babylon/dataloader/storage"
 	"babylon/dataloader/synthetic"
 )
@@ -77,9 +77,17 @@ func run(logger *slog.Logger, command string, args []string) error {
 		repo := storage.NewMongoRepository(mongoProvider)
 		genericExtractor := datasource.NewGenericExtractor()
 		csvParser := csvparser.NewDefaultParser()
+		datalakeClient := datalake.NewClient()
 
 		// Create and run sink
-		sink := ingest.NewSink(logger, cfg, repo, genericExtractor, csvParser)
+		sink := ingest.NewSink(ingest.SinkDependencies{
+			Logger:         logger,
+			Config:         cfg,
+			Repo:           repo,
+			Extractor:      genericExtractor,
+			Parser:         csvParser,
+			DatalakeClient: datalakeClient,
+		})
 		return sink.Ingest(ctx)
 	default:
 		return fmt.Errorf("unknown command: %s", command)
