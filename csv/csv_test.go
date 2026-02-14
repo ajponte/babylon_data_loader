@@ -1,4 +1,4 @@
-package csv
+package csvparser_test
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	. "babylon/dataloader/csv"
 )
 
 // createTempCSV creates a temporary CSV file with the given content.

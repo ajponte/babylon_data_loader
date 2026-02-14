@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"babylon/dataloader/config"
-	"babylon/dataloader/csv"
+	csvparser "babylon/dataloader/csv"
 	"babylon/dataloader/datalake"
 	"babylon/dataloader/datalake/datasource"
 	"babylon/dataloader/datalake/repository"
@@ -21,7 +21,7 @@ type Sink struct {
 	Config             *config.Config
 	Repo               repository.Repository
 	Extractor          datasource.InfoExtractor
-	Parser             csv.Parser
+	Parser             csvparser.Parser
 	UnprocessedDir     string
 	ProcessedDir       string
 	MoveProcessedFiles bool
@@ -33,7 +33,7 @@ func NewSink(
 	cfg *config.Config,
 	repo repository.Repository,
 	extractor datasource.InfoExtractor,
-	parser csv.Parser,
+	parser csvparser.Parser,
 ) *Sink {
 	return &Sink{
 		Logger:             logger,

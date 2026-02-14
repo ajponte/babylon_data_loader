@@ -12,7 +12,7 @@ import (
 	"time"
 
 	bcontext "babylon/dataloader/appcontext"
-	"babylon/dataloader/csv"
+	csvparser "babylon/dataloader/csv"
 
 	"babylon/dataloader/datalake/datasource"
 	"babylon/dataloader/datalake/model"
@@ -41,7 +41,7 @@ func MoveFileError(source string, target string) error {
 type CSVFileProcessor struct {
 	Repo               repository.Repository
 	Extractor          datasource.InfoExtractor
-	Parser             csv.Parser
+	Parser             csvparser.Parser
 	UnprocessedDir     string
 	ProcessedDir       string
 	MoveProcessedFiles bool
@@ -53,7 +53,7 @@ type CSVFileProcessor struct {
 func NewCSVFileProcessor(
 	repo repository.Repository,
 	extractor datasource.InfoExtractor,
-	parser csv.Parser,
+	parser csvparser.Parser,
 	unprocessedDir string,
 	processedDir string,
 	moveProcessedFiles bool,
@@ -77,7 +77,7 @@ func IngestCSVFiles(
 	ctx context.Context,
 	repo repository.Repository,
 	extractor datasource.InfoExtractor,
-	parser csv.Parser,
+	parser csvparser.Parser,
 	unprocessedDir string,
 	processedDir string,
 	moveProcessedFiles bool,

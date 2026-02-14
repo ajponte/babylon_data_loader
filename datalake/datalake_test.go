@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "babylon/dataloader/csv"
 	"babylon/dataloader/datalake/datasource"
 	"babylon/dataloader/datalake/model"
 	_ "babylon/dataloader/datalake/repository"

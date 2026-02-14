@@ -4,14 +4,13 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 
 	bcontext "babylon/dataloader/appcontext"
 	"babylon/dataloader/config"
-	"babylon/dataloader/csv"
+	csvparser "babylon/dataloader/csv"
 	"babylon/dataloader/datalake/datasource"
 	_ "babylon/dataloader/datalake/repository"
 	"babylon/dataloader/ingest"
@@ -58,7 +57,7 @@ func run(logger *slog.Logger, command string, args []string) error {
 
 	switch command {
 	case "generate-synthetic-data":
-		return runGenerateSyntheticData(ctx, logger, args, cfg)
+		return synthetic.RunGenerateSyntheticData(ctx, logger, args, cfg)
 	case "ingest":
 		// Instantiate dependencies
 		client, err := storage.ConnectToMongoDB(ctx, cfg.MongoURI)
@@ -75,7 +74,7 @@ func run(logger *slog.Logger, command string, args []string) error {
 		mongoProvider := storage.NewMongoProvider(client)
 		repo := storage.NewMongoRepository(mongoProvider)
 		chaseExtractor := datasource.NewChaseExtractor()
-		csvParser := csv.NewDefaultParser()
+		csvParser := csvparser.NewDefaultParser()
 
 		// Create and run sink
 		sink := ingest.NewSink(logger, cfg, repo, chaseExtractor, csvParser)
@@ -83,42 +82,4 @@ func run(logger *slog.Logger, command string, args []string) error {
 	default:
 		return fmt.Errorf("unknown command: %s", command)
 	}
-}
-
-// Generate synthetic data for testing.
-func runGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []string, cfg *config.Config) error {
-	genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
-	rows := genFlagSet.Int("rows", cfg.SyntheticDataRows, "Number of rows to generate")
-	dir := genFlagSet.String("dir", cfg.SyntheticDataDir, "Directory to write synthetic data to")
-	persistToMongo := genFlagSet.Bool("persist-to-mongo", false, "Persist synthetic data to MongoDB")
-	if err := genFlagSet.Parse(args); err != nil {
-		return fmt.Errorf("failed to parse flags: %w", err)
-	}
-
-	if *persistToMongo {
-		client, err := storage.ConnectToMongoDB(ctx, cfg.MongoURI)
-		if err != nil {
-			return fmt.Errorf("failed to connect to MongoDB: %w", err)
-		}
-		defer func() {
-			if deferErr := client.Disconnect(ctx); deferErr != nil {
-				logger.ErrorContext(ctx, "Error disconnecting from MongoDB", "error", deferErr)
-			}
-		}()
-
-		err = synthetic.GenerateAndPersistSyntheticData(ctx, client, "synthetic-ingest", *rows)
-		if err != nil {
-			return fmt.Errorf("failed to generate and persist synthetic data: %w", err)
-		}
-		logger.InfoContext(ctx, "Synthetic data generated and persisted successfully")
-		return nil
-	}
-
-	logger.InfoContext(ctx, "Generating synthetic data")
-	err := synthetic.GenerateSyntheticData(*rows, *dir)
-	if err != nil {
-		return fmt.Errorf("failed to generate synthetic data: %w", err)
-	}
-	logger.InfoContext(ctx, "Synthetic data generated successfully")
-	return nil
 }

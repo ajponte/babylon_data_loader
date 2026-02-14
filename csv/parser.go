@@ -1,4 +1,4 @@
-package csv
+package csvparser
 
 import "context"
 
