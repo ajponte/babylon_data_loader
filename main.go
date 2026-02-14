@@ -58,6 +58,8 @@ func run(logger *slog.Logger, command string, args []string) error {
 	switch command {
 	case "generate-synthetic-data":
 		return synthetic.RunGenerateSyntheticData(ctx, logger, args, cfg)
+	// Generate synthetic data for testing.
+	// todo: Add env-specific config to avoid this being ran when deployed.
 	case "ingest":
 		// Instantiate dependencies
 		client, err := storage.ConnectToMongoDB(ctx, cfg.MongoURI)
