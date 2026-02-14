@@ -4,14 +4,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log/slog"
 
+	"babylon/dataloader/appcontext"
 	"babylon/dataloader/config"
 	"babylon/dataloader/storage"
 )
 
 // RunGenerateSyntheticData generates synthetic data for testing.
-func RunGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []string, cfg *config.Config) error {
+func RunGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Config) error {
+	logger := appcontext.LoggerFromContext(ctx)
 	genFlagSet := flag.NewFlagSet("generate-synthetic-data", flag.ExitOnError)
 	rows := genFlagSet.Int("rows", cfg.SyntheticDataRows, "Number of rows to generate")
 	dir := genFlagSet.String("dir", cfg.SyntheticDataDir, "Directory to write synthetic data to")
@@ -21,7 +22,7 @@ func RunGenerateSyntheticData(ctx context.Context, logger *slog.Logger, args []s
 	}
 
 	if *persistToMongo {
-		client, err := storage.ConnectToMongoDB(ctx, cfg.MongoURI)
+		client, err := storage.ConnectToMongoDBFunc(ctx, cfg.MongoURI)
 		if err != nil {
 			return fmt.Errorf("failed to connect to MongoDB: %w", err)
 		}

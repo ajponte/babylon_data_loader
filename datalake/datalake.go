@@ -275,7 +275,7 @@ func (p *CSVFileProcessor) moveFile(
 	ctx context.Context,
 	processedFilePath string,
 ) error {
-	if err := checkProcessedDir(ctx, p.ProcessedDir, p.Logger); err != nil {
+	if err := checkProcessedDir(ctx, p.ProcessedDir); err != nil {
 		return fmt.Errorf("failed to check/create processed directory: %w", err)
 	}
 
@@ -304,7 +304,8 @@ func moveProcessedFile(processedFilePath string, newPath string) error {
 	return nil
 }
 
-func checkProcessedDir(ctx context.Context, processedDir string, logger slog.Logger) error {
+func checkProcessedDir(ctx context.Context, processedDir string) error {
+	logger := bcontext.LoggerFromContext(ctx)
 	var err error
 	if _, err = os.Stat(processedDir); os.IsNotExist(err) {
 		if err = os.MkdirAll(processedDir, 0o750); err != nil {

@@ -3,9 +3,9 @@ package ingest
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 
+	"babylon/dataloader/appcontext"
 	"babylon/dataloader/config"
 	csvparser "babylon/dataloader/csv"
 	"babylon/dataloader/datalake"
@@ -16,7 +16,6 @@ import (
 
 // SinkDependencies holds all the dependencies for the Sink.
 type SinkDependencies struct {
-	Logger         *slog.Logger
 	Config         *config.Config
 	Repo           repository.Repository
 	Extractor      datasource.InfoExtractor
@@ -45,11 +44,12 @@ func NewSink(deps SinkDependencies) *Sink {
 
 // Ingest handles the main data ingestion process.
 func (s *Sink) Ingest(ctx context.Context) error {
-	s.deps.Logger.DebugContext(ctx, "Starting data ingestion process")
+	logger := appcontext.LoggerFromContext(ctx)
+	logger.DebugContext(ctx, "Starting data ingestion process")
 
 	// Directory existence check
 	if _, err := os.Stat(s.UnprocessedDir); err != nil || os.IsNotExist(err) {
-		s.deps.Logger.ErrorContext(
+		logger.ErrorContext(
 			ctx,
 			"The directory does not exist. Please create it and place your CSV files inside.",
 			"dir", s.UnprocessedDir,
@@ -61,15 +61,15 @@ func (s *Sink) Ingest(ctx context.Context) error {
 	// MongoDB connection
 	client, err := storage.ConnectToMongoDBFunc(ctx, s.deps.Config.MongoURI)
 	if err != nil {
-		s.deps.Logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", err)
+		logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", err)
 		return fmt.Errorf("connection to MongoDB failed: %w", err)
 	}
 	defer func() {
 		if deferErr := client.Disconnect(ctx); deferErr != nil {
-			s.deps.Logger.ErrorContext(ctx, "Error disconnecting from MongoDB", "error", deferErr)
+			logger.ErrorContext(ctx, "Error disconnecting from MongoDB", "error", deferErr)
 		}
 	}()
-	s.deps.Logger.InfoContext(ctx, "Successfully connected to MongoDB.")
+	logger.InfoContext(ctx, "Successfully connected to MongoDB.")
 
 	// Call datalake.IngestCSVFiles directly
 	stats, err := s.deps.DatalakeClient.IngestCSVFiles(
@@ -82,12 +82,12 @@ func (s *Sink) Ingest(ctx context.Context) error {
 		s.MoveProcessedFiles,
 	)
 	if err != nil {
-		s.deps.Logger.ErrorContext(ctx, "Error ingesting CSV files", "error", err)
+		logger.ErrorContext(ctx, "Error ingesting CSV files", "error", err)
 		return fmt.Errorf("ingestion of CSV files failed: %w", err)
 	}
 
-	s.deps.Logger.InfoContext(ctx, "Data ingestion process completed successfully.")
-	stats.Log(s.deps.Logger)
+	logger.InfoContext(ctx, "Data ingestion process completed successfully.")
+	stats.Log(logger)
 
 	return nil
 }

@@ -2,8 +2,6 @@ package ingest_test
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,7 +92,7 @@ func (m *mockMongoClient) Database(name string, opts ...*options.DatabaseOptions
 // --- Tests for Sink ---
 
 func TestNewSink(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	cfg := &config.Config{}
 	repo := &mockRepo{}
 	extractor := &mockExtractor{}
@@ -102,7 +100,6 @@ func TestNewSink(t *testing.T) {
 	datalakeClient := &mockClient{}
 
 	deps := ingest.SinkDependencies{
-		Logger:         logger,
 		Config:         cfg,
 		Repo:           repo,
 		Extractor:      extractor,
@@ -118,13 +115,12 @@ func TestNewSink(t *testing.T) {
 }
 
 func TestSink_Ingest_UnprocessedDirNotFound(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	cfg := &config.Config{
 		UnprocessedDir: "/non/existent/dir",
 	}
 
 	deps := ingest.SinkDependencies{
-		Logger: logger,
 		Config: cfg,
 	}
 
@@ -147,7 +143,7 @@ func TestSink_Ingest_MongoConnectionFailed(t *testing.T) {
 }
 
 func TestSink_Ingest_Success(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
 		UnprocessedDir:     tmpDir,
@@ -178,7 +174,6 @@ func TestSink_Ingest_Success(t *testing.T) {
 	}()
 
 	deps := ingest.SinkDependencies{
-		Logger:         logger,
 		Config:         cfg,
 		Repo:           mockRepo,
 		Extractor:      mockExtractor,

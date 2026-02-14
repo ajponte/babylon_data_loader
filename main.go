@@ -47,7 +47,8 @@ func main() {
 
 // Hanlde user input and exectue appropriate behavior.
 func run(logger *slog.Logger, command string, args []string) error {
-	cfg := config.LoadConfig(context.Background(), logger)
+	ctx := bcontext.WithLogger(context.Background(), logger)
+	cfg := config.LoadConfig(ctx)
 	ctx, cancel := context.WithTimeout(
 		bcontext.WithLogger(context.Background(), logger),
 		cfg.Timeout,
@@ -57,7 +58,7 @@ func run(logger *slog.Logger, command string, args []string) error {
 
 	switch command {
 	case "generate-synthetic-data":
-		return synthetic.RunGenerateSyntheticData(ctx, logger, args, cfg)
+		return synthetic.RunGenerateSyntheticData(ctx, args, cfg)
 	// Generate synthetic data for testing.
 	// todo: Add env-specific config to avoid this being ran when deployed.
 	case "ingest":
@@ -81,7 +82,6 @@ func run(logger *slog.Logger, command string, args []string) error {
 
 		// Create and run sink
 		sink := ingest.NewSink(ingest.SinkDependencies{
-			Logger:         logger,
 			Config:         cfg,
 			Repo:           repo,
 			Extractor:      genericExtractor,
