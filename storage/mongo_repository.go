@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	TransactionsCollection = "transactions" // Exported collection name for transactions
+	TransactionsCollection = "transactions"
 	syncTableName          = "dataSync"
 )
 
