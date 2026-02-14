@@ -180,9 +180,7 @@ func mapRawRecordsToTransactions(
 	accountID string,
 ) ([]model.Transaction, error) {
 	logger := bcontext.LoggerFromContext(ctx)
-	var transactions []model.Transaction
 
-	// ValidPostingDateHeaders is a list of valid header names for the posting date column.
 	validPostingDateHeaders := []string{
 		"Post Date",
 		"Posting Date",
@@ -190,6 +188,32 @@ func mapRawRecordsToTransactions(
 		"posting date",
 	}
 
+	transactions := fromRecords(
+		ctx,
+		dataSource,
+		accountID,
+		rawRecords,
+		validPostingDateHeaders,
+		*logger,
+	)
+
+	if len(rawRecords) > 0 && len(transactions) == 0 {
+		return nil, fmt.Errorf("no valid transactions could be processed from %d raw records", len(rawRecords))
+	}
+
+	return transactions, nil
+}
+
+// Map raw records to transaction DTOs.
+func fromRecords(
+	ctx context.Context,
+	dataSource string,
+	accountID string,
+	rawRecords []map[string]string,
+	validPostingDateHeaders []string,
+	logger slog.Logger,
+) []model.Transaction {
+	var transactions []model.Transaction
 	for _, record := range rawRecords {
 		postingDateStr := getPostingDate(record, validPostingDateHeaders)
 		if postingDateStr == "" {
@@ -243,12 +267,7 @@ func mapRawRecordsToTransactions(
 			AccountID:      accountID,
 		})
 	}
-
-	if len(rawRecords) > 0 && len(transactions) == 0 {
-		return nil, fmt.Errorf("no valid transactions could be processed from %d raw records", len(rawRecords))
-	}
-
-	return transactions, nil
+	return transactions
 }
 
 // Move the file from processedFilePath to processedDir.

@@ -11,7 +11,6 @@ import (
 	"babylon/dataloader/datalake/repository"
 )
 
-// Client defines the interface for the datalake client.
 type Client interface {
 	IngestCSVFiles(
 		ctx context.Context,
@@ -24,10 +23,8 @@ type Client interface {
 	) (*Stats, error)
 }
 
-// client is the concrete implementation of the Client interface.
 type client struct{}
 
-// NewClient creates a new Client.
 func NewClient() Client {
 	return &client{}
 }
