@@ -92,7 +92,6 @@ func (m *mockMongoClient) Database(name string, opts ...*options.DatabaseOptions
 // --- Tests for Sink ---
 
 func TestNewSink(t *testing.T) {
-
 	cfg := &config.Config{}
 	repo := &mockRepo{}
 	extractor := &mockExtractor{}
@@ -115,7 +114,6 @@ func TestNewSink(t *testing.T) {
 }
 
 func TestSink_Ingest_UnprocessedDirNotFound(t *testing.T) {
-
 	cfg := &config.Config{
 		UnprocessedDir: "/non/existent/dir",
 	}
@@ -143,7 +141,6 @@ func TestSink_Ingest_MongoConnectionFailed(t *testing.T) {
 }
 
 func TestSink_Ingest_Success(t *testing.T) {
-
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
 		UnprocessedDir:     tmpDir,
