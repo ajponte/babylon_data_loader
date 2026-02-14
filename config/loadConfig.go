@@ -3,11 +3,12 @@ package config
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"strconv"
 	"time"
+
+	bcontext "babylon/dataloader/appcontext"
 )
 
 // Default values for testing.
@@ -22,7 +23,6 @@ const (
 	defaultMoveProcessedFiles = false
 	defaultSyntheticDataDir   = "tmp/synthetic"
 	defaultSyntheticDataRows  = 100
-	minArgs                   = 2 // This constant is only used in main.go, so it should not be here.
 	envMongoURI               = "MONGO_URI"
 	envMongoHost              = "MONGO_HOST"
 	envCSVDirectory           = "CSV_DIR"
@@ -34,15 +34,16 @@ const (
 )
 
 // LoadConfig loads the application configuration from environment variables or uses default values.
-func LoadConfig(ctx context.Context, logger *slog.Logger) *Config {
+func LoadConfig(ctx context.Context) *Config {
+	logger := bcontext.LoggerFromContext(ctx)
 	mongoURI := os.Getenv(envMongoURI)
-	mongoURI = formatMongoURI(ctx, mongoURI, logger)
+	mongoURI = formatMongoURI(ctx, mongoURI)
 
-	csvDirectory := setEnvCSVDir(ctx, *logger)
+	csvDirectory := setEnvCSVDir(ctx)
 
 	// Configure the dirs for processed/unprocessed files.
-	unprocessedDir := setUnprocessedDir(ctx, csvDirectory, *logger)
-	processedDir := setProcessedDir(ctx, csvDirectory, *logger)
+	unprocessedDir := setUnprocessedDir(ctx, csvDirectory)
+	processedDir := setProcessedDir(ctx, csvDirectory)
 
 	logger.DebugContext(ctx, "Constructed directory paths", "unprocessed", unprocessedDir, "processed", processedDir)
 
@@ -81,7 +82,8 @@ func LoadConfig(ctx context.Context, logger *slog.Logger) *Config {
 	}
 }
 
-func setEnvCSVDir(ctx context.Context, logger slog.Logger) string {
+func setEnvCSVDir(ctx context.Context) string {
+	logger := bcontext.LoggerFromContext(ctx)
 	csvDirectory := os.Getenv(envCSVDirectory)
 	if csvDirectory == "" {
 		csvDirectory = defaultCSVDir
@@ -94,17 +96,18 @@ func setEnvCSVDir(ctx context.Context, logger slog.Logger) string {
 }
 
 // Format the directory in which unprocessed data files exist.
-func setUnprocessedDir(ctx context.Context, csvDirectory string, logger slog.Logger) string {
-	return fmt.Sprintf("%s/%s", csvDirectory, setUnprocessedDirName(ctx, logger))
+func setUnprocessedDir(ctx context.Context, csvDirectory string) string {
+	return fmt.Sprintf("%s/%s", csvDirectory, setUnprocessedDirName(ctx))
 }
 
 // Format the directory in which processed data files are moved to.
-func setProcessedDir(ctx context.Context, csvDirectory string, logger slog.Logger) string {
-	return fmt.Sprintf("%s/%s", csvDirectory, getProcessedDirName(ctx, logger))
+func setProcessedDir(ctx context.Context, csvDirectory string) string {
+	return fmt.Sprintf("%s/%s", csvDirectory, getProcessedDirName(ctx))
 }
 
 // Fetch the `processedDirName` env var or set to a default value.
-func getProcessedDirName(ctx context.Context, logger slog.Logger) string {
+func getProcessedDirName(ctx context.Context) string {
+	logger := bcontext.LoggerFromContext(ctx)
 	processedDirName := os.Getenv(envProcessedDirectory)
 	if processedDirName == "" {
 		processedDirName = defaultProcessedDir
@@ -117,7 +120,8 @@ func getProcessedDirName(ctx context.Context, logger slog.Logger) string {
 }
 
 // Fetch the `unprocessedDirName` env var or set to a default value.
-func setUnprocessedDirName(ctx context.Context, logger slog.Logger) string {
+func setUnprocessedDirName(ctx context.Context) string {
+	logger := bcontext.LoggerFromContext(ctx)
 	unprocessedDirName := os.Getenv(envUnprocessedDirectory)
 	if unprocessedDirName == "" {
 		unprocessedDirName = defaultUnprocessedDir
@@ -134,8 +138,8 @@ func setUnprocessedDirName(ctx context.Context, logger slog.Logger) string {
 func formatMongoURI(
 	ctx context.Context,
 	mongoURI string,
-	logger *slog.Logger,
 ) string {
+	logger := bcontext.LoggerFromContext(ctx)
 	if mongoURI != "" {
 		logger.DebugContext(ctx, "Using MongoDB URI from environment variable", "uri", mongoURI)
 		return mongoURI
