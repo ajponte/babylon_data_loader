@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	transactionsCollection = "transactions" // Hardcoded collection name for transactions
+	TransactionsCollection = "transactions" // Exported collection name for transactions
 	syncTableName          = "dataSync"
 )
 
@@ -35,6 +35,10 @@ func (r *MongoRepository) BulkUpsertTransactions(ctx context.Context, transactio
 		return nil // Nothing to upsert
 	}
 
+	// Assume all transactions in a batch belong to the same data source
+	// This assumption holds based on the current processing flow (one file = one data source)
+	dataSource := transactions[0].DataSource
+
 	var models []mongo.WriteModel
 	for _, doc := range transactions {
 		filter := bson.M{
@@ -48,16 +52,17 @@ func (r *MongoRepository) BulkUpsertTransactions(ctx context.Context, transactio
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 
-	collection := r.provider.Collection(transactionsCollection)
+	collectionName := fmt.Sprintf("%s_%s", TransactionsCollection, dataSource)
+	collection := r.provider.Collection(collectionName)
 	_, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		return fmt.Errorf("failed to perform bulk write for collection %s: %w", transactionsCollection, err)
+		return fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
 	}
 
 	// Update sync log
 	syncCollection := r.provider.Collection(syncTableName)
 	syncLog := model.SyncLog{
-		CollectionName:  transactionsCollection,
+		CollectionName:  collectionName,
 		SyncTimestamp:   time.Now(),
 		RecordsUploaded: int64(len(transactions)), // Using len(transactions) for recordsUploaded
 	}

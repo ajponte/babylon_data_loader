@@ -32,7 +32,7 @@ func RunGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Co
 			}
 		}()
 
-		err = GenerateAndPersistSyntheticData(ctx, client, "synthetic-ingest", *rows)
+		err = GenerateAndPersistSyntheticData(ctx, client, *rows)
 		if err != nil {
 			return fmt.Errorf("failed to generate and persist synthetic data: %w", err)
 		}

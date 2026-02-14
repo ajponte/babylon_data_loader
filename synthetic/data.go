@@ -66,7 +66,6 @@ func GenerateSyntheticDocuments(rows int) []Data {
 func PersistSyntheticData(
 	ctx context.Context,
 	client storage.MongoClient,
-	collectionName string,
 	documents []Data,
 ) error {
 	logger := bcontext.LoggerFromContext(ctx)
@@ -80,6 +79,7 @@ func PersistSyntheticData(
 		docsToInsert[i] = doc
 	}
 
+	collectionName := fmt.Sprintf("%s_%s", storage.TransactionsCollection, documents[0].DataSource)
 	collection := client.Database("datalake").Collection(collectionName)
 	res, err := collection.InsertMany(ctx, docsToInsert)
 	if err != nil {
@@ -94,14 +94,14 @@ func PersistSyntheticData(
 func GenerateAndPersistSyntheticData(
 	ctx context.Context,
 	client storage.MongoClient,
-	collectionName string,
 	rows int,
 ) error {
 	logger := bcontext.LoggerFromContext(ctx)
+	documents := GenerateSyntheticDocuments(rows)
+	collectionName := fmt.Sprintf("%s_%s", storage.TransactionsCollection, documents[0].DataSource)
 	logger.InfoContext(ctx, "Generating and persisting synthetic data to MongoDB",
 		"collection", collectionName, "rows", rows)
-	documents := GenerateSyntheticDocuments(rows)
-	return PersistSyntheticData(ctx, client, collectionName, documents)
+	return PersistSyntheticData(ctx, client, documents)
 }
 
 // GenerateSyntheticData creates a CSV file with synthetic data.
