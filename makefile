@@ -57,7 +57,8 @@ fmt: ## runs go formatters
 tidy: ## runs tidy to fix go.mod dependencies
 	go mod tidy
 
-## Test
+## Temporary fix for running tests with coverage report.
+## Right now these are exactly the same as `unit-test`.
 test-ci: ## runs tests and create generates coverage report
 	make tidy
 	make vendor
