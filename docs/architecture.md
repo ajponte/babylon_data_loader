@@ -17,14 +17,14 @@ graph TD
 
 ## Core Components
 
-1. **Entrypoint ([main.go](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/main.go))**: Handles command-line arguments and routes requests to either the synthetic data generator or the data ingestion process.
-2. **Context & Logging ([appcontext/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/appcontext))**: Standardizes how context propagates with `slog` logger instances attached.
-3. **Configuration ([config/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/config))**: Loads database connection details, timeouts, and file paths.
-4. **CSV Parser ([csv/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/csv))**: Flexibly parses CSV data with dynamic header mapping.
-5. **Datalake Engine ([datalake/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/datalake))**: Represents core business entities, interfaces, and extraction services (like [datasource/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/datalake/datasource)).
-6. **Ingest Sink ([ingest/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/ingest))**: Coordinates the flow of reading unprocessed files, invoking the CSV parser, and invoking the repository to save records.
-7. **Storage Repository ([storage/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/storage))**: Interacts with MongoDB. Implements bulk upsert actions.
-8. **Synthetic Generator ([synthetic/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/synthetic))**: Generates deterministic/random transaction mock datasets to avoid using real PII.
+1. **Entrypoint ([main.go](../main.go))**: Handles command-line arguments and routes requests to either the synthetic data generator or the data ingestion process.
+2. **Context & Logging ([appcontext/](../appcontext))**: Standardizes how context propagates with `slog` logger instances attached.
+3. **Configuration ([config/](../config))**: Loads database connection details, timeouts, and file paths.
+4. **CSV Parser ([csv/](../csv))**: Flexibly parses CSV data with dynamic header mapping.
+5. **Datalake Engine ([datalake/](../datalake))**: Represents core business entities, interfaces, and extraction services (like [datasource/](../datalake/datasource)).
+6. **Ingest Sink ([ingest/](../ingest))**: Coordinates the flow of reading unprocessed files, invoking the CSV parser, and invoking the repository to save records.
+7. **Storage Repository ([storage/](../storage))**: Interacts with MongoDB. Implements bulk upsert actions.
+8. **Synthetic Generator ([synthetic/](../synthetic))**: Generates deterministic/random transaction mock datasets to avoid using real PII.
 
 ## Data Ingestion Flow
 

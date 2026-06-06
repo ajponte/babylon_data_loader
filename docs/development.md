@@ -4,7 +4,7 @@ This document describes how to build, test, and troubleshoot the `babylon_data_l
 
 ## Prerequisite Tools
 
-- **Go**: Version 1.26 (or matching version specified in [go.mod](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/go.mod))
+- **Go**: Version 1.26 (or matching version specified in [go.mod](../go.mod))
 - **MongoDB**: A running MongoDB instance. Default credentials and hosts can be overridden via env variables:
   - `MONGO_HOST=localhost`
   - `MONGO_USER=<MONGO_USER>`
@@ -45,4 +45,4 @@ make coverage
 ## Troubleshooting
 
 - **MongoDB connection issues**: If you encounter connection errors during ingestion, verify the `MONGO_URI` environment variable or check that your local MongoDB container is running.
-- **Go version conflicts**: If you upgraded your machine's Go compiler and run into linter issues, check the [README.md](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/README.md) instructions on upgrading the Go environment.
+- **Go version conflicts**: If you upgraded your machine's Go compiler and run into linter issues, check the [README.md](../README.md) instructions on upgrading the Go environment.

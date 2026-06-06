@@ -33,5 +33,5 @@ You are an expert dev-ops engineer. You specialize in Github Action CI/CD pipeli
 ```
 
 ### Tasks & Commands
-- **CI Configuration**: The CI for this project is powered by Github Actions, defined in the [.github](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/.github) directory.
+- **CI Configuration**: The CI for this project is powered by Github Actions, defined in the [.github](../.github) directory.
 - **Monitoring CI**: Run `./monitor-ci.sh` to check quality and test runs locally mirroring the CI check.
