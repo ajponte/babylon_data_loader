@@ -80,6 +80,18 @@ func (p *DefaultParser) ParseStream(
 		return nil, 0, fmt.Errorf("failed to read CSV header from file %s: %w", filePath, err)
 	}
 
+	return p.readRecords(ctx, reader, filePath, colIndex, headerLen, totalRecords, onProgress)
+}
+
+func (p *DefaultParser) readRecords(
+	ctx context.Context,
+	reader *csv.Reader,
+	filePath string,
+	colIndex map[string]int,
+	headerLen int,
+	totalRecords int64,
+	onProgress RowProgressCallback,
+) ([]map[string]string, int64, error) {
 	var documents []map[string]string
 	var recordsProcessed int64
 
