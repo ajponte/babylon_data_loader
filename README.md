@@ -15,7 +15,7 @@ The `babylon_data_loader` is a Go-based ingestion tool designed to load transact
 - **MongoDB**: A running local or remote instance
 
 ### 2. Configure Environment
-Set the required environment variables (defaults are set in the [Makefile](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/makefile)):
+Set the required environment variables (defaults are set in the [Makefile](makefile)):
 ```bash
 export MONGO_HOST=localhost
 export MONGO_USER=<MONGO_USER>
@@ -42,14 +42,14 @@ make run-ingest
 
 ## Documentation & Agent Harness
 
-To support both human developers and AI coding agents, this repository maintains a structured documentation harness in the [docs/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs) directory:
+To support both human developers and AI coding agents, this repository maintains a structured documentation harness in the [docs/](docs) directory:
 
-- **[System Architecture](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/architecture.md)**: Diagrams and descriptions of the data loader packages and lifecycle.
-- **[PII & Security Guidelines](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/pii_handling.md)**: Rules on logging precautions, security credentials, and synthetic data utility.
-- **[Development & Testing Guide](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/development.md)**: Local setups, testing commands, and troubleshooting guides.
-- **[Agent Personas](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/agent_personas.md)**: System prompt files and execution scopes for specialized agent developers.
+- **[System Architecture](docs/architecture.md)**: Diagrams and descriptions of the data loader packages and lifecycle.
+- **[PII & Security Guidelines](docs/pii_handling.md)**: Rules on logging precautions, security credentials, and synthetic data utility.
+- **[Development & Testing Guide](docs/development.md)**: Local setups, testing commands, and troubleshooting guides.
+- **[Agent Personas](docs/agent_personas.md)**: System prompt files and execution scopes for specialized agent developers.
 
-For a summary of quick command flags, refer to **[CLAUDE.md](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/CLAUDE.md)**.
+For a summary of quick command flags, refer to **[CLAUDE.md](CLAUDE.md)**.
 
 ---
 
