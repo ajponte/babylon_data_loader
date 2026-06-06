@@ -1,5 +1,7 @@
 # Babylon Data Loader
 
+![Babylon Data Loader Banner](Gemini_Generated_Image_965l9p965l9p965l.png)
+
 The `babylon_data_loader` is a Go-based ingestion tool designed to load transactional datasets into the `babylon` data lake (backed by MongoDB). It features a robust CSV parsing engine, flexible environment configurations, and an integrated synthetic data pipeline to facilitate local development and testing without exposing sensitive data.
 
 ---
