@@ -2,8 +2,8 @@
 
 # Export environment variables to be available in shell commands
 export MONGO_HOST ?= localhost
-export MONGO_USER ?= babylon
-export MONGO_PASSWORD ?= babylonpass
+export MONGO_USER ?= <MONGO_USER>
+export MONGO_PASSWORD ?= <MONGO_PASSWORD>
 
 export GO111MODULE=on
 # update app name. this is the name of binary
