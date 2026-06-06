@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	csvparser "babylon/dataloader/csv"
 	"babylon/dataloader/datalake/datasource"
 	"babylon/dataloader/datalake/model"
-	_ "babylon/dataloader/datalake/repository"
+	"babylon/dataloader/datalake/repository"
 )
 
 // ---- Mocks ----
@@ -22,10 +23,12 @@ type mockRepository struct {
 	err                          error
 }
 
-func (m *mockRepository) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) error {
+func (m *mockRepository) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) (repository.UpsertStats, error) {
 	m.bulkUpsertTransactionsCalled = true
 	m.transactions = transactions
-	return m.err
+	return repository.UpsertStats{
+		UpsertedCount: int64(len(transactions)),
+	}, m.err
 }
 
 // mockInfoExtractor implements datasource.InfoExtractor for testing.
@@ -269,4 +272,92 @@ func (m mockDirEntry) Type() os.FileMode {
 
 func (m mockDirEntry) Info() (os.FileInfo, error) {
 	return m, nil
+}
+
+type mockProgressReporter struct {
+	events []ProgressEvent
+}
+
+func (m *mockProgressReporter) Report(ev ProgressEvent) {
+	m.events = append(m.events, ev)
+}
+
+func TestIngestCSVFile_Success(t *testing.T) {
+	ctx := context.Background()
+
+	// Create temporary folders
+	tmpDir := t.TempDir()
+	sourceDir := filepath.Join(tmpDir, "source")
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+
+	if err := os.MkdirAll(sourceDir, 0o750); err != nil {
+		t.Fatalf("failed to create source dir: %v", err)
+	}
+
+	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEBIT_CARD,11190.76,`
+	srcFilePath := filepath.Join(sourceDir, "generic_test.csv")
+	if err := os.WriteFile(srcFilePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test CSV file: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	parser := csvparser.NewDefaultParser()
+	client := NewClient()
+
+	reporter := &mockProgressReporter{}
+
+	opts := IngestFileOptions{
+		UnprocessedDir:     unprocessedDir,
+		ProcessedDir:       processedDir,
+		MoveProcessedFiles: true,
+		Reporter:           reporter,
+	}
+
+	stats, err := client.IngestCSVFile(ctx, mockRepo, parser, srcFilePath, "chase", "1234", opts)
+	if err != nil {
+		t.Fatalf("IngestCSVFile failed: %v", err)
+	}
+
+	// Verify stats
+	if stats.TotalFiles != 1 || stats.ProcessedFiles != 1 || stats.FailedFiles != 0 {
+		t.Errorf("Expected stats to have 1 total and processed, 0 failed, got %+v", stats)
+	}
+
+	// Verify progress reporter events
+	if len(reporter.events) == 0 {
+		t.Errorf("Expected progress events, got 0")
+	}
+
+	// Verify events are in order of phases
+	var phases []Phase
+	for _, ev := range reporter.events {
+		phases = append(phases, ev.Phase)
+	}
+
+	if len(phases) < 5 {
+		t.Errorf("Expected at least 5 progress events, got %d: %v", len(phases), phases)
+	}
+
+	// Check if validating came first
+	if phases[0] != PhaseValidating {
+		t.Errorf("Expected first phase to be validating, got %s", phases[0])
+	}
+	// Check if done came last
+	if phases[len(phases)-1] != PhaseDone {
+		t.Errorf("Expected last phase to be done, got %s", phases[len(phases)-1])
+	}
+
+	// Check if the file was copied to unprocessedDir and then moved to processedDir
+	// Since MoveProcessedFiles is true, it should now be in processedDir and NOT in unprocessedDir
+	copiedPath := filepath.Join(unprocessedDir, "generic_test.csv")
+	if _, statErr := os.Stat(copiedPath); !os.IsNotExist(statErr) {
+		t.Errorf("Expected copied file to be removed from unprocessedDir, but it exists")
+	}
+
+	movedPath := filepath.Join(processedDir, "generic_test.csv")
+	if _, statErr := os.Stat(movedPath); os.IsNotExist(statErr) {
+		t.Errorf("Expected moved file to exist in processedDir, but it doesn't")
+	}
 }

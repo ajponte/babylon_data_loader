@@ -92,18 +92,24 @@ func TestBulkUpsertTransactions_Success(t *testing.T) {
 	}
 
 	repo := storage.NewMongoRepository(provider)
-	err := repo.BulkUpsertTransactions(ctx, transactions)
+	stats, err := repo.BulkUpsertTransactions(ctx, transactions)
 	if err != nil {
 		t.Errorf("BulkUpsertTransactions failed: %v", err)
+	}
+	if stats.UpsertedCount != 2 {
+		t.Errorf("Expected UpsertedCount 2, got %d", stats.UpsertedCount)
 	}
 }
 
 func TestBulkUpsertTransactions_EmptyTransactions(t *testing.T) {
 	ctx := context.Background()
 	repo := storage.NewMongoRepository(&mockCollectionProvider{})
-	err := repo.BulkUpsertTransactions(ctx, []model.Transaction{})
+	stats, err := repo.BulkUpsertTransactions(ctx, []model.Transaction{})
 	if err != nil {
 		t.Errorf("BulkUpsertTransactions failed for empty transactions: %v", err)
+	}
+	if stats.UpsertedCount != 0 || stats.MatchedCount != 0 {
+		t.Errorf("Expected empty stats, got %+v", stats)
 	}
 }
 
@@ -127,7 +133,7 @@ func TestBulkUpsertTransactions_BulkWriteError(t *testing.T) {
 	}
 
 	repo := storage.NewMongoRepository(provider)
-	err := repo.BulkUpsertTransactions(ctx, transactions)
+	_, err := repo.BulkUpsertTransactions(ctx, transactions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("Expected bulk write error, got: %v", err)
 	}
@@ -156,7 +162,7 @@ func TestBulkUpsertTransactions_SyncLogError(t *testing.T) {
 	}
 
 	repo := storage.NewMongoRepository(provider)
-	err := repo.BulkUpsertTransactions(ctx, transactions)
+	_, err := repo.BulkUpsertTransactions(ctx, transactions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("Expected sync log error, got: %v", err)
 	}
