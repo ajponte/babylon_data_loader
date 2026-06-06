@@ -122,63 +122,8 @@ func (c *client) IngestCSVFile(
 	}
 
 	// 1. Copy the file to UnprocessedDir
-	if err := os.MkdirAll(opts.UnprocessedDir, 0o750); err != nil {
-		errStr := fmt.Sprintf("failed to create unprocessed directory: %v", err)
-		if opts.Reporter != nil {
-			opts.Reporter.Report(ProgressEvent{
-				Phase:    PhaseFailed,
-				FileName: fileName,
-				Message:  errStr,
-			})
-		}
-		stats.AddFailure(fileName, errStr)
-		return stats, fmt.Errorf("%s: %w", errStr, err)
-	}
-
-	destPath := filepath.Join(opts.UnprocessedDir, fileName)
-
-	// Copy utility
-	srcFile, err := os.Open(filePath)
-	if err != nil {
-		errStr := fmt.Sprintf("failed to open source file for copy: %v", err)
-		if opts.Reporter != nil {
-			opts.Reporter.Report(ProgressEvent{
-				Phase:    PhaseFailed,
-				FileName: fileName,
-				Message:  errStr,
-			})
-		}
-		stats.AddFailure(fileName, errStr)
-		return stats, fmt.Errorf("%s: %w", errStr, err)
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		errStr := fmt.Sprintf("failed to create destination file: %v", err)
-		if opts.Reporter != nil {
-			opts.Reporter.Report(ProgressEvent{
-				Phase:    PhaseFailed,
-				FileName: fileName,
-				Message:  errStr,
-			})
-		}
-		stats.AddFailure(fileName, errStr)
-		return stats, fmt.Errorf("%s: %w", errStr, err)
-	}
-	defer dstFile.Close()
-
-	if _, copyErr := io.Copy(dstFile, srcFile); copyErr != nil {
-		errStr := fmt.Sprintf("failed to copy file contents: %v", copyErr)
-		if opts.Reporter != nil {
-			opts.Reporter.Report(ProgressEvent{
-				Phase:    PhaseFailed,
-				FileName: fileName,
-				Message:  errStr,
-			})
-		}
-		stats.AddFailure(fileName, errStr)
-		return stats, fmt.Errorf("%s: %w", errStr, copyErr)
+	if err := copyFileToUnprocessedDir(fileName, filePath, opts.UnprocessedDir, opts.Reporter, stats); err != nil {
+		return stats, err
 	}
 
 	processor := NewCSVFileProcessor(
@@ -192,11 +137,62 @@ func (c *client) IngestCSVFile(
 		*logger,
 	)
 
-	err = processor.processSingleFile(ctx, fileName, dataSource, accountID, opts.Reporter)
+	err := processor.processSingleFile(ctx, fileName, dataSource, accountID, opts.Reporter)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to ingest CSV file", "file", fileName, "error", err)
 		return stats, err
 	}
 
 	return stats, nil
+}
+
+func copyFileToUnprocessedDir(
+	fileName string,
+	srcPath string,
+	destDir string,
+	reporter ProgressReporter,
+	stats *Stats,
+) error {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
+		errStr := fmt.Sprintf("failed to create unprocessed directory: %v", err)
+		reportFailure(reporter, stats, fileName, errStr)
+		return fmt.Errorf("%s: %w", errStr, err)
+	}
+
+	destPath := filepath.Join(destDir, fileName)
+
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		errStr := fmt.Sprintf("failed to open source file for copy: %v", err)
+		reportFailure(reporter, stats, fileName, errStr)
+		return fmt.Errorf("%s: %w", errStr, err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		errStr := fmt.Sprintf("failed to create destination file: %v", err)
+		reportFailure(reporter, stats, fileName, errStr)
+		return fmt.Errorf("%s: %w", errStr, err)
+	}
+	defer dstFile.Close()
+
+	if _, copyErr := io.Copy(dstFile, srcFile); copyErr != nil {
+		errStr := fmt.Sprintf("failed to copy file contents: %v", copyErr)
+		reportFailure(reporter, stats, fileName, errStr)
+		return fmt.Errorf("%s: %w", errStr, copyErr)
+	}
+
+	return nil
+}
+
+func reportFailure(reporter ProgressReporter, stats *Stats, fileName string, errStr string) {
+	if reporter != nil {
+		reporter.Report(ProgressEvent{
+			Phase:    PhaseFailed,
+			FileName: fileName,
+			Message:  errStr,
+		})
+	}
+	stats.AddFailure(fileName, errStr)
 }
