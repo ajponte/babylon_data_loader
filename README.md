@@ -1,43 +1,78 @@
-## Babylon Data Loader
-Load data for babylon.
+# Babylon Data Loader
 
-## Prerequisites
-- `go 1.24.4`
+The `babylon_data_loader` is a Go-based ingestion tool designed to load transactional datasets into the `babylon` data lake (backed by MongoDB). It features a robust CSV parsing engine, flexible environment configurations, and an integrated synthetic data pipeline to facilitate local development and testing without exposing sensitive data.
 
-- `GNU Make 3.81`
+---
 
-- `mongodb` [driver for `go`](http://github.com/mongodb/mongo-go-driver)
+## Quick Start
 
-## Building and Running
-`make all` will run linters, run unit tests, and build a dist.
+### 1. Prerequisites
+- **Go**: `1.26` or higher
+- **GNU Make**: `3.81` or higher
+- **MongoDB**: A running local or remote instance
 
-### Executable Artifacts
-By default, executable artifacts are created in `out/` as a result of a `make build` command.
+### 2. Configure Environment
+Set the required environment variables (defaults are set in the [Makefile](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/makefile)):
+```bash
+export MONGO_HOST=localhost
+export MONGO_USER=<MONGO_USER>
+export MONGO_PASSWORD=<MONGO_PASSWORD>
+```
 
-## Upgrading Go Environment
+### 3. Build & Run
+Run all checks (linting, tests, build):
+```bash
+make all
+```
+
+Populate your local MongoDB instance with 100 rows of synthetic data:
+```bash
+make run-generate-mongo
+```
+
+Run the main ingestion pipeline:
+```bash
+make run-ingest
+```
+
+---
+
+## Documentation & Agent Harness
+
+To support both human developers and AI coding agents, this repository maintains a structured documentation harness in the [docs/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs) directory:
+
+- **[System Architecture](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/architecture.md)**: Diagrams and descriptions of the data loader packages and lifecycle.
+- **[PII & Security Guidelines](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/pii_handling.md)**: Rules on logging precautions, security credentials, and synthetic data utility.
+- **[Development & Testing Guide](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/development.md)**: Local setups, testing commands, and troubleshooting guides.
+- **[Agent Personas](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/agent_personas.md)**: System prompt files and execution scopes for specialized agent developers.
+
+For a summary of quick command flags, refer to **[CLAUDE.md](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/CLAUDE.md)**.
+
+---
+
+## Security Notice: PII Handling
+
+> [!WARNING]
+> This data lake processes Personally Identifiable Information (PII) like Account IDs and transaction balances. Do **not** commit real database dumps, raw transaction CSV files, or API credentials to this repository. Keep all log statements free of raw PII values.
+
+---
+
+## Upgrading the Go Environment
 
 To upgrade the Go environment for this project, follow these steps:
 
-1.  **Update `go.mod`:**
-    Modify the `go.mod` file to reflect the desired Go version. For example, to upgrade to Go 1.26, change the line `go 1.24.4` to `go 1.26`.
-
-2.  **Clean and Tidy Modules:**
-    After updating `go.mod`, run the following commands to clean the module cache and tidy up dependencies:
-    ```bash
-    go clean -modcache
-    go mod tidy
-    ```
-
-3.  **Upgrade `golangci-lint`:**
-    If you encounter issues with `golangci-lint` after upgrading Go (e.g., "Go language version used to build golangci-lint is lower than the targeted Go version"), you might need to upgrade `golangci-lint`.
-    If installed via Homebrew (macOS), run:
-    ```bash
-    brew upgrade golangci-lint
-    ```
-    For other installation methods, refer to the `golangci-lint` documentation.
-
-4.  **Verify the Upgrade:**
-    After performing the above steps, run `make` to ensure all linters, tests, and builds pass with the new Go version.
-    ```bash
-    make
-    ```
+1. **Update `go.mod`**:
+   Modify the `go.mod` file to reflect the desired Go version (e.g., change `go 1.26` to `go 1.27`).
+2. **Clean and Tidy Modules**:
+   ```bash
+   go clean -modcache
+   go mod tidy
+   ```
+3. **Upgrade `golangci-lint`**:
+   If you encounter issues with `golangci-lint` after upgrading Go, you might need to upgrade the linter.
+   - On macOS via Homebrew: `brew upgrade golangci-lint`
+   - For other OS/install methods, consult the official `golangci-lint` documentation.
+4. **Verify changes**:
+   ```bash
+   make
+   ```

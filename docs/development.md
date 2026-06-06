@@ -7,8 +7,8 @@ This document describes how to build, test, and troubleshoot the `babylon_data_l
 - **Go**: Version 1.26 (or matching version specified in [go.mod](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/go.mod))
 - **MongoDB**: A running MongoDB instance. Default credentials and hosts can be overridden via env variables:
   - `MONGO_HOST=localhost`
-  - `MONGO_USER=babylon`
-  - `MONGO_PASSWORD=babylonpass`
+  - `MONGO_USER=<MONGO_USER>`
+  - `MONGO_PASSWORD=<MONGO_PASSWORD>`
 - **GNU Make**: Used to run commands easily.
 
 ## Development Tasks
