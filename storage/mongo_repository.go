@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"babylon/dataloader/datalake/model"
+	"babylon/dataloader/datalake/repository"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -30,9 +31,12 @@ func NewMongoRepository(provider CollectionProvider) *MongoRepository {
 }
 
 // BulkUpsertTransactions bulk upserts transactions into the MongoDB "transactions" collection.
-func (r *MongoRepository) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) error {
+func (r *MongoRepository) BulkUpsertTransactions(
+	ctx context.Context,
+	transactions []model.Transaction,
+) (repository.UpsertStats, error) {
 	if len(transactions) == 0 {
-		return nil // Nothing to upsert
+		return repository.UpsertStats{}, nil // Nothing to upsert
 	}
 
 	// Assume all transactions in a batch belong to the same data source
@@ -54,9 +58,13 @@ func (r *MongoRepository) BulkUpsertTransactions(ctx context.Context, transactio
 
 	collectionName := fmt.Sprintf("%s_%s", TransactionsCollection, dataSource)
 	collection := r.provider.Collection(collectionName)
-	_, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	res, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		return fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
+		return repository.UpsertStats{}, fmt.Errorf(
+			"failed to perform bulk write for collection %s: %w",
+			collectionName,
+			err,
+		)
 	}
 
 	// Update sync log
@@ -68,8 +76,12 @@ func (r *MongoRepository) BulkUpsertTransactions(ctx context.Context, transactio
 	}
 	_, err = syncCollection.InsertOne(ctx, syncLog)
 	if err != nil {
-		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
+		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
-	return nil
+	return repository.UpsertStats{
+		UpsertedCount: res.UpsertedCount,
+		MatchedCount:  res.MatchedCount,
+		ModifiedCount: res.ModifiedCount,
+	}, nil
 }

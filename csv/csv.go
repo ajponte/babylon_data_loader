@@ -38,11 +38,30 @@ func NewDefaultParser() *DefaultParser {
 
 // Parse reads a CSV file from a given path and returns the data.
 func (p *DefaultParser) Parse(
-	_ context.Context,
+	ctx context.Context,
+	filePath string,
+	dataSource string,
+	accountID string,
+) ([]map[string]string, int64, error) {
+	return p.ParseStream(ctx, filePath, dataSource, accountID, nil)
+}
+
+// ParseStream reads a CSV file from a given path and executes row-by-row progress callbacks.
+func (p *DefaultParser) ParseStream(
+	ctx context.Context,
 	filePath string,
 	_ string,
 	_ string,
+	onProgress RowProgressCallback,
 ) ([]map[string]string, int64, error) {
+	totalRecords, err := countRecords(filePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file or directory") {
+			return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)
+		}
+		return nil, 0, fmt.Errorf("failed to count CSV records from file %s: %w", filePath, err)
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)
@@ -53,24 +72,22 @@ func (p *DefaultParser) Parse(
 	reader.FieldsPerRecord = -1
 	reader.Comma = ','
 
-	// Read header and create column index map
-	header, err := reader.Read()
+	colIndex, headerLen, err := createHeaderIndex(reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return nil, 0, nil // Handle empty file gracefully
 		}
 		return nil, 0, fmt.Errorf("failed to read CSV header from file %s: %w", filePath, err)
 	}
-	colIndex := make(map[string]int)
-	for i, col := range header {
-		colIndex[strings.ToLower(col)] = i
-	}
 
 	var documents []map[string]string
-
 	var recordsProcessed int64
 
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, 0, ctxErr
+		}
+
 		record, readErr := reader.Read()
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
@@ -79,7 +96,7 @@ func (p *DefaultParser) Parse(
 			return nil, 0, fmt.Errorf("failed to read record from CSV in file %s: %w", filePath, readErr)
 		}
 
-		if len(record) < len(header) {
+		if len(record) < headerLen {
 			continue
 		}
 
@@ -90,6 +107,13 @@ func (p *DefaultParser) Parse(
 
 		documents = append(documents, doc)
 		recordsProcessed++
+
+		if onProgress != nil {
+			onProgress(RowProgress{
+				CurrentRecord: recordsProcessed,
+				TotalRecords:  totalRecords,
+			})
+		}
 	}
 
 	if len(documents) == 0 {
@@ -97,6 +121,54 @@ func (p *DefaultParser) Parse(
 	}
 
 	return documents, recordsProcessed, nil
+}
+
+func createHeaderIndex(reader *csv.Reader) (map[string]int, int, error) {
+	header, err := reader.Read()
+	if err != nil {
+		return nil, 0, err
+	}
+	colIndex := make(map[string]int)
+	for i, col := range header {
+		colIndex[strings.ToLower(col)] = i
+	}
+	return colIndex, len(header), nil
+}
+
+func countRecords(filePath string) (int64, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	reader.FieldsPerRecord = -1
+	reader.Comma = ','
+
+	header, err := reader.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	var count int64
+	for {
+		record, readErr := reader.Read()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return 0, readErr
+		}
+		if len(record) < len(header) {
+			continue
+		}
+		count++
+	}
+	return count, nil
 }
 
 // safeGet retrieves slice[index] safely.

@@ -28,10 +28,12 @@ type mockRepo struct {
 	err                          error
 }
 
-func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) error {
+func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) (repository.UpsertStats, error) {
 	m.bulkUpsertTransactionsCalled = true
 	m.transactions = transactions
-	return m.err
+	return repository.UpsertStats{
+		UpsertedCount: int64(len(transactions)),
+	}, m.err
 }
 
 type mockExtractor struct {
@@ -72,6 +74,18 @@ func (m *mockClient) IngestCSVFiles(
 	moveProcessedFiles bool,
 ) (*datalake.Stats, error) {
 	m.ingestCSVFilesCalled = true
+	return m.stats, m.err
+}
+
+func (m *mockClient) IngestCSVFile(
+	ctx context.Context,
+	repo repository.Repository,
+	parser csvparser.Parser,
+	filePath string,
+	dataSource string,
+	accountID string,
+	opts datalake.IngestFileOptions,
+) (*datalake.Stats, error) {
 	return m.stats, m.err
 }
 

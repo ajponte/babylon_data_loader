@@ -138,7 +138,7 @@ func (p *CSVFileProcessor) processFile(
 	}
 
 	// Upsert documents to datalake collection.
-	if err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
+	if _, err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
 		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
 	}
 
@@ -151,6 +151,139 @@ func (p *CSVFileProcessor) processFile(
 	}
 
 	return nil
+}
+
+// processSingleFile processes a single file with explicit dataSource, accountID, and progress updates.
+func (p *CSVFileProcessor) processSingleFile(
+	ctx context.Context,
+	fileName string,
+	dataSource string,
+	accountID string,
+	reporter ProgressReporter,
+) error {
+	unprocessedFilePath := filepath.Join(p.UnprocessedDir, fileName)
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:    PhaseValidating,
+		FileName: fileName,
+		Message:  "Validating file format",
+	})
+
+	if !strings.HasSuffix(strings.ToLower(fileName), ".csv") {
+		return p.handleFailure(fileName, fmt.Errorf("file %s is not a valid CSV file", fileName), reporter)
+	}
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:    PhaseParsing,
+		FileName: fileName,
+		Message:  "Parsing CSV rows",
+	})
+
+	rawRecords, totalRecords, err := p.parseCSVFile(
+		ctx,
+		unprocessedFilePath,
+		fileName,
+		dataSource,
+		accountID,
+		reporter,
+	)
+	if err != nil {
+		return p.handleFailure(fileName, err, reporter)
+	}
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:        PhaseUpserting,
+		FileName:     fileName,
+		Message:      "Upserting to database",
+		TotalRecords: totalRecords,
+	})
+
+	transactions, err := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
+	if err != nil {
+		return p.handleFailure(fileName, err, reporter)
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return p.handleFailure(fileName, ctxErr, reporter)
+	}
+
+	upsertStats, err := p.Repo.BulkUpsertTransactions(ctx, transactions)
+	if err != nil {
+		return p.handleFailure(fileName, fmt.Errorf("failed to bulk upsert transactions: %w", err), reporter)
+	}
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:          PhaseUpserting,
+		FileName:       fileName,
+		UpsertedCount:  upsertStats.UpsertedCount,
+		DuplicateCount: upsertStats.MatchedCount,
+	})
+
+	if p.MoveProcessedFiles {
+		p.reportProgress(reporter, ProgressEvent{
+			Phase:    PhaseMoving,
+			FileName: fileName,
+			Message:  "Moving processed file",
+		})
+		err = p.moveFile(ctx, unprocessedFilePath)
+		if err != nil {
+			return p.handleFailure(fileName, fmt.Errorf("failed to move file: %w", err), reporter)
+		}
+	}
+
+	p.Stats.IncrementProcessed()
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:          PhaseDone,
+		FileName:       fileName,
+		Message:        "Ingestion completed successfully",
+		UpsertedCount:  upsertStats.UpsertedCount,
+		DuplicateCount: upsertStats.MatchedCount,
+	})
+
+	return nil
+}
+
+func (p *CSVFileProcessor) parseCSVFile(
+	ctx context.Context,
+	filePath string,
+	fileName string,
+	dataSource string,
+	accountID string,
+	reporter ProgressReporter,
+) ([]map[string]string, int64, error) {
+	if streamingParser, ok := p.Parser.(csvparser.StreamingParser); ok {
+		return streamingParser.ParseStream(
+			ctx,
+			filePath,
+			dataSource,
+			accountID,
+			func(progress csvparser.RowProgress) {
+				p.reportProgress(reporter, ProgressEvent{
+					Phase:         PhaseParsing,
+					FileName:      fileName,
+					CurrentRecord: progress.CurrentRecord,
+					TotalRecords:  progress.TotalRecords,
+				})
+			},
+		)
+	}
+	return p.Parser.Parse(ctx, filePath, dataSource, accountID)
+}
+
+func (p *CSVFileProcessor) reportProgress(reporter ProgressReporter, event ProgressEvent) {
+	if reporter != nil {
+		reporter.Report(event)
+	}
+}
+
+func (p *CSVFileProcessor) handleFailure(fileName string, err error, reporter ProgressReporter) error {
+	p.Stats.AddFailure(fileName, err.Error())
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:    PhaseFailed,
+		FileName: fileName,
+		Message:  err.Error(),
+	})
+	return err
 }
 
 // Return a sanitized path to the file.
@@ -286,7 +419,7 @@ func (p *CSVFileProcessor) moveFile(
 	newPath := filepath.Join(p.ProcessedDir, fileName)
 
 	// Cleanup the processed file.
-	moveErr := moveProcessedFile(fileName, newPath)
+	moveErr := moveProcessedFile(processedFilePath, newPath)
 	if moveErr != nil {
 		return MoveFileError(fileName, p.ProcessedDir)
 	}

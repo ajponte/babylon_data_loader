@@ -2,6 +2,7 @@ package csvparser_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,5 +217,63 @@ func TestParseCSV_FileNotFound(t *testing.T) {
 	expectedErrorMsg := "failed to open file"
 	if !strings.Contains(err.Error(), expectedErrorMsg) {
 		t.Errorf("Expected error message to contain '%s', got '%s'", expectedErrorMsg, err.Error())
+	}
+}
+
+func TestParseStream_Success(t *testing.T) {
+	ctx := context.Background()
+	csvContent := `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
+DEBIT,01/01/2024,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",Shopping,-75.77,DEBIT_CARD,11190.76,
+CREDIT,01/02/2024,"ONLINE PAYMENT THANK YOU",Payment,1000.00,PAYMENT,10114.36,`
+	filePath := createTempCSV(t, "stream_valid.csv", csvContent)
+	dataSource := string(datasource.Generic)
+	accountID := "1234"
+
+	var progressEvents []RowProgress
+	callback := func(progress RowProgress) {
+		progressEvents = append(progressEvents, progress)
+	}
+
+	parser := NewDefaultParser()
+	data, recordsProcessed, err := parser.ParseStream(ctx, filePath, dataSource, accountID, callback)
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	if len(data) != 2 {
+		t.Errorf("Expected 2 documents, got %d", len(data))
+	}
+	if recordsProcessed != 2 {
+		t.Errorf("Expected 2 records processed, got %d", recordsProcessed)
+	}
+
+	// Assert callbacks were fired in order and count is correct
+	if len(progressEvents) != 2 {
+		t.Fatalf("Expected 2 progress events, got %d", len(progressEvents))
+	}
+
+	if progressEvents[0].CurrentRecord != 1 || progressEvents[0].TotalRecords != 2 {
+		t.Errorf("Expected first progress event {1, 2}, got %+v", progressEvents[0])
+	}
+	if progressEvents[1].CurrentRecord != 2 || progressEvents[1].TotalRecords != 2 {
+		t.Errorf("Expected second progress event {2, 2}, got %+v", progressEvents[1])
+	}
+}
+
+func TestParseStream_ContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel context immediately
+
+	csvContent := `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
+DEBIT,01/01/2024,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",Shopping,-75.77,DEBIT_CARD,11190.76,`
+	filePath := createTempCSV(t, "stream_cancelled.csv", csvContent)
+
+	parser := NewDefaultParser()
+	_, _, err := parser.ParseStream(ctx, filePath, "chase", "1234", nil)
+	if err == nil {
+		t.Fatal("Expected error from cancelled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Expected error to be context.Canceled, got %v", err)
 	}
 }
