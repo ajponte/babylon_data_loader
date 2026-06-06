@@ -2,6 +2,17 @@
 
 This guide provides instructions for building, running, testing, and developing within the `babylon_data_loader` repository.
 
+## Documentation & Agent Harness
+
+This project contains a comprehensive agent documentation harness under the [docs/](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs) folder. Refer to these files for deeper context:
+- **[Harness Index (README)](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/README.md)**: Main entry point for project docs.
+- **[Agent Personas](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/agent_personas.md)**: Specific instructions, prompts, and expectations for Software Engineering and DevOps agent roles.
+- **[Architecture & Data Flow](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/architecture.md)**: Details on packages, data pathways, and components.
+- **[PII & Security Guidelines](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/pii_handling.md)**: Rules for preserving PII confidentiality, logging securely, and generating mock datasets.
+- **[Development & Testing Guide](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/docs/development.md)**: Prerequisites, formatting tools, linting, and troubleshooting.
+
+---
+
 ## Commands
 
 ### Build and Clean
