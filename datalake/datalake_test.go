@@ -31,6 +31,10 @@ func (m *mockRepository) BulkUpsertTransactions(ctx context.Context, transaction
 	}, m.err
 }
 
+func (m *mockRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
+	return nil, m.err
+}
+
 // mockInfoExtractor implements datasource.InfoExtractor for testing.
 type mockInfoExtractor struct {
 	extractInfoCalled bool

@@ -37,10 +37,17 @@ func (m *mockMongoClient) Database(name string, opts ...*options.DatabaseOptions
 }
 
 // mockRepo implements repository.Repository
-type mockRepo struct{}
+type mockRepo struct {
+	syncLogs []model.SyncLog
+	err      error
+}
 
 func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) (repository.UpsertStats, error) {
 	return repository.UpsertStats{}, nil
+}
+
+func (m *mockRepo) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
+	return m.syncLogs, m.err
 }
 
 // mockDatalakeClient implements datalake.Client
@@ -213,4 +220,67 @@ func TestApp_IngestFile_Success(t *testing.T) {
 	if stats.ProcessedFiles != 1 {
 		t.Errorf("Expected 1 processed file, got %d", stats.ProcessedFiles)
 	}
+}
+
+func TestApp_GetHistory_Success(t *testing.T) {
+	app := NewApp()
+	app.ctx = context.Background()
+	app.dbConn = true
+
+	expectedLogs := []model.SyncLog{
+		{
+			CollectionName:  "transactions_synthetic",
+			RecordsUploaded: 5,
+		},
+	}
+	app.repo = &mockRepo{
+		syncLogs: expectedLogs,
+	}
+
+	history, err := app.GetHistory()
+	if err != nil {
+		t.Fatalf("GetHistory failed: %v", err)
+	}
+
+	if len(history) != 1 {
+		t.Errorf("Expected 1 log, got %d", len(history))
+	}
+	if history[0].CollectionName != "transactions_synthetic" {
+		t.Errorf("Expected CollectionName transactions_synthetic, got %s", history[0].CollectionName)
+	}
+}
+
+func TestApp_GetHistory_Failure(t *testing.T) {
+	app := NewApp()
+
+	t.Run("not initialized", func(t *testing.T) {
+		app.ctx = nil
+		_, err := app.GetHistory()
+		if err == nil {
+			t.Error("expected error when context is nil")
+		}
+	})
+
+	t.Run("not connected", func(t *testing.T) {
+		app.ctx = context.Background()
+		app.dbConn = false
+		_, err := app.GetHistory()
+		if err == nil {
+			t.Error("expected error when database is not connected")
+		}
+	})
+
+	t.Run("repo error", func(t *testing.T) {
+		app.ctx = context.Background()
+		app.dbConn = true
+		expectedErr := errors.New("repo error")
+		app.repo = &mockRepo{
+			err: expectedErr,
+		}
+
+		_, err := app.GetHistory()
+		if err == nil || err.Error() != expectedErr.Error() {
+			t.Errorf("expected repo error, got: %v", err)
+		}
+	})
 }

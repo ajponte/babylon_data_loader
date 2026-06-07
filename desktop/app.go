@@ -3,6 +3,7 @@ package main
 import (
 	"babylon/dataloader/config"
 	"babylon/dataloader/datalake"
+	"babylon/dataloader/datalake/model"
 	"babylon/dataloader/datalake/repository"
 	"babylon/dataloader/storage"
 	"context"
@@ -163,7 +164,7 @@ func (a *App) RetryConnectDB() bool {
 }
 
 // emitEvent wraps runtime.EventsEmit to avoid test-environment panics.
-func emitEvent(ctx context.Context, name string, optionalData ...interface{}) {
+var emitEvent = func(ctx context.Context, name string, optionalData ...interface{}) {
 	if ctx == nil {
 		return
 	}
@@ -171,4 +172,23 @@ func emitEvent(ctx context.Context, name string, optionalData ...interface{}) {
 		return
 	}
 	runtime.EventsEmit(ctx, name, optionalData...)
+}
+
+// GetHistory retrieves the history of completed ingestion runs.
+func (a *App) GetHistory() ([]model.SyncLog, error) {
+	a.mu.RLock()
+	ctx := a.ctx
+	repo := a.repo
+	connected := a.dbConn
+	a.mu.RUnlock()
+
+	if ctx == nil {
+		return nil, fmt.Errorf("application is not initialized")
+	}
+
+	if !connected || repo == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	return repo.GetSyncLogs(ctx)
 }

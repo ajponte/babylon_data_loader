@@ -27,6 +27,10 @@ type DataStore interface {
 		ctx context.Context,
 		document interface{},
 		opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error)
+	Find(
+		ctx context.Context,
+		filter interface{},
+		opts ...*options.FindOptions) (*mongo.Cursor, error)
 }
 
 // CollectionProvider defines the interface for obtaining a collection.
@@ -62,6 +66,20 @@ func (c *MongoCollection) InsertOne(
 	result, err := c.Collection.InsertOne(ctx, document, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform InsertOne: %w", err)
+	}
+
+	return result, nil
+}
+
+// Find performs a find query.
+func (c *MongoCollection) Find(
+	ctx context.Context,
+	filter interface{},
+	opts ...*options.FindOptions,
+) (*mongo.Cursor, error) {
+	result, err := c.Collection.Find(ctx, filter, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform Find: %w", err)
 	}
 
 	return result, nil
