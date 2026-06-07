@@ -6,6 +6,7 @@ export MONGO_USER ?= <MONGO_USER>
 export MONGO_PASSWORD ?= <MONGO_PASSWORD>
 
 export GO111MODULE=on
+export PATH := $(PATH):/opt/homebrew/bin:/usr/local/bin:$(HOME)/go/bin
 # update app name. this is the name of binary
 APP=data-loader
 APP_EXECUTABLE="./out/$(APP)"
@@ -97,6 +98,16 @@ run-generate-mongo: ## runs the go binary to generate synthetic data and persist
 	chmod +x $(APP_EXECUTABLE) && \
 	$(APP_EXECUTABLE) generate-synthetic-data --rows 100 --persist-to-mongo
 
+## Desktop
+run-desktop: ## runs the desktop application in development mode
+	cd desktop && /Users/aponte/go/bin/wails dev
+
+build-desktop: ## builds the desktop application
+	cd desktop && /Users/aponte/go/bin/wails build
+
+run-ui: ## runs the frontend UI development server only (Vite)
+	cd desktop/frontend && [ -d node_modules ] || npm install
+	cd desktop/frontend && npm run dev
 
 clean: ## cleans binary and other generated files
 	go clean

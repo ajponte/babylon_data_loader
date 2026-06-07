@@ -85,3 +85,23 @@ func (r *MongoRepository) BulkUpsertTransactions(
 		ModifiedCount: res.ModifiedCount,
 	}, nil
 }
+
+// GetSyncLogs retrieves all sync logs from the dataSync collection, sorted by sync_timestamp descending.
+func (r *MongoRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
+	syncCollection := r.provider.Collection(syncTableName)
+
+	opts := options.Find().SetSort(bson.M{"sync_timestamp": -1})
+	cursor, err := syncCollection.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query sync logs: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var syncLogs []model.SyncLog
+	err = cursor.All(ctx, &syncLogs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode sync logs: %w", err)
+	}
+
+	return syncLogs, nil
+}

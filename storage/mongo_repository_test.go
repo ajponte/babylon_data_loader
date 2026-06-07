@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"babylon/dataloader/datalake/model"
 	"babylon/dataloader/storage"
@@ -17,6 +18,7 @@ import (
 type mockDataStore struct {
 	bulkWriteFunc func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error)
 	insertOneFunc func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error)
+	findFunc      func(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error)
 }
 
 func (m *mockDataStore) BulkWrite(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
@@ -31,6 +33,13 @@ func (m *mockDataStore) InsertOne(ctx context.Context, document interface{}, opt
 		return m.insertOneFunc(ctx, document, opts...)
 	}
 	return &mongo.InsertOneResult{}, nil
+}
+
+func (m *mockDataStore) Find(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error) {
+	if m.findFunc != nil {
+		return m.findFunc(ctx, filter, opts...)
+	}
+	return &mongo.Cursor{}, nil
 }
 
 // Mock for CollectionProvider interface.
@@ -165,5 +174,72 @@ func TestBulkUpsertTransactions_SyncLogError(t *testing.T) {
 	_, err := repo.BulkUpsertTransactions(ctx, transactions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("Expected sync log error, got: %v", err)
+	}
+}
+
+func TestGetSyncLogs_Success(t *testing.T) {
+	ctx := context.Background()
+	expectedLogs := []interface{}{
+		model.SyncLog{
+			CollectionName:  "transactions_synthetic",
+			SyncTimestamp:   time.Now(),
+			RecordsUploaded: 10,
+		},
+	}
+
+	cursor, err := mongo.NewCursorFromDocuments(expectedLogs, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create cursor: %v", err)
+	}
+
+	mockDS := &mockDataStore{
+		findFunc: func(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error) {
+			return cursor, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			if name != "dataSync" {
+				t.Errorf("Expected collection name dataSync, got %s", name)
+			}
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	logs, err := repo.GetSyncLogs(ctx)
+	if err != nil {
+		t.Fatalf("GetSyncLogs failed: %v", err)
+	}
+
+	if len(logs) != 1 {
+		t.Errorf("Expected 1 log, got %d", len(logs))
+	}
+	if logs[0].CollectionName != "transactions_synthetic" {
+		t.Errorf("Expected CollectionName transactions_synthetic, got %s", logs[0].CollectionName)
+	}
+}
+
+func TestGetSyncLogs_FindError(t *testing.T) {
+	ctx := context.Background()
+	expectedErr := errors.New("find error")
+
+	mockDS := &mockDataStore{
+		findFunc: func(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error) {
+			return nil, expectedErr
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	_, err := repo.GetSyncLogs(ctx)
+	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Errorf("Expected find error, got: %v", err)
 	}
 }
