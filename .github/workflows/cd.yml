@@ -54,9 +54,9 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.60.3
+          version: v2.9.0
 
       - name: Run Unit Tests & Quality Suite
         run: |
@@ -109,8 +109,6 @@ jobs:
       go_version: "1.26"
       draft: false
       prerelease: false
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # -------------------------------------------------------------------------
   # Job 4: Build & Deploy Lambda Docker Image to Amazon ECR

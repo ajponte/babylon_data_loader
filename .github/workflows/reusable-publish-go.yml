@@ -27,10 +27,6 @@ on:
         type: boolean
         required: false
         default: false
-    secrets:
-      GITHUB_TOKEN:
-        description: "GitHub token for creating releases"
-        required: false
 
 jobs:
   # -------------------------------------------------------------------------
@@ -119,4 +115,4 @@ jobs:
             release-artifacts/*.tar.gz
             release-artifacts/checksums.txt
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
