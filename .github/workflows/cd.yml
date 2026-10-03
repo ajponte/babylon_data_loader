@@ -1,0 +1,169 @@
+name: Continuous Delivery
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      deploy_binaries:
+        description: "Deploy Go CLI binaries to GitHub Releases"
+        type: boolean
+        required: true
+        default: true
+      deploy_ecr:
+        description: "Build & push Lambda Docker image to Amazon ECR"
+        type: boolean
+        required: true
+        default: true
+      custom_version:
+        description: "Custom SemVer version tag (e.g. v1.1.0). Leave blank to auto-derive from Git SHA."
+        type: string
+        required: false
+        default: ""
+      is_test_image:
+        description: "Mark as test deployment (tags ECR image with test-<branch>-<sha>)"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: write    # Required for creating Git releases & tags
+  id-token: write    # Required for requesting AWS OIDC JWT tokens
+  packages: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: Pre-Flight Quality Gate
+  # -------------------------------------------------------------------------
+  preflight-check:
+    name: Pre-Flight Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.60.3
+
+      - name: Run Unit Tests & Quality Suite
+        run: |
+          make vet
+          make test-ci
+
+  # -------------------------------------------------------------------------
+  # Job 2: Resolve Release Metadata & Dynamic Tagging
+  # -------------------------------------------------------------------------
+  resolve-metadata:
+    name: Resolve Release Metadata
+    needs: [preflight-check]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      is_test: ${{ steps.meta.outputs.is_test }}
+      ecr_tags: ${{ steps.meta.outputs.ecr_tags }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute Version & Tags
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          # Determine test run status
+          IS_TEST="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.is_test_image }}" = "true" ]; then
+            IS_TEST="true"
+          elif [ "${{ github.ref_name }}" != "main" ]; then
+            IS_TEST="true"
+          fi
+          echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
+
+          # Resolve SemVer version
+          if [ -n "${{ inputs.custom_version }}" ]; then
+            VERSION="${{ inputs.custom_version }}"
+          else
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+            VERSION="${LATEST_TAG}"
+            if [ "${IS_TEST}" = "true" ]; then
+              VERSION="${LATEST_TAG}-test.${SHORT_SHA}"
+            fi
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Format ECR tags list
+          CLEAN_REF=$(echo "${{ github.ref_name }}" | tr '/' '-' | tr '_' '-')
+          if [ "${IS_TEST}" = "true" ]; then
+            ECR_TAGS="test-${CLEAN_REF}-${SHORT_SHA},test-latest"
+          else
+            ECR_TAGS="latest,${VERSION},sha-${SHORT_SHA}"
+          fi
+          echo "ecr_tags=${ECR_TAGS}" >> "$GITHUB_OUTPUT"
+
+          echo "=== Computed Metadata ==="
+          echo "Resolved Version: ${VERSION}"
+          echo "Resolved ECR Tags: ${ECR_TAGS}"
+          echo "Is Test Run: ${IS_TEST}"
+
+  # -------------------------------------------------------------------------
+  # Job 3: Publish Standalone Go Binaries to GitHub Releases
+  # -------------------------------------------------------------------------
+  publish-go-binaries:
+    name: Publish Go Binaries
+    needs: [preflight-check, resolve-metadata]
+    if: |
+      always() &&
+      needs.preflight-check.result == 'success' &&
+      needs.resolve-metadata.result == 'success' &&
+      (github.event_name == 'push' || inputs.deploy_binaries == true) &&
+      needs.resolve-metadata.outputs.is_test == 'false'
+    uses: ./.github/workflows/reusable-publish-go.yml
+    with:
+      version: ${{ needs.resolve-metadata.outputs.version }}
+      binary_name: "data-loader"
+      go_version: "1.26"
+      draft: false
+      prerelease: false
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------------------------
+  # Job 4: Build & Deploy Lambda Docker Image to Amazon ECR
+  # -------------------------------------------------------------------------
+  deploy-ecr-image:
+    name: Deploy to Amazon ECR
+    needs: [preflight-check, resolve-metadata]
+    if: |
+      always() &&
+      needs.preflight-check.result == 'success' &&
+      needs.resolve-metadata.result == 'success' &&
+      (github.event_name == 'push' || inputs.deploy_ecr == true)
+    uses: ./.github/workflows/reusable-deploy-ecr.yml
+    with:
+      ecr_repository: ${{ vars.ECR_REPOSITORY_NAME || 'babylon/data-loader' }}
+      image_tags: ${{ needs.resolve-metadata.outputs.ecr_tags }}
+      dockerfile: "Dockerfile.lambda"
+      platforms: "linux/arm64"
+      aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      role_to_assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      role_session_name: "GitHubActions-DataLoader-CD"
+    secrets:
+      aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

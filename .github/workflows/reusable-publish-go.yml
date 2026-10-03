@@ -1,0 +1,147 @@
+name: Reusable Go Binary Publisher
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Semantic version tag for this release (e.g. v1.1.0)"
+        type: string
+        required: true
+      binary_name:
+        description: "Name of the compiled binary"
+        type: string
+        required: false
+        default: "data-loader"
+      go_version:
+        description: "Go compiler version"
+        type: string
+        required: false
+        default: "1.26"
+      draft:
+        description: "Publish as draft release"
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: "Publish as prerelease"
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      GITHUB_TOKEN:
+        description: "GitHub token for creating releases"
+        required: false
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Parallel Matrix Cross-Compilation
+  # -------------------------------------------------------------------------
+  build-matrix:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: true
+
+      - name: Compile Static Executable
+        run: |
+          mkdir -p dist
+          OUTPUT_PATH="dist/${{ inputs.binary_name }}"
+          echo "Compiling for ${{ matrix.goos }}/${{ matrix.goarch }}..."
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${{ inputs.version }} -X main.commit=${{ github.sha }}" \
+            -o "${OUTPUT_PATH}" \
+            main.go
+          chmod +x "${OUTPUT_PATH}"
+
+      - name: Package Tarball & Compute Checksum
+        id: package
+        run: |
+          ARCHIVE_NAME="babylon-${{ inputs.binary_name }}_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          cd dist
+          tar -czvf "../${ARCHIVE_NAME}" "${{ inputs.binary_name }}"
+          cd ..
+          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ steps.package.outputs.archive_name }}
+            ${{ steps.package.outputs.archive_name }}.sha256
+          retention-days: 2
+
+  # -------------------------------------------------------------------------
+  # Aggregate Checksums & Create GitHub Release
+  # -------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [build-matrix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Generate Consolidated Checksums
+        run: |
+          cd release-artifacts
+          rm -f *.sha256
+          sha256sum babylon-${{ inputs.binary_name }}_*.tar.gz > checksums.txt
+          echo "=== Consolidated SHA256 Checksums ==="
+          cat checksums.txt
+
+      - name: Ensure Git Tag Exists
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "Creating tag ${{ inputs.version }}..."
+            git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
+            git push origin "${{ inputs.version }}"
+          else
+            echo "Tag ${{ inputs.version }} already exists."
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: "Babylon Data Loader ${{ inputs.version }}"
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            release-artifacts/*.tar.gz
+            release-artifacts/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}
