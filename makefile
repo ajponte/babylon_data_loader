@@ -81,6 +81,17 @@ build: ## build the go application
 	go build -o $(APP_EXECUTABLE)
 	@echo "Build passed"
 
+## Lambda Targets
+build-lambda: ## build static linux/arm64 binary for lambda
+	mkdir -p out/
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o out/bootstrap ./cmd/lambda
+
+docker-build-lambda: ## build arm64 lambda container image
+	docker build -f Dockerfile.lambda -t babylon-data-loader-lambda:latest .
+
+test-lambda: ## run unit tests for lambda handler and secrets
+	go test -v -race ./cmd/lambda/... ./config/...
+
 run: run-ingest ## runs the go binary. use additional options if required.
 
 run-ingest: ## runs the go binary to ingest data.
@@ -135,7 +146,7 @@ rollback: build
 
 
 
-.PHONY: all test-ci build vendor unit-test
+.PHONY: all test-ci build vendor unit-test build-lambda docker-build-lambda test-lambda
 ## All
 all: ## runs setup, quality checks and builds
 	make check-quality

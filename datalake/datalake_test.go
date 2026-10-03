@@ -2,7 +2,6 @@ package datalake
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -97,7 +96,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		},
 	}
 	mockStats := NewStats()
-	mockLogger := *slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockLogger := *slog.New(slog.DiscardHandler)
 
 	// Create CSVFileProcessor
 	processor := NewCSVFileProcessor(
@@ -197,7 +196,7 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 		},
 	}
 	mockStats := NewStats()
-	mockLogger := *slog.New(slog.NewTextHandler(io.Discard, nil))
+	mockLogger := *slog.New(slog.DiscardHandler)
 
 	// Create CSVFileProcessor
 	processor := NewCSVFileProcessor(
