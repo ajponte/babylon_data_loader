@@ -21,7 +21,7 @@ The continuous delivery (CD) pipeline for `babylon_data_loader` orchestrates dua
 * **Zero Long-Lived Static Credentials**: Elimination of hardcoded `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` secrets in GitHub Actions repositories in favor of ephemeral, short-lived AWS Security Token Service (STS) credentials via GitHub OIDC web identity tokens.
 * **Deterministic & Verifiable Builds**: Compilation must use `-trimpath` and static linking (`CGO_ENABLED=0`) across all operating systems, accompanied by SHA256 checksum generation (`checksums.txt`) to ensure binary traceability and supply-chain integrity.
 * **Fast Feedback via Job Parallelism**: Multi-platform builds and target distribution mechanisms (GitHub Releases vs. Amazon ECR) run concurrently after passing unified pre-flight quality gates, optimizing runner efficiency.
-* **Ephemeral Branch Deployments & Storage Cost Hygiene**: Allow developers to dispatch container builds from feature branches tagged as `test-<branch>-<short_sha>` for direct integration testing in AWS, governed by an automated 14-day Amazon ECR lifecycle expiration policy to eliminate dangling image costs.
+* **Ephemeral Branch Deployments & Storage Cost Hygiene**: Allow developers to dispatch container builds from feature branches tagged as `data-loader-test-<branch>-<short_sha>` for direct integration testing in AWS, governed by an automated 14-day Amazon ECR lifecycle expiration policy to eliminate dangling image costs.
 * **Modular, Testable Automation**: Complex release orchestration logic is decoupled from GitHub Actions YAML workflows into standalone, POSIX-compliant Bash scripts located in `.github/scripts/`, enabling local testability and linting without CI iteration churn.
 
 ### 1.3. System Architecture Diagram
@@ -61,10 +61,10 @@ flowchart TD
         OIDC --> FormatTags --> Buildx --> PushECR --> VerifyECR
     end
 
-    subgraph AWS["Amazon Web Services Cloud Infrastructure"]
+    subgraph AWS["Amazon Web Services Cloud Infrastructure (us-west-2)"]
         STS["AWS Security Token Service (STS)"]
-        ECRRepo["Amazon ECR: babylon/data-loader"]
-        Lifecycle["Automated Lifecycle Policy<br/>• Expire test-* after 14 days<br/>• Retain last 30 releases"]
+        ECRRepo["Amazon ECR: ajp/babylon<br/>(Shared Repository)"]
+        Lifecycle["Automated Lifecycle Policy<br/>• Expire data-loader-test-* after 14 days<br/>• Retain last 30 releases"]
         Lambda["AWS Lambda Graviton Function<br/>(Event-Driven S3 Ingestion)"]
     end
 
@@ -112,19 +112,24 @@ babylon_data_loader/
 └── main.go                            # CLI entrypoint
 babylon_deploy/
 └── terraform/
+    ├── main.tf                        # Root Terraform wiring (shared ECR module)
     └── modules/
-        └── data-loader/
-            ├── ecr.tf                 # ECR repository & automated lifecycle rules
-            ├── iam_oidc.tf            # AWS IAM OIDC federated trust role & policy
-            ├── outputs.tf             # Exposed ECR URLs and IAM role ARNs
-            └── variables.tf           # Environment & AWS configuration variables
+        ├── ecr/                       # Shared ECR repository & IAM OIDC module
+        │   ├── iam_oidc.tf            # AWS IAM OIDC federated trust role & policy
+        │   ├── main.tf                # Shared ECR repository data source (ajp/babylon)
+        │   ├── outputs.tf             # Exposed ECR URLs and IAM role ARNs
+        │   └── variables.tf           # Environment & repository configuration variables
+        └── data-loader/               # Lambda function & Aurora infrastructure
+            ├── main.tf                # Aurora Serverless & Lambda function configuration
+            ├── outputs.tf             # Module outputs
+            └── variables.tf           # Environment variables
 ```
 
 ---
 
-### 2.1. Local Multi-Platform Cross-Compilation (`makefile`)
+### 2.1. Local Multi-Platform Cross-Compilation & Container Tooling (`makefile`)
 
-Local developers and continuous integration workers utilize standardized targets in [`../../makefile`](../../makefile) to compile, package, and cryptographically verify binaries without reliance on external packaging tools.
+Local developers and continuous integration workers utilize standardized targets in [`../../makefile`](../../makefile) to compile, package, and cryptographically verify binaries, as well as build and push container images directly to Amazon ECR without reliance on external packaging tools.
 
 #### Build Targets & Parameters
 * **`clean-dist`**: Cleans the `out/dist` workspace to prevent stale artifacts.
@@ -152,6 +157,24 @@ CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build \
 - `-trimpath`: Strips absolute file system paths from compiled debug symbols, ensuring reproducible builds and eliminating leaks of developer directory paths.
 - `-ldflags="-s -w"`: Strips debug information and symbol tables, reducing binary sizes by approximately 30-40%.
 - `-X main.version / -X main.commit`: Dynamically injects the release version tag and Git commit SHA directly into compiled code at build time.
+
+#### Local Container & Direct ECR Deployment Targets
+In addition to binary packaging, `makefile` provides targets for local container building, AWS ECR authentication, and direct deployment:
+* **`build-lambda`**: Compiles the stripped, statically linked ARM64 Linux binary (`out/bootstrap`) targeting the AWS Lambda provided runtime.
+* **`docker-build-lambda`**: Builds the local ARM64 container image tagged as `babylon-data-loader-lambda:latest` via [`../../Dockerfile.lambda`](../../Dockerfile.lambda).
+* **`docker-login-ecr`**: Authenticates the local Docker CLI daemon to the Amazon ECR registry in region `us-west-2` via `aws ecr get-login-password`.
+  ```makefile
+  docker-login-ecr: ## authenticate local Docker CLI to Amazon ECR
+  	aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+  ```
+* **`deploy-ecr`**: Orchestrates end-to-end local container deployment: depends on `docker-build-lambda` and `docker-login-ecr`, tags the image with both rolling (`$(IMAGE_TAG)`, default: `data-loader-latest`) and immutable commit SHA (`data-loader-sha-$(COMMIT_SHA)`) tags, and pushes layers directly to the shared Amazon ECR repository (`615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon`).
+  ```makefile
+  deploy-ecr: docker-build-lambda docker-login-ecr ## build, tag, and push Lambda container to ECR
+  	docker tag babylon-data-loader-lambda:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):$(IMAGE_TAG)
+  	docker tag babylon-data-loader-lambda:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):data-loader-sha-$(COMMIT_SHA)
+  	docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):$(IMAGE_TAG)
+  	docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):data-loader-sha-$(COMMIT_SHA)
+  ```
 
 ---
 
@@ -192,12 +215,12 @@ The reusable container deployer workflow ([`../../.github/workflows/reusable-dep
 #### Workflow Inputs & Secrets
 | Input Parameter | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `ecr_repository` | string | **Yes** | N/A | Target Amazon ECR repository name (e.g. `babylon/data-loader`) |
-| `image_tags` | string | **Yes** | N/A | Comma-delimited list of image tags to push |
+| `ecr_repository` | string | No | `ajp/babylon` | Target Amazon ECR repository name (shared repository: `ajp/babylon`) |
+| `image_tags` | string | **Yes** | N/A | Comma-delimited list of image tags to push (with `data-loader-` prefix) |
 | `dockerfile` | string | No | `Dockerfile.lambda` | Path to container Dockerfile |
 | `platforms` | string | No | `linux/arm64` | Target container architecture |
-| `aws_region` | string | No | `us-east-1` | AWS region hosting the ECR repository |
-| `role_to_assume` | string | No | `""` | AWS IAM Role ARN for OIDC authentication |
+| `aws_region` | string | No | `us-west-2` | AWS region hosting the shared ECR repository |
+| `role_to_assume` | string | No | `""` | AWS IAM Role ARN for OIDC authentication (`arn:aws:iam::615471835001:role/github-actions-babylon-deploy`) |
 | `role_session_name`| string | No | `GitHubActions-ECRDeploy`| STS session name |
 | `aws_access_key_id` *(Secret)* | string | No | N/A | Static AWS Access Key ID (fallback when OIDC is unset) |
 | `aws_secret_access_key` *(Secret)* | string | No | N/A | Static AWS Secret Key (fallback when OIDC is unset) |
@@ -270,9 +293,9 @@ classDiagram
 
 1. **[`resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh)**:
    - **Input Environment Variables**: `EVENT_NAME`, `REF_NAME`, `CUSTOM_VERSION`, `IS_TEST_IMAGE`.
-   - **Functionality**: Extracts the short Git SHA (`git rev-parse --short=7 HEAD`). Identifies test runs (if triggered from non-`main` branch or if `IS_TEST_IMAGE=true`). If `CUSTOM_VERSION` is omitted, resolves the latest Git tag or falls back to `v0.1.0`. Computes comma-delimited ECR tags:
-     * Production: `latest,${VERSION},sha-${SHORT_SHA}`
-     * Test: `test-${CLEAN_REF}-${SHORT_SHA},test-latest`
+   - **Functionality**: Extracts the short Git SHA (`git rev-parse --short=7 HEAD`). Identifies test runs (if triggered from non-`main` branch or if `IS_TEST_IMAGE=true`). If `CUSTOM_VERSION` is omitted, resolves the latest Git tag or falls back to `v0.1.0`. Computes comma-delimited ECR tags adhering to the shared `ajp/babylon` repository's `data-loader-` prefix schema:
+     * Production: `data-loader-latest,data-loader-${VERSION},data-loader-sha-${SHORT_SHA}`
+     * Test/Branch: `data-loader-test-${CLEAN_REF}-${SHORT_SHA},data-loader-test-latest`
    - **Outputs** (via `$GITHUB_OUTPUT`): `version`, `short_sha`, `is_test`, `ecr_tags`.
 
 2. **[`build-and-package.sh`](../../.github/scripts/build-and-package.sh)**:
@@ -286,7 +309,7 @@ classDiagram
 
 4. **[`format-ecr-tags.sh`](../../.github/scripts/format-ecr-tags.sh)**:
    - **Input Environment Variables**: `REGISTRY`, `ECR_REPOSITORY`, `RAW_TAGS`.
-   - **Functionality**: Parses comma-delimited short tag names, trims whitespace, and prepends the full ECR registry URL and repository path (e.g. `123456789012.dkr.ecr.us-east-1.amazonaws.com/babylon/data-loader:latest`).
+   - **Functionality**: Parses comma-delimited short tag names, trims whitespace, and prepends the full ECR registry URL and repository path (e.g. `615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon:data-loader-latest`).
    - **Outputs** (via `$GITHUB_OUTPUT`): `tags`.
 
 5. **[`verify-ecr-image.sh`](../../.github/scripts/verify-ecr-image.sh)**:
@@ -378,22 +401,33 @@ sequenceDiagram
     needs.resolve-metadata.result == 'success' &&
     (github.event_name == 'push' || inputs.deploy_ecr == true)
   ```
-  Points to repository variable `vars.ECR_REPOSITORY_NAME` (default: `babylon/data-loader`), AWS region `vars.AWS_REGION` (default: `us-east-1`), and IAM OIDC role `vars.AWS_DEPLOY_ROLE_ARN`.
+  Points to repository variable `vars.ECR_REPOSITORY_NAME` (default: `ajp/babylon`), AWS region `vars.AWS_REGION` (default: `us-west-2`), and IAM OIDC deployment role `vars.AWS_DEPLOY_ROLE_ARN` (`arn:aws:iam::615471835001:role/github-actions-babylon-deploy`).
+
+#### Repository Variables for OIDC Deployment
+The pipeline consumes three GitHub Actions repository variables (`vars`):
+| Variable Name | Required | Configured Value / Default | Description |
+| :--- | :--- | :--- | :--- |
+| `AWS_DEPLOY_ROLE_ARN` | **Yes** | `arn:aws:iam::615471835001:role/github-actions-babylon-deploy` | AWS IAM Role ARN assumed via GitHub Actions OIDC web identity token |
+| `AWS_REGION` | No | `us-west-2` | Target AWS region hosting the shared Amazon ECR repository |
+| `ECR_REPOSITORY_NAME` | No | `ajp/babylon` | Shared Amazon ECR repository name across Babylon services |
 
 ---
 
 ### 2.6. Cloud Infrastructure & Security Architecture (`babylon_deploy`)
 
-Infrastructure definitions reside in [`babylon_deploy/terraform/modules/data-loader/`](../../../babylon_deploy/terraform/modules/data-loader/README.md) and establish the serverless container repository, layer pruning rules, and identity federation.
+Infrastructure definitions reside in [`babylon_deploy/terraform/modules/ecr/`](../../../babylon_deploy/terraform/modules/ecr/README.md) and establish the shared container repository, layer pruning rules, and identity federation.
 
-#### 1. Amazon ECR Repository Configuration ([`ecr.tf`](../../../babylon_deploy/terraform/modules/data-loader/ecr.tf))
-* **Repository Name**: `babylon/data-loader`
-* **Image Tag Mutability**: `MUTABLE` (required for rolling tags such as `latest`, `test-latest`).
+#### 1. Amazon ECR Shared Repository Configuration ([`main.tf`](../../../babylon_deploy/terraform/modules/ecr/main.tf))
+* **Repository Name**: `ajp/babylon`
+* **Registry URI**: `615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon`
+* **AWS Region**: `us-west-2`
+* **Multi-Service Architecture**: The single ECR repository is shared across Babylon ecosystem services (e.g. `data-loader`, future microservices) by prefixing container tags with the component identifier (`data-loader-*`).
+* **Image Tag Mutability**: `MUTABLE` (required for rolling tags such as `data-loader-latest`, `data-loader-test-latest`).
 * **Vulnerability Scanning**: `scan_on_push = true` ensures automated scanning for Common Vulnerabilities and Exposures (CVEs) on ingestion.
 * **Encryption**: Server-side encryption with AWS KMS-managed keys or Amazon ECR-managed keys (`AES256`).
 
 #### 2. Automated Lifecycle Policy (Three-Tier Hygiene)
-The ECR repository implements an automated three-tier lifecycle policy:
+The shared ECR repository implements an automated three-tier lifecycle policy configured for component-prefixed tags:
 ```json
 {
   "rules": [
@@ -410,10 +444,10 @@ The ECR repository implements an automated three-tier lifecycle policy:
     },
     {
       "rulePriority": 2,
-      "description": "Expire ephemeral branch test images (test-*) older than 14 days",
+      "description": "Expire ephemeral branch test images (data-loader-test-*) older than 14 days",
       "selection": {
         "tagStatus": "tagged",
-        "tagPrefixList": ["test-"],
+        "tagPrefixList": ["data-loader-test-"],
         "countType": "sinceImagePushed",
         "countUnit": "days",
         "countNumber": 14
@@ -422,10 +456,10 @@ The ECR repository implements an automated three-tier lifecycle policy:
     },
     {
       "rulePriority": 3,
-      "description": "Retain the last 30 production release images",
+      "description": "Retain the last 30 production release images per component prefix",
       "selection": {
         "tagStatus": "tagged",
-        "tagPrefixList": ["v", "sha-", "latest"],
+        "tagPrefixList": ["data-loader-v", "data-loader-sha-", "data-loader-latest"],
         "countType": "imageCountMoreThan",
         "countNumber": 30
       },
@@ -436,23 +470,27 @@ The ECR repository implements an automated three-tier lifecycle policy:
 ```
 
 > [!NOTE]
-> **Lifecycle Rule Hierarchy**: Rule 1 eliminates orphaned layers left by cancelled builds. Rule 2 guarantees that test containers generated during feature branch validation automatically vanish after 14 days without human intervention. Rule 3 retains historical production releases for rollbacks while bounding storage costs.
+> **Lifecycle Rule Hierarchy**: Rule 1 eliminates orphaned layers left by cancelled builds. Rule 2 guarantees that test containers generated during feature branch validation (`data-loader-test-*`) automatically vanish after 14 days without human intervention. Rule 3 retains historical production releases for rollbacks while bounding storage costs.
 
-#### 3. AWS IAM OIDC Federated Authentication ([`iam_oidc.tf`](../../../babylon_deploy/terraform/modules/data-loader/iam_oidc.tf))
+#### 3. AWS IAM OIDC Federated Authentication ([`iam_oidc.tf`](../../../babylon_deploy/terraform/modules/ecr/iam_oidc.tf))
 To enforce passwordless authentication:
 1. **OIDC Provider**: Configures trust with GitHub's OpenID Connect provider (`https://token.actions.githubusercontent.com`).
 2. **Assume Role Policy Condition**:
+   - `Role ARN`: `arn:aws:iam::615471835001:role/github-actions-babylon-deploy`
    - `StringEquals: token.actions.githubusercontent.com:aud`: `sts.amazonaws.com`
-   - `StringLike: token.actions.githubusercontent.com:sub`: `repo:ajponte/babylon_data_loader:*`
-3. **Least-Privilege ECR Permissions**: The assumed IAM role `babylon-data-loader-github-actions-ecr` is restricted strictly to authentication token retrieval (`ecr:GetAuthorizationToken` on `*`) and image pushing operations scoped exclusively to `aws_ecr_repository.data_loader.arn`:
+   - `StringLike: token.actions.githubusercontent.com:sub`: `repo:ajponte/babylon*:*` (scoped to `babylon_data_loader` and related repositories)
+3. **Least-Privilege ECR Permissions**: The assumed IAM role `github-actions-babylon-deploy` is restricted strictly to authentication token retrieval (`ecr:GetAuthorizationToken` on `*`) and image pushing operations scoped exclusively to `arn:aws:ecr:us-west-2:615471835001:repository/ajp/babylon`:
    - `ecr:BatchCheckLayerAvailability`
    - `ecr:GetDownloadUrlForLayer`
+   - `ecr:GetRepositoryPolicy`
+   - `ecr:DescribeRepositories`
+   - `ecr:ListImages`
+   - `ecr:DescribeImages`
+   - `ecr:BatchGetImage`
    - `ecr:InitiateLayerUpload`
    - `ecr:UploadLayerPart`
    - `ecr:CompleteLayerUpload`
    - `ecr:PutImage`
-   - `ecr:DescribeImages`
-   - `ecr:ListImages`
 
 ---
 
@@ -471,7 +509,7 @@ gh workflow run cd.yml \
   -f deploy_ecr=true \
   -f is_test_image=true
 ```
-* Resulting ECR tags: `test-feature-my-new-feature-<short_sha>`, `test-latest`.
+* Resulting ECR tags: `data-loader-test-feature-my-new-feature-<short_sha>`, `data-loader-test-latest`.
 * GitHub Releases: Skipped.
 
 #### Scenario B: Trigger Ad-Hoc Production Binary Release
@@ -486,7 +524,19 @@ gh workflow run cd.yml \
 * Resulting Release: GitHub Release `v1.1.1` with tarballs and `checksums.txt`.
 * ECR Deployment: Skipped.
 
-#### Scenario C: Monitor Running Workflow Execution
+#### Scenario C: Direct Local Container Deployment via Make
+To build, tag, and push container images directly to Amazon ECR from a local developer environment:
+```bash
+# 1. Authenticate Docker CLI to Amazon ECR (us-west-2)
+make docker-login-ecr
+
+# 2. Build ARM64 Lambda container, tag, and push to ajp/babylon
+make deploy-ecr
+```
+* Resulting ECR tags: `data-loader-latest`, `data-loader-sha-<short_sha>`.
+* Registry Destination: `615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon`.
+
+#### Scenario D: Monitor Running Workflow Execution
 ```bash
 # Watch the latest continuous delivery execution
 gh run watch $(gh run list --workflow=cd.yml --limit 1 --json databaseId -q '.[0].databaseId')
@@ -499,8 +549,8 @@ gh run watch $(gh run list --workflow=cd.yml --limit 1 --json databaseId -q '.[0
 #### 1. List Available Images and Tags
 ```bash
 aws ecr describe-images \
-  --repository-name babylon/data-loader \
-  --region us-east-1 \
+  --repository-name ajp/babylon \
+  --region us-west-2 \
   --query 'sort_by(imageDetails,&imagePushedAt)[*].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
   --output table
 ```
@@ -508,9 +558,9 @@ aws ecr describe-images \
 #### 2. Query Specific Image Manifest
 ```bash
 aws ecr batch-get-image \
-  --repository-name babylon/data-loader \
-  --image-ids imageTag=test-latest \
-  --region us-east-1 \
+  --repository-name ajp/babylon \
+  --image-ids imageTag=data-loader-test-latest \
+  --region us-west-2 \
   --query 'images[0].imageId.imageDigest' \
   --output text
 ```
@@ -520,13 +570,13 @@ To verify which images will expire under the 14-day rule without deleting them:
 ```bash
 # Start lifecycle preview simulation
 aws ecr start-lifecycle-policy-preview \
-  --repository-name babylon/data-loader \
-  --region us-east-1
+  --repository-name ajp/babylon \
+  --region us-west-2
 
 # View preview results
 aws ecr get-lifecycle-policy-preview \
-  --repository-name babylon/data-loader \
-  --region us-east-1 \
+  --repository-name ajp/babylon \
+  --region us-west-2 \
   --output table
 ```
 
@@ -536,18 +586,18 @@ aws ecr get-lifecycle-policy-preview \
 
 To validate an event-driven S3 ingestion flow against a test image:
 ```bash
-DEV_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-TEST_TAG="test-latest"
+ACCOUNT_ID="615471835001"
+TEST_TAG="data-loader-test-latest"
 
 aws lambda update-function-code \
   --function-name babylon-data-loader-dev \
-  --image-uri "${DEV_ACCOUNT_ID}.dkr.ecr.us-east-1.amazonaws.com/babylon/data-loader:${TEST_TAG}" \
-  --region us-east-1
+  --image-uri "${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon:${TEST_TAG}" \
+  --region us-west-2
 
 # Verify function configuration state
 aws lambda wait function-updated \
   --function-name babylon-data-loader-dev \
-  --region us-east-1
+  --region us-west-2
 
 echo "Lambda babylon-data-loader-dev updated successfully to ${TEST_TAG}"
 ```
@@ -594,22 +644,58 @@ Executing `make check-quality` and `make test-ci` verifies zero regressions acro
 - `go vet ./...`: Passed.
 - `go test -v -timeout 10m ./... -coverprofile=coverage.out`: Passed (100% tests green across `cmd/lambda/...`, `config/...`, `ingest/...`, and `storage/...`).
 
+### 4.3. GitHub Actions Continuous Delivery Pipeline Verification (Run 37137652746)
+
+The continuous delivery pipeline architecture—incorporating the shared `ajp/babylon` Amazon ECR repository, AWS IAM OIDC authentication (`arn:aws:iam::615471835001:role/github-actions-babylon-deploy`), and `data-loader-` prefix tagging—was verified end-to-end via GitHub Actions:
+
+* **Workflow Run**: [GitHub Actions Run 37137652746](https://github.com/ajponte/babylon_data_loader/actions/runs/37137652746)
+* **Trigger Event**: `workflow_dispatch` on branch `cleanup` (commit `82061c0`)
+* **Execution Status**: **Completed Successfully (100% Passed)**
+
+#### Job Execution Summary
+| Job Name | Job ID | Duration | Status | Key Outputs & Milestones |
+| :--- | :--- | :--- | :--- | :--- |
+| **Pre-Flight Quality Gate** | `111245352370` | 22s | `success` | Passed `golangci-lint` (v2.9.0), `make vet`, and `make test-ci` |
+| **Resolve Release Metadata** | `111245428727` | 6s | `success` | `version: v0.1.0-test.82061c0`<br/>`short_sha: 82061c0`<br/>`is_test: true`<br/>`ecr_tags: data-loader-test-cleanup-82061c0,data-loader-test-latest` |
+| **Deploy to Amazon ECR (linux/arm64)** | `111245458483` | 6m 9s | `success` | Built ARM64 Lambda image, assumed OIDC role in `us-west-2`, pushed to `ajp/babylon`, validated remote image manifest |
+| **Publish Go Binaries** | `111245459244` | N/A | `skipped` | Gracefully bypassed for test dispatch (`is_test: true`) |
+
+#### Remote ECR Manifest Verification Output
+During execution of job `111245458483`, [`.github/scripts/verify-ecr-image.sh`](../../.github/scripts/verify-ecr-image.sh) authenticated with Amazon ECR in `us-west-2` and queried the image manifest:
+```
+Verifying manifest for 615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon:data-loader-test-cleanup-82061c0 in region us-west-2...
+-----------------------------------------------------------------------------------------
+|                                    DescribeImages                                     |
++----------+----------------------------------------------------------------------------+
+|  Digest  |  sha256:140e27407feadf670bed99c77fa878cab4b21dc6a6954b5bc107a6567a35cc0b   |
+|  PushedAt|  2026-10-03T16:45:29.939000+00:00                                          |
+|  Size    |  48263807                                                                  |
++----------+----------------------------------------------------------------------------+
+||                                        Tags                                         ||
+|+-------------------------------------------------------------------------------------+|
+||  data-loader-test-latest                                                            ||
+||  data-loader-test-cleanup-82061c0                                                   ||
+|+-------------------------------------------------------------------------------------+|
+```
+
 ---
 
 ## 5. Architecture Decision Record (ADR)
 
-### ADR-01: Container Registry Selection — Amazon ECR vs. GitHub Container Registry (GHCR)
+### ADR-01: Container Registry Selection — Shared Amazon ECR Repository (`ajp/babylon`) vs. Dedicated / GHCR
 
 #### Context & Problem Statement
-The serverless ingestion engine executes on AWS Lambda. We evaluated hosting the Lambda container image on GitHub Packages Container Registry (`ghcr.io`) versus private Amazon Elastic Container Registry (Amazon ECR).
+The serverless ingestion engine executes on AWS Lambda in `us-west-2`. We evaluated hosting the Lambda container image on GitHub Packages Container Registry (`ghcr.io`), creating a dedicated single-service ECR repository (`babylon/data-loader`), or utilizing a consolidated shared Amazon ECR repository (`ajp/babylon`).
 
 #### Decision
-Deploy container images exclusively to private **Amazon ECR** (`babylon/data-loader`).
+Deploy container images exclusively to the shared private **Amazon ECR repository** (`ajp/babylon`) in AWS region **`us-west-2`** (`615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon`), enforcing component-prefixed tagging (`data-loader-*`).
 
 #### Consequences & Rationale
-* **AWS Lambda Integration**: AWS Lambda cannot natively pull private container images from registries outside Amazon ECR without complex mirroring solutions or external proxy layers. Amazon ECR provides zero-friction native integration.
-* **Network Latency & Cold Starts**: Pulling container layers within the same AWS region over internal AWS networking (and optionally via private AWS PrivateLink VPC endpoints) ensures minimal transfer latency and eliminates Internet gateway egress charges.
-* **Lifecycle Governance**: Amazon ECR natively supports fine-grained rule-based lifecycle policies (e.g. purging `test-*` images after 14 days and untagged layers after 24 hours), which GHCR does not natively provide at the repository level without custom Actions cron jobs.
+* **AWS Lambda Native Integration**: AWS Lambda cannot natively pull private container images from registries outside Amazon ECR without complex mirroring solutions or external proxy layers. Amazon ECR in the same region (`us-west-2`) provides zero-friction native integration.
+* **Shared Repository Efficiency**: Consolidating container registries into `ajp/babylon` minimizes repository sprawl across AWS accounts and unifies IAM access control and Terraform definitions under [`babylon_deploy/terraform/modules/ecr/`](../../../babylon_deploy/terraform/modules/ecr/README.md).
+* **Tag Namespace Segregation**: Using the prefix schema (`data-loader-latest`, `data-loader-vX.Y.Z`, `data-loader-sha-<short_sha>`, `data-loader-test-<branch>-<short_sha>`) completely isolates image tags between Babylon microservices while cohabiting the single registry.
+* **Network Latency & Cold Starts**: Pulling container layers within `us-west-2` over internal AWS networking ensures minimal transfer latency, sub-second cold starts, and zero Internet gateway egress charges.
+* **Lifecycle Governance**: Amazon ECR natively supports fine-grained prefix-targeted lifecycle policies (e.g. purging `data-loader-test-*` images after 14 days and retaining the last 30 release images), eliminating dangling storage costs.
 * **IAM Security**: Access control to ECR is governed by standard AWS IAM policies, consolidating security auditing under AWS CloudTrail.
 
 ---
@@ -617,15 +703,16 @@ Deploy container images exclusively to private **Amazon ECR** (`babylon/data-loa
 ### ADR-02: Authentication Architecture — AWS IAM OIDC Federation vs. Long-Lived Static Secrets
 
 #### Context & Problem Statement
-GitHub Actions runners must authenticate to AWS to push Docker image layers to Amazon ECR. Traditional CI patterns store `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub repository secrets.
+GitHub Actions runners must authenticate to AWS in `us-west-2` to push Docker image layers to the shared Amazon ECR repository `ajp/babylon`. Traditional CI patterns store `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in GitHub repository secrets.
 
 #### Decision
-Implement **AWS IAM OpenID Connect (OIDC) Web Identity Federation** (`token.actions.githubusercontent.com`) to assume an ephemeral IAM role.
+Implement **AWS IAM OpenID Connect (OIDC) Web Identity Federation** (`token.actions.githubusercontent.com`) to assume the deployment role `arn:aws:iam::615471835001:role/github-actions-babylon-deploy` in region **`us-west-2`**, parameterized via repository variables (`AWS_DEPLOY_ROLE_ARN`, `AWS_REGION`, `ECR_REPOSITORY_NAME`).
 
 #### Consequences & Rationale
 * **Zero Secret Leakage**: No static, long-lived AWS credentials exist in GitHub repository secrets. If a repository secret is compromised or logged accidentally, no persistent AWS keys are exposed.
 * **Short-Lived Ephemeral Sessions**: AWS STS issues credentials valid for 1 hour only, automatically expiring after pipeline execution.
-* **Strict Subject Claim Enforcement**: The IAM assume role trust condition matches `token.actions.githubusercontent.com:sub` against `repo:ajponte/babylon_data_loader:*`, preventing other GitHub repositories from assuming the role even if they discover the role ARN.
+* **Strict Subject Claim Enforcement**: The IAM assume role trust condition matches `token.actions.githubusercontent.com:sub` against `repo:ajponte/babylon*:*`, preventing untrusted GitHub repositories from assuming the role even if they discover the role ARN.
+* **Environment Portability via Variables**: Pipeline definitions decouple cloud parameters from workflow code by relying on GitHub Actions repository variables (`vars.AWS_DEPLOY_ROLE_ARN`, `vars.AWS_REGION`, `vars.ECR_REPOSITORY_NAME`) with resilient built-in defaults.
 * **Granular Audit Trails**: Every assume role request and ECR push operation is logged in AWS CloudTrail with full GitHub context (commit SHA, branch, and runner identity).
 
 ---
@@ -686,8 +773,13 @@ For further details regarding the broader Babylon ecosystem and related subsyste
   - ECR Manifest Verifier: [`../../.github/scripts/verify-ecr-image.sh`](../../.github/scripts/verify-ecr-image.sh)
 * **Makefile Packaging Rules**: [`../../makefile`](../../makefile)
 * **Lambda Container Packaging**: [`../../Dockerfile.lambda`](../../Dockerfile.lambda)
-* **Terraform Infrastructure Module**: [`../../../babylon_deploy/terraform/modules/data-loader/`](../../../babylon_deploy/terraform/modules/data-loader/README.md)
-  - ECR Repository & Lifecycle Policy: [`../../../babylon_deploy/terraform/modules/data-loader/ecr.tf`](../../../babylon_deploy/terraform/modules/data-loader/ecr.tf)
-  - IAM OIDC Role & Policy: [`../../../babylon_deploy/terraform/modules/data-loader/iam_oidc.tf`](../../../babylon_deploy/terraform/modules/data-loader/iam_oidc.tf)
-  - Module Outputs: [`../../../babylon_deploy/terraform/modules/data-loader/outputs.tf`](../../../babylon_deploy/terraform/modules/data-loader/outputs.tf)
-  - Module Variables: [`../../../babylon_deploy/terraform/modules/data-loader/variables.tf`](../../../babylon_deploy/terraform/modules/data-loader/variables.tf)
+* **Terraform Infrastructure Modules**:
+  - Shared ECR & IAM OIDC Module: [`../../../babylon_deploy/terraform/modules/ecr/`](../../../babylon_deploy/terraform/modules/ecr/README.md)
+    - ECR Data Source: [`../../../babylon_deploy/terraform/modules/ecr/main.tf`](../../../babylon_deploy/terraform/modules/ecr/main.tf)
+    - IAM OIDC Role & Policy: [`../../../babylon_deploy/terraform/modules/ecr/iam_oidc.tf`](../../../babylon_deploy/terraform/modules/ecr/iam_oidc.tf)
+    - ECR Module Outputs: [`../../../babylon_deploy/terraform/modules/ecr/outputs.tf`](../../../babylon_deploy/terraform/modules/ecr/outputs.tf)
+    - ECR Module Variables: [`../../../babylon_deploy/terraform/modules/ecr/variables.tf`](../../../babylon_deploy/terraform/modules/ecr/variables.tf)
+  - Data Loader Lambda Infrastructure: [`../../../babylon_deploy/terraform/modules/data-loader/`](../../../babylon_deploy/terraform/modules/data-loader/README.md)
+    - Lambda & Database Resources: [`../../../babylon_deploy/terraform/modules/data-loader/main.tf`](../../../babylon_deploy/terraform/modules/data-loader/main.tf)
+    - Module Outputs: [`../../../babylon_deploy/terraform/modules/data-loader/outputs.tf`](../../../babylon_deploy/terraform/modules/data-loader/outputs.tf)
+    - Module Variables: [`../../../babylon_deploy/terraform/modules/data-loader/variables.tf`](../../../babylon_deploy/terraform/modules/data-loader/variables.tf)

@@ -92,6 +92,21 @@ docker-build-lambda: ## build arm64 lambda container image
 test-lambda: ## run unit tests for lambda handler, secrets, and storage
 	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
 
+AWS_ACCOUNT_ID ?= 615471835001
+AWS_REGION     ?= us-west-2
+ECR_REPO       ?= ajp/babylon
+IMAGE_TAG      ?= data-loader-latest
+COMMIT_SHA     ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo "dev")
+
+docker-login-ecr: ## authenticate local Docker CLI to Amazon ECR
+	aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+
+deploy-ecr: docker-build-lambda docker-login-ecr ## build, tag, and push Lambda container to ECR
+	docker tag babylon-data-loader-lambda:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):$(IMAGE_TAG)
+	docker tag babylon-data-loader-lambda:latest $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):data-loader-sha-$(COMMIT_SHA)
+	docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):$(IMAGE_TAG)
+	docker push $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/$(ECR_REPO):data-loader-sha-$(COMMIT_SHA)
+
 # ==============================================================================
 # Distribution & Multi-Platform Cross-Compilation
 # ==============================================================================

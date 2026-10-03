@@ -4,9 +4,10 @@ on:
   workflow_call:
     inputs:
       ecr_repository:
-        description: "Target Amazon ECR repository name (e.g. babylon/data-loader)"
+        description: "Target Amazon ECR repository name (e.g. ajp/babylon)"
         type: string
-        required: true
+        required: false
+        default: "ajp/babylon"
       image_tags:
         description: "Comma-separated list of image tags to push (e.g. latest,v1.1.0,sha-abc1234)"
         type: string
@@ -25,7 +26,7 @@ on:
         description: "Target AWS Region"
         type: string
         required: false
-        default: "us-east-1"
+        default: "us-west-2"
       role_to_assume:
         description: "AWS IAM Role ARN for OIDC authentication"
         type: string
