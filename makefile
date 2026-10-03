@@ -62,13 +62,11 @@ tidy: ## runs tidy to fix go.mod dependencies
 ## Right now these are exactly the same as `unit-test`.
 test-ci: ## runs tests and create generates coverage report
 	make tidy
-	make vendor
 	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
 	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
 	go test
 unit-test: ## runs unit tests and creates a coverage report
 	make tidy
-	make vendor
 	go test -v -timeout 10m ./... -coverprofile=coverage.out
 
 coverage: ## displays test coverage report in html mode
