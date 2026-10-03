@@ -1,0 +1,21 @@
+# Stage 1: Build static ARM64 binary
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /app
+RUN apk add --no-cache git ca-certificates
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Compile entrypoint for ARM64 Graviton
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o /bootstrap ./cmd/lambda
+
+# Stage 2: Minimal AWS Lambda runtime image
+FROM public.ecr.aws/lambda/provided:al2023
+
+COPY --from=builder /bootstrap /var/runtime/bootstrap
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+CMD ["/var/runtime/bootstrap"]

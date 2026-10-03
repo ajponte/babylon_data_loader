@@ -62,13 +62,11 @@ tidy: ## runs tidy to fix go.mod dependencies
 ## Right now these are exactly the same as `unit-test`.
 test-ci: ## runs tests and create generates coverage report
 	make tidy
-	make vendor
 	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
 	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
 	go test
 unit-test: ## runs unit tests and creates a coverage report
 	make tidy
-	make vendor
 	go test -v -timeout 10m ./... -coverprofile=coverage.out
 
 coverage: ## displays test coverage report in html mode
@@ -80,6 +78,17 @@ build: ## build the go application
 	mkdir -p out/
 	go build -o $(APP_EXECUTABLE)
 	@echo "Build passed"
+
+## Lambda Targets
+build-lambda: ## build static linux/arm64 binary for lambda
+	mkdir -p out/
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o out/bootstrap ./cmd/lambda
+
+docker-build-lambda: ## build arm64 lambda container image
+	docker build -f Dockerfile.lambda -t babylon-data-loader-lambda:latest .
+
+test-lambda: ## run unit tests for lambda handler, secrets, and storage
+	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
 
 run: run-ingest ## runs the go binary. use additional options if required.
 
@@ -135,7 +144,7 @@ rollback: build
 
 
 
-.PHONY: all test-ci build vendor unit-test
+.PHONY: all test-ci build vendor unit-test build-lambda docker-build-lambda test-lambda
 ## All
 all: ## runs setup, quality checks and builds
 	make check-quality

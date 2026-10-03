@@ -1,0 +1,21 @@
+# VCS & CI
+.git/
+.github/
+
+# Compiled Binaries & Test Artifacts
+out/
+bin/
+*.out
+*.test
+coverage.*
+report.json
+
+# Desktop & Frontend Dependencies
+desktop/frontend/node_modules/
+desktop/frontend/dist/
+desktop/build/bin/
+
+# Temporary directories and local data
+tmp/
+data/unprocessed/*.CSV
+data/processed/*.CSV
