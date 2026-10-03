@@ -202,8 +202,9 @@ The reusable publisher workflow ([`../../.github/workflows/reusable-publish-go.y
    - Uploads the individual tarball and its individual `.sha256` file using `actions/upload-artifact@v4` with a 2-day retention window.
 2. **`release` Job**:
    - Depends on `build-matrix` completion.
+   - Checks out the repository using `actions/checkout@v4` with `fetch-depth: 0` to provide full tag and commit visibility to the runner, ensuring downstream Git tag evaluation and creation operations access the complete tag namespace.
    - Downloads all matrix artifacts using `actions/download-artifact@v4` into `release-artifacts` with `merge-multiple: true`.
-   - Executes [`.github/scripts/aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh) to produce a unified `checksums.txt` and verify that the target Git tag exists on the origin.
+   - Executes [`.github/scripts/aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh) to produce a unified `checksums.txt` and idempotently ensure that the target Git tag exists on origin.
    - Publishes the GitHub Release via `softprops/action-gh-release@v2`, attaching all tarball archives and `checksums.txt`.
 
 ---
@@ -293,7 +294,13 @@ classDiagram
 
 1. **[`resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh)**:
    - **Input Environment Variables**: `EVENT_NAME`, `REF_NAME`, `CUSTOM_VERSION`, `IS_TEST_IMAGE`.
-   - **Functionality**: Extracts the short Git SHA (`git rev-parse --short=7 HEAD`). Identifies test runs (if triggered from non-`main` branch or if `IS_TEST_IMAGE=true`). If `CUSTOM_VERSION` is omitted, resolves the latest Git tag or falls back to `v0.1.0`. Computes comma-delimited ECR tags adhering to the shared `ajp/babylon` repository's `data-loader-` prefix schema:
+   - **Functionality**: Extracts the short Git SHA (`git rev-parse --short=7 HEAD`). Identifies test runs (`IS_TEST=true` if triggered via `workflow_dispatch` with `IS_TEST_IMAGE=true` or if triggered on any branch other than `main`).
+   - **SemVer Resolution Precedence**:
+     1. **Explicit Version Override**: Uses `CUSTOM_VERSION` directly if specified.
+     2. **Exact Git Tag Match on HEAD**: Evaluates `git describe --tags --exact-match`. If HEAD points directly to a Git tag, that tag is used. In test mode, appends `-test.${SHORT_SHA}`.
+     3. **Automated SemVer Patch Incrementing (on `main`)**: If running on `main` without an exact tag match on HEAD, queries the most recent tag via `git describe --tags --abbrev=0` (defaulting to `v0.1.0` if no tags exist) and automatically increments the patch version (`v<MAJOR>.<MINOR>.<PATCH+1>`, e.g., `v0.1.0` -> `v0.1.1`).
+     4. **Ephemeral Test Tag Formatting**: For feature branches and test dispatches (`IS_TEST=true`), formats the version as `${LATEST_TAG}-test.${SHORT_SHA}` (e.g. `v0.1.0-test.82061c0`).
+   - **Amazon ECR Tag Formatting**: Computes comma-delimited ECR tags adhering to the shared `ajp/babylon` repository's `data-loader-` prefix schema:
      * Production: `data-loader-latest,data-loader-${VERSION},data-loader-sha-${SHORT_SHA}`
      * Test/Branch: `data-loader-test-${CLEAN_REF}-${SHORT_SHA},data-loader-test-latest`
    - **Outputs** (via `$GITHUB_OUTPUT`): `version`, `short_sha`, `is_test`, `ecr_tags`.
@@ -305,7 +312,11 @@ classDiagram
 
 3. **[`aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh)**:
    - **Input Environment Variables**: `BINARY_NAME`, `VERSION`, `WORKING_DIR`.
-   - **Functionality**: Moves into the artifact directory, deletes temporary `.sha256` files, computes consolidated cryptographic SHA256 hashes of all `.tar.gz` archives into `checksums.txt`. Idempotently creates and pushes the annotated Git tag `${VERSION}` if it does not already exist on origin.
+   - **Functionality**: Moves into the artifact directory, deletes temporary `.sha256` files, and computes consolidated cryptographic SHA256 hashes of all `.tar.gz` distribution archives into `checksums.txt`.
+   - **Remote Tag Query & Idempotent Tagging**:
+     - Fetches remote origin tags using `git fetch --tags origin` to maintain synchronization with remote repository state.
+     - Queries remote tags prior to tagging via `git ls-remote --tags origin "refs/tags/${VERSION}"`.
+     - **Idempotency Guarantee**: If the tag already exists on origin, tag creation is gracefully skipped, avoiding remote rejection errors. If the tag does not exist, it creates the annotated Git tag (`git tag -a "${VERSION}" -m "Release ${VERSION}"`) and pushes it to origin, with fallback error logging to absorb concurrent race conditions.
 
 4. **[`format-ecr-tags.sh`](../../.github/scripts/format-ecr-tags.sh)**:
    - **Input Environment Variables**: `REGISTRY`, `ECR_REPOSITORY`, `RAW_TAGS`.
@@ -678,6 +689,35 @@ Verifying manifest for 615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon:
 |+-------------------------------------------------------------------------------------+|
 ```
 
+### 4.4. Release Tag Collision Resolution & Verification Record (Run 37138883828)
+
+During continuous delivery pipeline verification following the merge of PR #21 into `main` (commit `1f92995`), a release publication failure was encountered and resolved.
+
+* **Workflow Run**: [GitHub Actions Run 37138883828](https://github.com/ajponte/babylon_data_loader/actions/runs/37138883828)
+* **Trigger Event**: `push` on branch `main` (commit `1f92995`)
+* **Failed Job**: `Publish Go Binaries / Create GitHub Release` (Job ID: `111249279860`)
+
+#### Root Cause Analysis
+During execution of the `release` job in [`../../.github/workflows/reusable-publish-go.yml`](../../.github/workflows/reusable-publish-go.yml), the step `Aggregate Checksums & Ensure Tag` invoked [`../../.github/scripts/aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh) and failed with exit code 1:
+```
+==> Ensuring Git tag v0.1.0 exists...
+Creating tag v0.1.0...
+To https://github.com/ajponte/babylon_data_loader
+ ! [rejected]        v0.1.0 -> v0.1.0 (already exists)
+error: failed to push some refs to 'https://github.com/ajponte/babylon_data_loader'
+hint: Updates were rejected because the tag already exists in the remote.
+```
+
+Analysis revealed three interacting failure causes:
+1. **Shallow Runner Checkout**: The `release` job invoked `actions/checkout@v4` with default shallow clone settings (`fetch-depth: 1`), omitting remote tags from the local Git runner database.
+2. **Static Tag Re-Resolution on `main`**: In [`../../.github/scripts/resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh), commits merged to `main` without an exact tag match defaulted to `git describe --tags --abbrev=0` (`v0.1.0`). In the absence of automated patch incrementing, every subsequent merge to `main` evaluated to `v0.1.0`.
+3. **Local-Only Tag Check & Remote Push Rejection**: In [`../../.github/scripts/aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh), the script checked tag existence strictly against local Git state via `git rev-parse "${VERSION}"`. Because the shallow clone lacked the tag locally, it attempted to create and push `v0.1.0`, triggering a fatal remote Git rejection (`[rejected] v0.1.0 -> v0.1.0 (already exists)`).
+
+#### Applied Remediations
+1. **Full History Checkout in Release Workflow**: Updated [`../../.github/workflows/reusable-publish-go.yml`](../../.github/workflows/reusable-publish-go.yml) to configure `actions/checkout@v4` with `fetch-depth: 0`, guaranteeing complete tag and commit history for Git operations.
+2. **Automated SemVer Patch Resolution Precedence**: Updated [`../../.github/scripts/resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh) to implement automated SemVer patch incrementing (`v<MAJOR>.<MINOR>.<PATCH+1>`) when running on `main` without an exact tag on HEAD, advancing consecutive merges (e.g. `v0.1.0` -> `v0.1.1`).
+3. **Remote Tag Synchronization & Idempotency Guarantee**: Updated [`../../.github/scripts/aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh) to fetch remote tags (`git fetch --tags origin`) and explicitly query the remote origin using `git ls-remote --tags origin "refs/tags/${VERSION}"` before attempting tag creation. If the tag already exists on origin, tag creation is gracefully bypassed.
+
 ---
 
 ## 5. Architecture Decision Record (ADR)
@@ -745,6 +785,28 @@ Standardize the serverless container image on **Linux ARM64** (`linux/arm64`) us
 * **Price / Performance Efficiency**: AWS Lambda on ARM64 Graviton provides up to 34% better price-performance and 20% lower cost per millisecond compared to equivalent x86_64 execution.
 * **Sub-Second Cold Starts**: Compiling a stripped, static Go binary without CGO (`CGO_ENABLED=0`) on Amazon Linux 2023 minimal runtime yields a binary under 15MB, achieving sub-second Lambda cold starts.
 * **Native Development Parity**: Apple Silicon developer workstations run ARM64 natively, allowing zero-emulation local Docker testing of the exact binary architecture deployed to production.
+
+---
+
+### ADR-05: Release Tagging Strategy & Automated SemVer Patch Resolution
+
+#### Context & Problem Statement
+In continuous delivery on trunk (`main`), Go CLI releases require semantic version tags (`vX.Y.Z`) to compile binaries with embedded version metadata (`-ldflags`) and attach distribution archives to GitHub Releases. Previously, `resolve-metadata.sh` defaulted to the latest Git tag or `v0.1.0` without incrementing versions on new commits. Combined with shallow runner checkouts (`fetch-depth: 1`) in `reusable-publish-go.yml` and local-only tag verification in `aggregate-checksums.sh`, merges to `main` caused tag collisions and remote push rejections (as encountered in Run 37138883828, job 111249279860).
+
+#### Decision
+1. Enforce **Full Clone Depth (`fetch-depth: 0`)** in [`reusable-publish-go.yml`](../../.github/workflows/reusable-publish-go.yml) for the `release` job.
+2. Implement **Automated SemVer Patch Incrementing** in [`resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh) following a strict 4-tier precedence:
+   - Tier 1: Explicit `CUSTOM_VERSION` if provided.
+   - Tier 2: Exact Git tag match on HEAD (`git describe --tags --exact-match`).
+   - Tier 3: Automatic SemVer patch increment (`v<MAJOR>.<MINOR>.<PATCH+1>`, e.g. `v0.1.0` -> `v0.1.1`) when merging to `main` without an exact tag.
+   - Tier 4: Ephemeral test tag formatting (`${LATEST_TAG}-test.${SHORT_SHA}`) for feature branches and test runs.
+3. Enforce **Remote-Aware Idempotent Tag Verification** in [`aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh) via `git fetch --tags origin` and `git ls-remote --tags origin "refs/tags/${VERSION}"`, gracefully skipping tag creation when the tag already exists on origin.
+
+#### Consequences & Rationale
+* **Zero-Ceremony Continuous Delivery**: Merges to `main` automatically publish consecutive patch releases without requiring manual Git tagging prior to PR merging.
+* **Collision-Proof Execution**: The idempotency check ensures re-running workflows or concurrent executions will not fail with remote tag rejections.
+* **Accurate Git Introspection**: Full checkout depth (`fetch-depth: 0`) guarantees that all `git describe` and `git ls-remote` queries reflect the true repository history.
+* **Explicit Release Overrides Retained**: Minor and major version increments remain accessible at any time via manual Git tagging on HEAD or via the `custom_version` dispatch input.
 
 ---
 
