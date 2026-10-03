@@ -87,7 +87,7 @@ build-lambda: ## build static linux/arm64 binary for lambda
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o out/bootstrap ./cmd/lambda
 
 docker-build-lambda: ## build arm64 lambda container image
-	docker build -f Dockerfile.lambda -t babylon-data-loader-lambda:latest .
+	docker build --provenance=false -f Dockerfile.lambda -t babylon-data-loader-lambda:latest .
 
 test-lambda: ## run unit tests for lambda handler, secrets, and storage
 	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
