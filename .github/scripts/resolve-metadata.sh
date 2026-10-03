@@ -27,12 +27,12 @@ else
   fi
 fi
 
-# Format ECR tags list
+# Format ECR tags list for shared ajp/babylon repository
 CLEAN_REF=$(echo "${REF_NAME:-unknown}" | tr '/' '-' | tr '_' '-')
 if [ "${IS_TEST}" = "true" ]; then
-  ECR_TAGS="test-${CLEAN_REF}-${SHORT_SHA},test-latest"
+  ECR_TAGS="data-loader-test-${CLEAN_REF}-${SHORT_SHA},data-loader-test-latest"
 else
-  ECR_TAGS="latest,${VERSION},sha-${SHORT_SHA}"
+  ECR_TAGS="data-loader-latest,data-loader-${VERSION},data-loader-sha-${SHORT_SHA}"
 fi
 
 echo "=== Computed Metadata ==="

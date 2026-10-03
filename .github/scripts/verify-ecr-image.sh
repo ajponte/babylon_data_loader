@@ -4,7 +4,7 @@ set -euo pipefail
 REGISTRY="${REGISTRY:-}"
 ECR_REPOSITORY="${ECR_REPOSITORY:?ECR_REPOSITORY is required}"
 IMAGE_TAGS="${IMAGE_TAGS:?IMAGE_TAGS is required}"
-AWS_REGION="${AWS_REGION:-us-east-1}"
+AWS_REGION="${AWS_REGION:-us-west-2}"
 
 FIRST_TAG=$(echo "${IMAGE_TAGS}" | cut -d',' -f1 | xargs)
 FULL_TARGET="${REGISTRY:+${REGISTRY}/}${ECR_REPOSITORY}:${FIRST_TAG}"

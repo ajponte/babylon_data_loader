@@ -123,11 +123,11 @@ jobs:
       (github.event_name == 'push' || inputs.deploy_ecr == true)
     uses: ./.github/workflows/reusable-deploy-ecr.yml
     with:
-      ecr_repository: ${{ vars.ECR_REPOSITORY_NAME || 'babylon/data-loader' }}
+      ecr_repository: ${{ vars.ECR_REPOSITORY_NAME || 'ajp/babylon' }}
       image_tags: ${{ needs.resolve-metadata.outputs.ecr_tags }}
       dockerfile: "Dockerfile.lambda"
       platforms: "linux/arm64"
-      aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      aws_region: ${{ vars.AWS_REGION || 'us-west-2' }}
       role_to_assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
       role_session_name: "GitHubActions-DataLoader-CD"
     secrets:
