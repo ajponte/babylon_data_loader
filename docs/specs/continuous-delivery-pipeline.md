@@ -159,15 +159,17 @@ CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build \
 
 The reusable publisher workflow ([`../../.github/workflows/reusable-publish-go.yml`](../../.github/workflows/reusable-publish-go.yml)) is designed for invocation via `workflow_call`. It manages the distributed cross-compilation matrix, aggregates checksums, and publishes artifacts to GitHub Releases.
 
-#### Workflow Inputs & Secrets
-| Input Parameter | Type | Required | Default | Description |
+#### Workflow Inputs & Authentication
+| Parameter | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `version` | string | **Yes** | N/A | Semantic version tag for the release (e.g. `v1.1.0`) |
 | `binary_name` | string | No | `data-loader` | Base name for the compiled CLI executable |
 | `go_version` | string | No | `1.26` | Go toolchain version |
 | `draft` | boolean | No | `false` | Publishes GitHub Release in draft state |
 | `prerelease` | boolean | No | `false` | Marks GitHub Release as prerelease |
-| `GITHUB_TOKEN` *(Secret)* | string | No | `${{ github.token }}` | GitHub token with `contents: write` permission |
+
+> [!NOTE]
+> Authentication for release creation is handled automatically via GitHub Actions' built-in `github.token` context under the `release` job's `permissions: contents: write`. To adhere to GitHub Actions workflow constraints, no secret beginning with the reserved `GITHUB_` prefix is declared in `workflow_call.secrets`.
 
 #### Workflow Structure & Matrix Execution
 1. **`build-matrix` Job**:
