@@ -81,26 +81,11 @@ jobs:
 
       - name: Format Full Image Tags
         id: format-tags
-        run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          REPO="${{ inputs.ecr_repository }}"
-          RAW_TAGS="${{ inputs.image_tags }}"
-
-          FORMATTED_TAGS=""
-          IFS=',' read -ra TAG_ARRAY <<< "$RAW_TAGS"
-          for tag in "${TAG_ARRAY[@]}"; do
-            TRIMMED_TAG=$(echo "$tag" | xargs)
-            FULL_IMAGE="${REGISTRY}/${REPO}:${TRIMMED_TAG}"
-            if [ -z "$FORMATTED_TAGS" ]; then
-              FORMATTED_TAGS="${FULL_IMAGE}"
-            else
-              FORMATTED_TAGS="${FORMATTED_TAGS},${FULL_IMAGE}"
-            fi
-          done
-
-          echo "Pushed Image Tags:"
-          echo "${FORMATTED_TAGS}" | tr ',' '\n'
-          echo "tags=${FORMATTED_TAGS}" >> "$GITHUB_OUTPUT"
+        run: ./.github/scripts/format-ecr-tags.sh
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          RAW_TAGS: ${{ inputs.image_tags }}
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v6
@@ -114,13 +99,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Verify Image Digest in ECR
-        run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          FIRST_TAG=$(echo "${{ inputs.image_tags }}" | cut -d',' -f1 | xargs)
-          echo "Verifying manifest for ${REGISTRY}/${{ inputs.ecr_repository }}:${FIRST_TAG}..."
-          aws ecr describe-images \
-            --repository-name "${{ inputs.ecr_repository }}" \
-            --image-ids imageTag="${FIRST_TAG}" \
-            --region "${{ inputs.aws_region }}" \
-            --query 'imageDetails[0].{Digest:imageDigest,Tags:imageTags,PushedAt:imagePushedAt,Size:imageSizeInBytes}' \
-            --output table
+        run: ./.github/scripts/verify-ecr-image.sh
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          IMAGE_TAGS: ${{ inputs.image_tags }}
+          AWS_REGION: ${{ inputs.aws_region }}

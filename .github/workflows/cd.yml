@@ -83,44 +83,12 @@ jobs:
 
       - name: Compute Version & Tags
         id: meta
-        run: |
-          SHORT_SHA=$(git rev-parse --short=7 HEAD)
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-          # Determine test run status
-          IS_TEST="false"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.is_test_image }}" = "true" ]; then
-            IS_TEST="true"
-          elif [ "${{ github.ref_name }}" != "main" ]; then
-            IS_TEST="true"
-          fi
-          echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
-
-          # Resolve SemVer version
-          if [ -n "${{ inputs.custom_version }}" ]; then
-            VERSION="${{ inputs.custom_version }}"
-          else
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
-            VERSION="${LATEST_TAG}"
-            if [ "${IS_TEST}" = "true" ]; then
-              VERSION="${LATEST_TAG}-test.${SHORT_SHA}"
-            fi
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-          # Format ECR tags list
-          CLEAN_REF=$(echo "${{ github.ref_name }}" | tr '/' '-' | tr '_' '-')
-          if [ "${IS_TEST}" = "true" ]; then
-            ECR_TAGS="test-${CLEAN_REF}-${SHORT_SHA},test-latest"
-          else
-            ECR_TAGS="latest,${VERSION},sha-${SHORT_SHA}"
-          fi
-          echo "ecr_tags=${ECR_TAGS}" >> "$GITHUB_OUTPUT"
-
-          echo "=== Computed Metadata ==="
-          echo "Resolved Version: ${VERSION}"
-          echo "Resolved ECR Tags: ${ECR_TAGS}"
-          echo "Is Test Run: ${IS_TEST}"
+        run: ./.github/scripts/resolve-metadata.sh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          CUSTOM_VERSION: ${{ inputs.custom_version }}
+          IS_TEST_IMAGE: ${{ inputs.is_test_image }}
 
   # -------------------------------------------------------------------------
   # Job 3: Publish Standalone Go Binaries to GitHub Releases

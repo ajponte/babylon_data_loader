@@ -61,27 +61,15 @@ jobs:
           go-version: ${{ inputs.go_version }}
           cache: true
 
-      - name: Compile Static Executable
-        run: |
-          mkdir -p dist
-          OUTPUT_PATH="dist/${{ inputs.binary_name }}"
-          echo "Compiling for ${{ matrix.goos }}/${{ matrix.goarch }}..."
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
-            -trimpath \
-            -ldflags="-s -w -X main.version=${{ inputs.version }} -X main.commit=${{ github.sha }}" \
-            -o "${OUTPUT_PATH}" \
-            main.go
-          chmod +x "${OUTPUT_PATH}"
-
-      - name: Package Tarball & Compute Checksum
+      - name: Compile and Package Artifact
         id: package
-        run: |
-          ARCHIVE_NAME="babylon-${{ inputs.binary_name }}_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-          cd dist
-          tar -czvf "../${ARCHIVE_NAME}" "${{ inputs.binary_name }}"
-          cd ..
-          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
-          echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+        run: ./.github/scripts/build-and-package.sh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ inputs.binary_name }}
+          VERSION: ${{ inputs.version }}
+          COMMIT_SHA: ${{ github.sha }}
 
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
@@ -112,25 +100,12 @@ jobs:
           pattern: package-*
           merge-multiple: true
 
-      - name: Generate Consolidated Checksums
-        run: |
-          cd release-artifacts
-          rm -f *.sha256
-          sha256sum babylon-${{ inputs.binary_name }}_*.tar.gz > checksums.txt
-          echo "=== Consolidated SHA256 Checksums ==="
-          cat checksums.txt
-
-      - name: Ensure Git Tag Exists
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "Creating tag ${{ inputs.version }}..."
-            git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
-            git push origin "${{ inputs.version }}"
-          else
-            echo "Tag ${{ inputs.version }} already exists."
-          fi
+      - name: Aggregate Checksums & Ensure Tag
+        run: ./.github/scripts/aggregate-checksums.sh
+        env:
+          BINARY_NAME: ${{ inputs.binary_name }}
+          VERSION: ${{ inputs.version }}
+          WORKING_DIR: release-artifacts
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
