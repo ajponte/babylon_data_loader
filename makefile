@@ -33,6 +33,8 @@ GO_IMPORTS_FMT := $(shell go env GOPATH)/bin/goimports
 # use the `gofumpt` package for strict formatting.
 GO_FMT_STRICT := $(shell go env GOPATH)/bin/gofumpt
 
+WAILS ?= $(shell which wails 2>/dev/null || echo "$$(go env GOPATH)/bin/wails")
+
 GOLANGCI_LINT ?= golangci-lint
 
 
@@ -90,6 +92,56 @@ docker-build-lambda: ## build arm64 lambda container image
 test-lambda: ## run unit tests for lambda handler, secrets, and storage
 	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
 
+# ==============================================================================
+# Distribution & Multi-Platform Cross-Compilation
+# ==============================================================================
+
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
+COMMIT  ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo "dev")
+DIST_DIR := out/dist
+LDFLAGS  := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+
+.PHONY: clean-dist build-cross package-cross verify-checksums
+
+## Distribution
+clean-dist: ## cleans distribution and cross-compilation artifacts
+	rm -rf $(DIST_DIR)
+
+build-cross: clean-dist ## cross-compiles static binaries for all supported platforms
+	mkdir -p $(DIST_DIR)
+	@echo "$(CYAN)==> Cross-compiling for linux/amd64...$(RESET)"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-amd64 .
+	@echo "$(CYAN)==> Cross-compiling for linux/arm64...$(RESET)"
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-arm64 .
+	@echo "$(CYAN)==> Cross-compiling for darwin/amd64...$(RESET)"
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-darwin-amd64 .
+	@echo "$(CYAN)==> Cross-compiling for darwin/arm64...$(RESET)"
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-darwin-arm64 .
+	@echo "$(GREEN)Cross-compilation successful. Binaries written to $(DIST_DIR)/$(RESET)"
+
+package-cross: build-cross ## packages cross-compiled binaries into tar.gz and generates checksums.txt
+	@echo "$(CYAN)==> Packaging distribution tarballs...$(RESET)"
+	@for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do \
+		OS=$$(echo $$target | cut -d'-' -f1); \
+		ARCH=$$(echo $$target | cut -d'-' -f2); \
+		ARCHIVE_NAME="babylon-$(APP)_$(VERSION)_$${OS}_$${ARCH}.tar.gz"; \
+		cp $(DIST_DIR)/$(APP)-$$target $(DIST_DIR)/$(APP); \
+		chmod +x $(DIST_DIR)/$(APP); \
+		tar -czvf $(DIST_DIR)/$$ARCHIVE_NAME -C $(DIST_DIR) $(APP); \
+		rm -f $(DIST_DIR)/$(APP); \
+		echo "$(GREEN)Created $${ARCHIVE_NAME}$(RESET)"; \
+	done
+	@echo "$(CYAN)==> Generating checksums.txt (SHA256)...$(RESET)"
+	cd $(DIST_DIR) && shasum -a 256 babylon-$(APP)_$(VERSION)_*.tar.gz > checksums.txt
+	@echo "$(GREEN)=== Distribution Checksums ===$(RESET)"
+	@cat $(DIST_DIR)/checksums.txt
+
+verify-checksums: ## verifies integrity of packaged tarballs against checksums.txt
+	@echo "$(CYAN)==> Verifying checksums...$(RESET)"
+	cd $(DIST_DIR) && shasum -a 256 -c checksums.txt
+
+
+## Run
 run: run-ingest ## runs the go binary. use additional options if required.
 
 run-ingest: ## runs the go binary to ingest data.
@@ -109,10 +161,10 @@ run-generate-mongo: ## runs the go binary to generate synthetic data and persist
 
 ## Desktop
 run-desktop: ## runs the desktop application in development mode
-	cd desktop && /Users/aponte/go/bin/wails dev
+	cd desktop && $(WAILS) dev
 
 build-desktop: ## builds the desktop application
-	cd desktop && /Users/aponte/go/bin/wails build
+	cd desktop && $(WAILS) build
 
 run-ui: ## runs the frontend UI development server only (Vite)
 	cd desktop/frontend && [ -d node_modules ] || npm install
@@ -144,7 +196,7 @@ rollback: build
 
 
 
-.PHONY: all test-ci build vendor unit-test build-lambda docker-build-lambda test-lambda
+.PHONY: all test-ci build vendor unit-test build-lambda docker-build-lambda test-lambda clean-dist build-cross package-cross verify-checksums
 ## All
 all: ## runs setup, quality checks and builds
 	make check-quality

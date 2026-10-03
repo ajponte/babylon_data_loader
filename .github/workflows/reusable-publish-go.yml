@@ -1,0 +1,122 @@
+name: Reusable Go Binary Publisher
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Semantic version tag for this release (e.g. v1.1.0)"
+        type: string
+        required: true
+      binary_name:
+        description: "Name of the compiled binary"
+        type: string
+        required: false
+        default: "data-loader"
+      go_version:
+        description: "Go compiler version"
+        type: string
+        required: false
+        default: "1.26"
+      draft:
+        description: "Publish as draft release"
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: "Publish as prerelease"
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      GITHUB_TOKEN:
+        description: "GitHub token for creating releases"
+        required: false
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Parallel Matrix Cross-Compilation
+  # -------------------------------------------------------------------------
+  build-matrix:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: true
+
+      - name: Compile and Package Artifact
+        id: package
+        run: ./.github/scripts/build-and-package.sh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ inputs.binary_name }}
+          VERSION: ${{ inputs.version }}
+          COMMIT_SHA: ${{ github.sha }}
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ steps.package.outputs.archive_name }}
+            ${{ steps.package.outputs.archive_name }}.sha256
+          retention-days: 2
+
+  # -------------------------------------------------------------------------
+  # Aggregate Checksums & Create GitHub Release
+  # -------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [build-matrix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Aggregate Checksums & Ensure Tag
+        run: ./.github/scripts/aggregate-checksums.sh
+        env:
+          BINARY_NAME: ${{ inputs.binary_name }}
+          VERSION: ${{ inputs.version }}
+          WORKING_DIR: release-artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: "Babylon Data Loader ${{ inputs.version }}"
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            release-artifacts/*.tar.gz
+            release-artifacts/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN || github.token }}

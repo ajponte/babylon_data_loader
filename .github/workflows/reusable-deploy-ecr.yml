@@ -1,0 +1,107 @@
+name: Reusable Docker ECR Deployer
+
+on:
+  workflow_call:
+    inputs:
+      ecr_repository:
+        description: "Target Amazon ECR repository name (e.g. babylon/data-loader)"
+        type: string
+        required: true
+      image_tags:
+        description: "Comma-separated list of image tags to push (e.g. latest,v1.1.0,sha-abc1234)"
+        type: string
+        required: true
+      dockerfile:
+        description: "Path to the Dockerfile"
+        type: string
+        required: false
+        default: "Dockerfile.lambda"
+      platforms:
+        description: "Target container platform architectures (e.g. linux/arm64)"
+        type: string
+        required: false
+        default: "linux/arm64"
+      aws_region:
+        description: "Target AWS Region"
+        type: string
+        required: false
+        default: "us-east-1"
+      role_to_assume:
+        description: "AWS IAM Role ARN for OIDC authentication"
+        type: string
+        required: false
+        default: ""
+      role_session_name:
+        description: "STS Session Name for OIDC assumption"
+        type: string
+        required: false
+        default: "GitHubActions-ECRDeploy"
+    secrets:
+      aws_access_key_id:
+        description: "Fallback AWS Access Key ID (if OIDC is not used)"
+        required: false
+      aws_secret_access_key:
+        description: "Fallback AWS Secret Access Key (if OIDC is not used)"
+        required: false
+
+jobs:
+  build-and-push-ecr:
+    name: Build & Push ECR (${{ inputs.platforms }})
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write    # Required for AWS OIDC authentication
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (Multi-Arch Emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ inputs.platforms }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+
+      - name: Configure AWS Credentials (OIDC or Secret Fallback)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role_to_assume != '' && inputs.role_to_assume || null }}
+          role-session-name: ${{ inputs.role_session_name }}
+          aws-region: ${{ inputs.aws_region }}
+          audience: sts.amazonaws.com
+          aws-access-key-id: ${{ inputs.role_to_assume == '' && secrets.aws_access_key_id || null }}
+          aws-secret-access-key: ${{ inputs.role_to_assume == '' && secrets.aws_secret_access_key || null }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Format Full Image Tags
+        id: format-tags
+        run: ./.github/scripts/format-ecr-tags.sh
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          RAW_TAGS: ${{ inputs.image_tags }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.format-tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify Image Digest in ECR
+        run: ./.github/scripts/verify-ecr-image.sh
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          IMAGE_TAGS: ${{ inputs.image_tags }}
+          AWS_REGION: ${{ inputs.aws_region }}
