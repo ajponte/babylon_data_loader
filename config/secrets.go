@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -114,7 +115,7 @@ func parseSecretToURI(secretStr string) (string, error) {
 		return trimmed, nil
 	}
 
-	return "", fmt.Errorf("failed to parse secret as JSON or direct MongoDB URI: %s", secretStr)
+	return "", errors.New("failed to parse secret: payload is neither valid JSON nor a recognized MongoDB URI")
 }
 
 func buildURIFromCredentials(creds *MongoCredentials) (string, error) {
@@ -141,8 +142,10 @@ func buildURIFromCredentials(creds *MongoCredentials) (string, error) {
 	}
 
 	if creds.Username != "" && creds.Password != "" {
+		escapedUser := url.QueryEscape(creds.Username)
+		escapedPass := url.QueryEscape(creds.Password)
 		return fmt.Sprintf("mongodb://%s:%s@%s/%s?authSource=%s",
-			creds.Username, creds.Password, hostPort, database, authSource), nil
+			escapedUser, escapedPass, hostPort, database, authSource), nil
 	}
 
 	return fmt.Sprintf("mongodb://%s/%s", hostPort, database), nil

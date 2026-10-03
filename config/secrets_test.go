@@ -3,7 +3,9 @@ package config_test
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -317,18 +319,22 @@ func TestGetMongoURI_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid json and invalid uri", func(t *testing.T) {
+	t.Run("invalid json and invalid uri does not leak secret in error", func(t *testing.T) {
 		config.ResetMongoURICache()
 		_ = os.Unsetenv("MONGO_URI")
 
+		sensitiveSecret := "sensitive-mongodb-credential-123456"
 		mockClient := &mockSecretsClient{
 			output: &secretsmanager.GetSecretValueOutput{
-				SecretString: aws.String("not-a-json-and-not-a-mongo-uri"),
+				SecretString: aws.String(sensitiveSecret),
 			},
 		}
 		_, err := config.GetMongoURI(context.Background(), mockClient, "secret-id")
 		if err == nil {
 			t.Fatal("expected error for invalid secret string, got nil")
+		}
+		if strings.Contains(err.Error(), sensitiveSecret) {
+			t.Errorf("error message leaks plaintext secret payload: %v", err)
 		}
 	})
 
@@ -346,4 +352,55 @@ func TestGetMongoURI_Errors(t *testing.T) {
 			t.Fatal("expected error for incomplete JSON, got nil")
 		}
 	})
+}
+
+func TestGetMongoURI_SpecialCharactersEscaped(t *testing.T) {
+	config.ResetMongoURICache()
+	_ = os.Unsetenv("MONGO_URI")
+
+	rawUser := "user@babylon:finance"
+	rawPass := "p@ss:w0rd#123!/?&="
+	jsonPayload := `{
+		"engine": "mongodb",
+		"host": "cluster0.abcde.mongodb.net",
+		"port": "27017",
+		"username": "` + rawUser + `",
+		"password": "` + rawPass + `",
+		"database": "datalake",
+		"auth_source": "admin"
+	}`
+
+	mockClient := &mockSecretsClient{
+		output: &secretsmanager.GetSecretValueOutput{
+			SecretString: aws.String(jsonPayload),
+		},
+	}
+
+	uri, err := config.GetMongoURI(context.Background(), mockClient, "secret-id")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedUser := url.QueryEscape(rawUser)
+	expectedPass := url.QueryEscape(rawPass)
+	expectedURI := "mongodb://" + expectedUser + ":" + expectedPass + "@cluster0.abcde.mongodb.net:27017/datalake?authSource=admin"
+	if uri != expectedURI {
+		t.Errorf("got %q, want %q", uri, expectedURI)
+	}
+
+	// Verify standard URL parsing round-trip
+	parsed, parseErr := url.Parse(uri)
+	if parseErr != nil {
+		t.Fatalf("failed to parse generated URI: %v", parseErr)
+	}
+	if parsed.User == nil {
+		t.Fatal("expected UserInfo in parsed URI")
+	}
+	if parsed.User.Username() != rawUser {
+		t.Errorf("got parsed username %q, want %q", parsed.User.Username(), rawUser)
+	}
+	pass, set := parsed.User.Password()
+	if !set || pass != rawPass {
+		t.Errorf("got parsed password %q, want %q", pass, rawPass)
+	}
 }

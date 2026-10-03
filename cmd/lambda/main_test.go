@@ -310,6 +310,95 @@ func TestHandleS3Event_Success(t *testing.T) {
 	if !mockStore.deleteCalled {
 		t.Error("expected delete to be called")
 	}
+
+	// Verify ephemeral directory was cleaned up
+	invDir := filepath.Dir(capturedCfg.UnprocessedDir)
+	if _, statErr := os.Stat(invDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected ephemeral directory %s to be cleaned up, but it still exists", invDir)
+	}
+}
+
+func TestHandleS3Event_PreservesNestedDirectoryKey(t *testing.T) {
+	config.ResetMongoURICache()
+	_ = os.Unsetenv("MONGO_URI")
+
+	mockStore := &mockStorageService{}
+	mockSM := &mockSecretsClient{
+		output: &secretsmanager.GetSecretValueOutput{
+			SecretString: aws.String(`{"mongo_uri": "mongodb://localhost:27017"}`),
+		},
+	}
+
+	var capturedCfg *config.Config
+	runner := func(ctx context.Context, cfg *config.Config) error {
+		capturedCfg = cfg
+		return nil
+	}
+
+	tmpDir := t.TempDir()
+	handler := NewHandler(mockStore, mockSM, "secret", tmpDir, runner, discardLogger())
+	event := makeS3Event("my-bucket", "unprocessed/2026/01/monthly_report.csv")
+
+	err := handler.HandleS3Event(context.Background(), event)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedDestKey := "processed/2026/01/monthly_report.csv"
+	if mockStore.copyDestKey != expectedDestKey {
+		t.Errorf("got copy destination %q, want %q", mockStore.copyDestKey, expectedDestKey)
+	}
+
+	invDir := filepath.Dir(capturedCfg.UnprocessedDir)
+	if _, statErr := os.Stat(invDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected ephemeral directory %s to be cleaned up, but it still exists", invDir)
+	}
+}
+
+func TestHandleS3Event_WarmInvocationIsolation(t *testing.T) {
+	config.ResetMongoURICache()
+	_ = os.Unsetenv("MONGO_URI")
+
+	mockStore := &mockStorageService{}
+	mockSM := &mockSecretsClient{
+		output: &secretsmanager.GetSecretValueOutput{
+			SecretString: aws.String(`{"mongo_uri": "mongodb://localhost:27017"}`),
+		},
+	}
+
+	var observedDirs []string
+	runner := func(ctx context.Context, cfg *config.Config) error {
+		observedDirs = append(observedDirs, cfg.UnprocessedDir)
+		return nil
+	}
+
+	tmpDir := t.TempDir()
+	handler := NewHandler(mockStore, mockSM, "secret", tmpDir, runner, discardLogger())
+
+	// Invocation 1
+	event1 := makeS3Event("my-bucket", "unprocessed/first.csv")
+	if err := handler.HandleS3Event(context.Background(), event1); err != nil {
+		t.Fatalf("first invocation failed: %v", err)
+	}
+
+	// Invocation 2
+	event2 := makeS3Event("my-bucket", "unprocessed/second.csv")
+	if err := handler.HandleS3Event(context.Background(), event2); err != nil {
+		t.Fatalf("second invocation failed: %v", err)
+	}
+
+	if len(observedDirs) != 2 {
+		t.Fatalf("expected 2 observed directories, got %d", len(observedDirs))
+	}
+	if observedDirs[0] == observedDirs[1] {
+		t.Errorf("expected distinct ephemeral directories across warm invocations, both were %s", observedDirs[0])
+	}
+	for _, dir := range observedDirs {
+		parent := filepath.Dir(dir)
+		if _, statErr := os.Stat(parent); !os.IsNotExist(statErr) {
+			t.Errorf("expected invocation dir %s to be removed, but it exists", parent)
+		}
+	}
 }
 
 type mockLambdaMongoClient struct{}

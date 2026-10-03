@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,7 +88,12 @@ func (s *S3Storage) Copy(ctx context.Context, srcBucket, srcKey, destBucket, des
 		return errors.New("source and destination bucket/key must not be empty")
 	}
 
-	copySource := srcBucket + "/" + strings.TrimPrefix(srcKey, "/")
+	cleanKey := strings.TrimPrefix(srcKey, "/")
+	parts := strings.Split(cleanKey, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	copySource := srcBucket + "/" + strings.Join(parts, "/")
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(destBucket),
 		Key:        aws.String(destKey),

@@ -146,6 +146,28 @@ func TestS3Storage_Copy_Success(t *testing.T) {
 	}
 }
 
+func TestS3Storage_Copy_UrlEncodedSourceKey(t *testing.T) {
+	mockClient := &mockS3Client{
+		copyObjectFunc: func(ctx context.Context, params *s3.CopyObjectInput, optFns ...func(*s3.Options)) (*s3.CopyObjectOutput, error) {
+			return &s3.CopyObjectOutput{}, nil
+		},
+	}
+
+	s3Storage := storage.NewS3Storage(mockClient)
+	err := s3Storage.Copy(context.Background(), "src-bucket", "unprocessed/bank report 2026.csv", "dest-bucket", "processed/bank report 2026.csv")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mockClient.capturedCopyInput == nil {
+		t.Fatal("expected CopyObjectInput to be captured")
+	}
+	expectedSource := "src-bucket/unprocessed/bank%20report%202026.csv"
+	if aws.ToString(mockClient.capturedCopyInput.CopySource) != expectedSource {
+		t.Errorf("copy source got %s, want %s", aws.ToString(mockClient.capturedCopyInput.CopySource), expectedSource)
+	}
+}
+
 func TestS3Storage_Copy_ClientError(t *testing.T) {
 	mockClient := &mockS3Client{
 		copyObjectFunc: func(ctx context.Context, params *s3.CopyObjectInput, optFns ...func(*s3.Options)) (*s3.CopyObjectOutput, error) {

@@ -149,32 +149,34 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 		return nil
 	}
 
-	unprocessedDir := filepath.Join(h.tmpDir, "unprocessed")
-	processedDir := filepath.Join(h.tmpDir, "processed")
-
-	if err := os.MkdirAll(unprocessedDir, dirPerms); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", unprocessedDir, err)
+	invDir, tmpErr := os.MkdirTemp(h.tmpDir, "ingest-*")
+	if tmpErr != nil {
+		return fmt.Errorf("failed to create temp directory: %w", tmpErr)
 	}
-	if err := os.MkdirAll(processedDir, dirPerms); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", processedDir, err)
+	defer func() {
+		_ = os.RemoveAll(invDir)
+	}()
+
+	unprocessedDir := filepath.Join(invDir, "unprocessed")
+	processedDir := filepath.Join(invDir, "processed")
+
+	if dirErr := os.MkdirAll(unprocessedDir, dirPerms); dirErr != nil {
+		return fmt.Errorf("failed to create directory %s: %w", unprocessedDir, dirErr)
+	}
+	if dirErr := os.MkdirAll(processedDir, dirPerms); dirErr != nil {
+		return fmt.Errorf("failed to create directory %s: %w", processedDir, dirErr)
 	}
 
 	localUnprocessed := filepath.Join(unprocessedDir, filename)
-	localProcessed := filepath.Join(processedDir, filename)
-
-	defer func(unprocessed, processed string) {
-		_ = os.Remove(unprocessed)
-		_ = os.Remove(processed)
-	}(localUnprocessed, localProcessed)
 
 	h.logger.InfoContext(ctx, "Downloading S3 file", "bucket", bucket, "key", key, "dest", localUnprocessed)
-	if err := h.s3Storage.Download(ctx, bucket, key, localUnprocessed); err != nil {
-		return fmt.Errorf("failed to download s3://%s/%s: %w", bucket, key, err)
+	if dlErr := h.s3Storage.Download(ctx, bucket, key, localUnprocessed); dlErr != nil {
+		return fmt.Errorf("failed to download s3://%s/%s: %w", bucket, key, dlErr)
 	}
 
-	mongoURI, err := config.GetMongoURI(ctx, h.secretsClient, h.secretID)
-	if err != nil {
-		return fmt.Errorf("failed to resolve MongoDB URI: %w", err)
+	mongoURI, secretErr := config.GetMongoURI(ctx, h.secretsClient, h.secretID)
+	if secretErr != nil {
+		return fmt.Errorf("failed to resolve MongoDB URI: %w", secretErr)
 	}
 
 	cfg := &config.Config{
@@ -190,7 +192,8 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 		return fmt.Errorf("ingestion failed for %s: %w", filename, ingestErr)
 	}
 
-	destKey := "processed/" + filename
+	relPath := strings.TrimPrefix(key, "unprocessed/")
+	destKey := "processed/" + relPath
 	h.logger.InfoContext(ctx, "Copying S3 file to processed/", "src", key, "dest", destKey)
 	if copyErr := h.s3Storage.Copy(ctx, bucket, key, bucket, destKey); copyErr != nil {
 		return fmt.Errorf("failed to copy object to s3://%s/%s: %w", bucket, destKey, copyErr)
@@ -200,9 +203,6 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 	if deleteErr := h.s3Storage.Delete(ctx, bucket, key); deleteErr != nil {
 		return fmt.Errorf("failed to delete original object from s3://%s/%s: %w", bucket, key, deleteErr)
 	}
-
-	_ = os.Remove(localUnprocessed)
-	_ = os.Remove(localProcessed)
 
 	h.logger.InfoContext(ctx, "Successfully processed and archived file", "bucket", bucket, "key", key)
 	return nil

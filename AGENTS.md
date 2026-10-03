@@ -35,7 +35,7 @@ The repository includes a comprehensive `makefile` for build, test, and containe
 - `make lint`: Runs `golangci-lint` against all packages.
 - `make vet`: Runs standard `go vet ./...`.
 - `make unit-test`: Executes unit test suite across all packages with coverage reporting.
-- `make test-lambda`: Runs tests for Lambda handler (`cmd/lambda`) and configuration (`config`) with Go race detection (`-race`).
+- `make test-lambda`: Runs tests for Lambda handler (`cmd/lambda`), configuration (`config`), and S3 storage (`storage`) with Go race detection (`-race`).
 
 ### Build & Container Packaging
 - `make build`: Compiles the core CLI executable into `out/data-loader`.

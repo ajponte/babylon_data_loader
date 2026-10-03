@@ -87,8 +87,8 @@ build-lambda: ## build static linux/arm64 binary for lambda
 docker-build-lambda: ## build arm64 lambda container image
 	docker build -f Dockerfile.lambda -t babylon-data-loader-lambda:latest .
 
-test-lambda: ## run unit tests for lambda handler and secrets
-	go test -v -race ./cmd/lambda/... ./config/...
+test-lambda: ## run unit tests for lambda handler, secrets, and storage
+	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
 
 run: run-ingest ## runs the go binary. use additional options if required.
 
