@@ -40,6 +40,24 @@ make run-ingest
 
 ---
 
+## Deployment & Runtime Architectures
+
+The `babylon_data_loader` supports dual distribution channels and runtime architectures from a unified Go codebase:
+
+### 1. Standalone Cross-Platform CLI Executable
+- **Target Platforms**: macOS (`darwin/arm64`, `darwin/amd64`) and Linux (`linux/arm64`, `linux/amd64`).
+- **Use Cases**: Local development, manual batch transaction ingestion, automated CI routines, and backend embedding within the Wails desktop GUI application.
+- **Packaging & Delivery**: Statically compiled (`CGO_ENABLED=0`) with `-trimpath` and packaged into `.tar.gz` distribution archives alongside cryptographic SHA256 verification manifests (`checksums.txt`) published to [GitHub Releases](https://github.com/ajponte/babylon_data_loader/releases).
+
+### 2. Serverless Container on AWS Lambda (ARM64 Graviton)
+- **Target Platform**: AWS Lambda container runtime on 64-bit ARM architecture (`linux/arm64`) utilizing the minimal `public.ecr.aws/lambda/provided:al2023` base image.
+- **Use Cases**: Automated, event-driven data ingestion triggered by Amazon S3 `ObjectCreated` notifications on the landing datalake bucket.
+- **Packaging & Delivery**: Multi-stage Docker builds (`Dockerfile.lambda`) pushed to the shared Amazon ECR repository (`ajp/babylon`) tagged with SemVer, `data-loader-latest`, and immutable commit tags (`data-loader-sha-<short_sha>`).
+- **Continuous Deployment**: Merges to `main` automatically update the production function `babylon-data-loader` via [`.github/scripts/deploy-lambda.sh`](.github/scripts/deploy-lambda.sh) and await successful rollout verification.
+- **Lifecycle Hygiene**: Ephemeral branch test images (`data-loader-test-*`) are automatically pruned after 14 days by an ECR lifecycle policy, bounding cloud storage overhead.
+
+---
+
 ## Documentation & Agent Harness
 
 To support both human developers and AI coding agents, this repository maintains a structured documentation harness in the [docs/](docs) directory:

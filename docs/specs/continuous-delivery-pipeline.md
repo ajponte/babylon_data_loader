@@ -50,25 +50,26 @@ flowchart TD
         Matrix --> Consolidate --> Release
     end
 
-    subgraph ReusableECR["Reusable ECR Deployer (.github/workflows/reusable-deploy-ecr.yml)"]
+    subgraph ReusableECR ["Reusable ECR Deployer (.github/workflows/reusable-deploy-ecr.yml)"]
         direction TB
         OIDC["Assume AWS IAM Role<br/>(OIDC Web Identity JWT)"]
         FormatTags["Format ECR Image Tags<br/>(format-ecr-tags.sh)"]
         Buildx["QEMU + Docker Buildx<br/>(Dockerfile.lambda -> linux/arm64)"]
         PushECR["Push Image Layers to ECR"]
         VerifyECR["Verify Remote Manifest<br/>(verify-ecr-image.sh)"]
+        DeployLambda["Deploy Image to AWS Lambda<br/>(deploy-lambda.sh)"]
 
-        OIDC --> FormatTags --> Buildx --> PushECR --> VerifyECR
+        OIDC --> FormatTags --> Buildx --> PushECR --> VerifyECR --> DeployLambda
     end
 
-    subgraph AWS["Amazon Web Services Cloud Infrastructure (us-west-2)"]
+    subgraph AWS ["Amazon Web Services Cloud Infrastructure (us-west-2)"]
         STS["AWS Security Token Service (STS)"]
         ECRRepo["Amazon ECR: ajp/babylon<br/>(Shared Repository)"]
         Lifecycle["Automated Lifecycle Policy<br/>• Expire data-loader-test-* after 14 days<br/>• Retain last 30 releases"]
         Lambda["AWS Lambda Graviton Function<br/>(Event-Driven S3 Ingestion)"]
     end
 
-    subgraph Artifacts["Public & Developer Distribution"]
+    subgraph Artifacts ["Public & Developer Distribution"]
         GHRelease["GitHub Releases<br/>(Standalone CLI Archives)"]
         DesktopApp["Wails Desktop Application & Local CLI"]
     end
@@ -82,7 +83,8 @@ flowchart TD
     OIDC -.->|Federated Trust| STS
     PushECR --> ECRRepo
     ECRRepo -.-> Lifecycle
-    ECRRepo -.-> Lambda
+    DeployLambda -->|"Update Function Code<br/>(main push)"| Lambda
+    ECRRepo -.->|Pulls Image Layer| Lambda
 
     Release --> GHRelease
     GHRelease -.-> DesktopApp
@@ -100,6 +102,7 @@ babylon_data_loader/
 │   ├── scripts/
 │   │   ├── aggregate-checksums.sh     # Consolidates SHA256 checksums & pushes Git tag
 │   │   ├── build-and-package.sh       # Compiles static binary & creates distribution tarball
+│   │   ├── deploy-lambda.sh           # Updates AWS Lambda container image & awaits rollout
 │   │   ├── format-ecr-tags.sh         # Formats comma-delimited ECR repository tags
 │   │   ├── resolve-metadata.sh        # Computes SemVer version, Git commit, & tag list
 │   │   └── verify-ecr-image.sh        # Queries AWS ECR image manifest via AWS CLI
@@ -223,6 +226,9 @@ The reusable container deployer workflow ([`../../.github/workflows/reusable-dep
 | `aws_region` | string | No | `us-west-2` | AWS region hosting the shared ECR repository |
 | `role_to_assume` | string | No | `""` | AWS IAM Role ARN for OIDC authentication (`arn:aws:iam::615471835001:role/github-actions-babylon-deploy`) |
 | `role_session_name`| string | No | `GitHubActions-ECRDeploy`| STS session name |
+| `update_lambda` | boolean | No | `false` | Whether to update an AWS Lambda function with the newly pushed image |
+| `lambda_function_name` | string | No | `""` | Name of the target AWS Lambda function (e.g. `babylon-data-loader`) |
+| `lambda_deploy_tag` | string | No | `""` | Specific image tag to deploy to Lambda (e.g. `data-loader-sha-<short_sha>`) |
 | `aws_access_key_id` *(Secret)* | string | No | N/A | Static AWS Access Key ID (fallback when OIDC is unset) |
 | `aws_secret_access_key` *(Secret)* | string | No | N/A | Static AWS Secret Key (fallback when OIDC is unset) |
 
@@ -233,6 +239,7 @@ The reusable container deployer workflow ([`../../.github/workflows/reusable-dep
 4. **Tag Expansion**: Runs [`.github/scripts/format-ecr-tags.sh`](../../.github/scripts/format-ecr-tags.sh) to expand short tags into fully-qualified registry target paths (`<registry>/<repository>:<tag>`).
 5. **Build & Push**: Invokes `docker/build-push-action@v6` targeting `Dockerfile.lambda` with GitHub Actions cache backend (`cache-from: type=gha`, `cache-to: type=gha,mode=max`).
 6. **Manifest Verification**: Executes [`.github/scripts/verify-ecr-image.sh`](../../.github/scripts/verify-ecr-image.sh) to query AWS ECR and verify that the newly pushed image manifest is present in the remote repository.
+7. **Deploy Image to AWS Lambda**: When `update_lambda` is `true` and `lambda_function_name` is non-empty, executes [`.github/scripts/deploy-lambda.sh`](../../.github/scripts/deploy-lambda.sh) to trigger `aws lambda update-function-code`, await active function rollout via `aws lambda wait function-updated`, and verify post-deployment `State: Active` and `LastUpdateStatus: Successful`.
 
 ---
 
@@ -287,9 +294,19 @@ classDiagram
         +execute()
         +outputs: aws_cli_table
     }
+    class DeployLambda {
+        +REGISTRY: string
+        +ECR_REPOSITORY: string
+        +LAMBDA_FUNCTION_NAME: string
+        +DEPLOY_TAG: string
+        +AWS_REGION: string
+        +execute()
+        +outputs: post_deployment_status
+    }
 
     ResolveMetadata --> FormatECRTags : passes tags
     BuildAndPackage --> AggregateChecksums : feeds tarballs
+    VerifyECRImage --> DeployLambda : triggers on ECR verification
 ```
 
 1. **[`resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh)**:
@@ -326,6 +343,14 @@ classDiagram
 5. **[`verify-ecr-image.sh`](../../.github/scripts/verify-ecr-image.sh)**:
    - **Input Environment Variables**: `REGISTRY`, `ECR_REPOSITORY`, `IMAGE_TAGS`, `AWS_REGION`.
    - **Functionality**: Takes the primary image tag and executes `aws ecr describe-images` using JMESPath querying to display the remote Digest, Tags, PushedAt, and SizeInBytes in formatted tabular output, validating deployment success.
+
+6. **[`deploy-lambda.sh`](../../.github/scripts/deploy-lambda.sh)**:
+   - **Input Environment Variables**: `REGISTRY`, `ECR_REPOSITORY`, `LAMBDA_FUNCTION_NAME`, `DEPLOY_TAG`, `AWS_REGION` (default: `us-west-2`).
+   - **Operational Lifecycle**:
+     1. **Pre-Validation**: Verifies target Lambda function existence via `aws lambda get-function-configuration` and prints current `State`, `LastUpdateStatus`, and `CodeSha256`.
+     2. **Code Update**: Executes `aws lambda update-function-code` specifying the fully qualified container URI (`${REGISTRY}/${ECR_REPOSITORY}:${DEPLOY_TAG}`) and captures the returned `RevisionId`.
+     3. **Rollout Await**: Invokes `aws lambda wait function-updated` to block until the asynchronous Lambda code deployment transitions out of the `InProgress` state.
+     4. **Post-Deployment Health Assertion**: Queries `aws lambda get-function-configuration` to verify that `LastUpdateStatus == "Successful"` and `State == "Active"`. Emits an error and exits with code 1 if either condition fails.
 
 ---
 
@@ -364,7 +389,7 @@ sequenceDiagram
     participant QG as Job 1: Pre-Flight Gate
     participant Meta as Job 2: Resolve Metadata
     participant GoPub as Job 3: Publish Go Binaries
-    participant ECRDep as Job 4: Deploy ECR Image
+    participant ECRDep as Job 4: Deploy ECR & Lambda
 
     Dev->>CD: Push to main OR workflow_dispatch
     CD->>QG: Run linters, go vet, and unit tests
@@ -383,7 +408,7 @@ sequenceDiagram
     and
         alt deploy_ecr == true
             CD->>ECRDep: Call reusable-deploy-ecr.yml
-            ECRDep-->>CD: Container Built & Pushed to ECR
+            ECRDep-->>CD: Container Built, Pushed to ECR, and Lambda Updated (on main)
         else deploy_ecr == false
             CD-->>ECRDep: Skipped
         end
@@ -406,21 +431,40 @@ sequenceDiagram
   > Test runs (`is_test == true`) automatically bypass binary publishing to prevent polluting public GitHub Releases with ephemeral build artifacts.
 * **`deploy-ecr-image`**: Runs concurrently with `publish-go-binaries`:
   ```yaml
-  if: |
-    always() &&
-    needs.preflight-check.result == 'success' &&
-    needs.resolve-metadata.result == 'success' &&
-    (github.event_name == 'push' || inputs.deploy_ecr == true)
+  deploy-ecr-image:
+    name: Deploy to Amazon ECR & AWS Lambda
+    needs: [preflight-check, resolve-metadata]
+    if: |
+      always() &&
+      needs.preflight-check.result == 'success' &&
+      needs.resolve-metadata.result == 'success' &&
+      (github.event_name == 'push' || inputs.deploy_ecr == true)
+    uses: ./.github/workflows/reusable-deploy-ecr.yml
+    with:
+      ecr_repository: ${{ vars.ECR_REPOSITORY_NAME || 'ajp/babylon' }}
+      image_tags: ${{ needs.resolve-metadata.outputs.ecr_tags }}
+      dockerfile: "Dockerfile.lambda"
+      platforms: "linux/arm64"
+      aws_region: ${{ vars.AWS_REGION || 'us-west-2' }}
+      role_to_assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      role_session_name: "GitHubActions-DataLoader-CD"
+      update_lambda: ${{ needs.resolve-metadata.outputs.is_test == 'false' }}
+      lambda_function_name: ${{ vars.LAMBDA_FUNCTION_NAME || 'babylon-data-loader' }}
+      lambda_deploy_tag: "data-loader-sha-${{ needs.resolve-metadata.outputs.short_sha }}"
+    secrets:
+      aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   ```
-  Points to repository variable `vars.ECR_REPOSITORY_NAME` (default: `ajp/babylon`), AWS region `vars.AWS_REGION` (default: `us-west-2`), and IAM OIDC deployment role `vars.AWS_DEPLOY_ROLE_ARN` (`arn:aws:iam::615471835001:role/github-actions-babylon-deploy`).
+  On trunk pushes to `main` (`is_test == 'false'`), `update_lambda` evaluates to `true`, triggering automated deployment of the immutable commit SHA tag `data-loader-sha-${SHORT_SHA}` to the target AWS Lambda function `babylon-data-loader` via [`.github/scripts/deploy-lambda.sh`](../../.github/scripts/deploy-lambda.sh). On test runs (`is_test == 'true'`), `update_lambda` evaluates to `false`, isolating production Lambda from branch experiments.
 
-#### Repository Variables for OIDC Deployment
-The pipeline consumes three GitHub Actions repository variables (`vars`):
+#### Repository Variables for Continuous Deployment
+The pipeline consumes four GitHub Actions repository variables (`vars`):
 | Variable Name | Required | Configured Value / Default | Description |
 | :--- | :--- | :--- | :--- |
 | `AWS_DEPLOY_ROLE_ARN` | **Yes** | `arn:aws:iam::615471835001:role/github-actions-babylon-deploy` | AWS IAM Role ARN assumed via GitHub Actions OIDC web identity token |
-| `AWS_REGION` | No | `us-west-2` | Target AWS region hosting the shared Amazon ECR repository |
+| `AWS_REGION` | No | `us-west-2` | Target AWS region hosting the shared Amazon ECR repository and Lambda function |
 | `ECR_REPOSITORY_NAME` | No | `ajp/babylon` | Shared Amazon ECR repository name across Babylon services |
+| `LAMBDA_FUNCTION_NAME` | No | `babylon-data-loader` | Target AWS Lambda function name updated automatically upon merge to `main` |
 
 ---
 
@@ -503,6 +547,33 @@ To enforce passwordless authentication:
    - `ecr:CompleteLayerUpload`
    - `ecr:PutImage`
 
+#### 4. AWS IAM Lambda Continuous Deployment Policy ([`github-actions-lambda-deploy-policy.json`](../../../tools/iam/github-actions-lambda-deploy-policy.json))
+The deployment role `arn:aws:iam::615471835001:role/github-actions-babylon-deploy` includes an inline policy `babylon-lambda-deploy-operations` granting least-privilege permissions required to inspect and update Lambda container code:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaDeploymentOperations",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:PublishVersion",
+        "lambda:ListVersionsByFunction"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:babylon-data-loader*"
+      ]
+    }
+  ]
+}
+```
+> [!IMPORTANT]
+> **Wildcard Pattern Matching Correction**: The Resource ARN enforces the corrected pattern `arn:aws:lambda:*:*:function:babylon-data-loader*` without an intervening hyphen between `loader` and `*`. The prior pattern `babylon-data-loader-*` required a literal hyphen, causing policy evaluation to fail with an `implicitDeny` / `AccessDeniedException` when targeting the standardized production function `babylon-data-loader` (which retired the `-dev` suffix).
+
 ---
 
 ## 3. Developer Operational Runbook
@@ -555,9 +626,35 @@ gh run watch $(gh run list --workflow=cd.yml --limit 1 --json databaseId -q '.[0
 
 ---
 
-### 3.2. Inspecting ECR Containers & Manifests via AWS CLI
+### 3.2. IAM Deployment Policy Verification & ECR Inspection via AWS CLI
 
-#### 1. List Available Images and Tags
+#### 1. IAM Deployment Policy Validation via AWS Policy Simulator
+To verify that the deployment role permissions properly authorize container updates on the production function `babylon-data-loader` under the corrected wildcard `arn:aws:lambda:*:*:function:babylon-data-loader*`:
+```bash
+aws iam simulate-custom-policy \
+  --policy-input-list "$(cat ../../../tools/iam/github-actions-lambda-deploy-policy.json)" \
+  --action-names lambda:UpdateFunctionCode lambda:GetFunctionConfiguration \
+  --resource-arns arn:aws:lambda:us-west-2:615471835001:function:babylon-data-loader
+```
+Expected output confirms both actions evaluate to `allowed`:
+```json
+{
+  "EvaluationResults": [
+    {
+      "EvalActionName": "lambda:UpdateFunctionCode",
+      "EvalResourceName": "arn:aws:lambda:us-west-2:615471835001:function:babylon-data-loader",
+      "EvalDecision": "allowed"
+    },
+    {
+      "EvalActionName": "lambda:GetFunctionConfiguration",
+      "EvalResourceName": "arn:aws:lambda:us-west-2:615471835001:function:babylon-data-loader",
+      "EvalDecision": "allowed"
+    }
+  ]
+}
+```
+
+#### 2. List Available Images and Tags in ECR
 ```bash
 aws ecr describe-images \
   --repository-name ajp/babylon \
@@ -566,7 +663,7 @@ aws ecr describe-images \
   --output table
 ```
 
-#### 2. Query Specific Image Manifest
+#### 3. Query Specific Image Manifest
 ```bash
 aws ecr batch-get-image \
   --repository-name ajp/babylon \
@@ -576,8 +673,8 @@ aws ecr batch-get-image \
   --output text
 ```
 
-#### 3. Simulate Lifecycle Policy Execution
-To verify which images will expire under the 14-day rule without deleting them:
+#### 4. Simulate Lifecycle Policy Execution
+To preview images qualifying for the 14-day test image expiration rule without deleting them:
 ```bash
 # Start lifecycle preview simulation
 aws ecr start-lifecycle-policy-preview \
@@ -593,25 +690,46 @@ aws ecr get-lifecycle-policy-preview \
 
 ---
 
-### 3.3. Pointing Dev Lambda Functions to Branch Test Images
+### 3.3. Production Deployment Architecture & Branch Test Isolation Procedures
 
-To validate an event-driven S3 ingestion flow against a test image:
+#### 1. Automated Production Continuous Deployment (`main`)
+All pull requests merged into `main` trigger automated continuous deployment end-to-end:
+1. Docker Buildx compiles the Linux ARM64 container binary from `Dockerfile.lambda`.
+2. The image is tagged with SemVer (`data-loader-vX.Y.Z`), rolling tag `data-loader-latest`, and immutable commit SHA `data-loader-sha-<short_sha>`, and pushed to Amazon ECR (`ajp/babylon`).
+3. [`.github/scripts/deploy-lambda.sh`](../../.github/scripts/deploy-lambda.sh) executes `aws lambda update-function-code` specifying the immutable commit SHA image URI, waits for rollout completion (`aws lambda wait function-updated`), and verifies `LastUpdateStatus == "Successful"` and `State == "Active"`.
+
+To verify live production Lambda function status after an automated deployment:
+```bash
+aws lambda get-function-configuration \
+  --function-name babylon-data-loader \
+  --region us-west-2 \
+  --query '{FunctionName:FunctionName,State:State,Status:LastUpdateStatus,CodeSha256:CodeSha256,LastModified:LastModified}' \
+  --output table
+```
+
+#### 2. Branch Test Isolation Procedures
+To test container modifications from a feature branch without impacting the live production Lambda function:
+1. **Automated CI Isolation**: In [`.github/workflows/cd.yml`](../../.github/workflows/cd.yml), `update_lambda` evaluates to `${{ needs.resolve-metadata.outputs.is_test == 'false' }}`. When dispatched from a feature branch or with `is_test_image=true`, `update_lambda` evaluates to `false`, guaranteeing that production Lambda is never updated by test builds.
+2. **Tag Namespace Isolation**: Container images are pushed under `data-loader-test-<branch>-<short_sha>` and `data-loader-test-latest`, strictly isolated from production tags.
+3. **Automated 14-Day Expiration**: Amazon ECR lifecycle rule #2 automatically purges `data-loader-test-*` containers after 14 days, preventing orphaned storage costs.
+4. **Isolated Test Execution (Optional)**: If developers require live integration testing in AWS against an isolated test Lambda function (e.g., `babylon-data-loader-test`), they may manually invoke code updates targeting that dedicated test function:
 ```bash
 ACCOUNT_ID="615471835001"
-TEST_TAG="data-loader-test-latest"
+TEST_TAG="data-loader-test-my-feature-82061c0"
 
+# Target strictly isolated test function without touching production
 aws lambda update-function-code \
-  --function-name babylon-data-loader-dev \
+  --function-name babylon-data-loader-test \
   --image-uri "${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon:${TEST_TAG}" \
   --region us-west-2
 
-# Verify function configuration state
+# Await test function update completion
 aws lambda wait function-updated \
-  --function-name babylon-data-loader-dev \
+  --function-name babylon-data-loader-test \
   --region us-west-2
-
-echo "Lambda babylon-data-loader-dev updated successfully to ${TEST_TAG}"
 ```
+> [!NOTE]
+> The deprecated `babylon-data-loader-dev` moniker has been retired. The production serverless function is standardized as `babylon-data-loader`. Branch isolation is enforced at the workflow level via conditional deployment gates and ECR tag scoping.
 
 ---
 
@@ -830,11 +948,15 @@ For further details regarding the broader Babylon ecosystem and related subsyste
 * **Modular Shell Scripts**:
   - Metadata Resolver: [`../../.github/scripts/resolve-metadata.sh`](../../.github/scripts/resolve-metadata.sh)
   - Builder & Packager: [`../../.github/scripts/build-and-package.sh`](../../.github/scripts/build-and-package.sh)
+  - Lambda Deployer: [`../../.github/scripts/deploy-lambda.sh`](../../.github/scripts/deploy-lambda.sh)
   - Checksum Aggregator: [`../../.github/scripts/aggregate-checksums.sh`](../../.github/scripts/aggregate-checksums.sh)
   - ECR Tag Formatter: [`../../.github/scripts/format-ecr-tags.sh`](../../.github/scripts/format-ecr-tags.sh)
   - ECR Manifest Verifier: [`../../.github/scripts/verify-ecr-image.sh`](../../.github/scripts/verify-ecr-image.sh)
 * **Makefile Packaging Rules**: [`../../makefile`](../../makefile)
 * **Lambda Container Packaging**: [`../../Dockerfile.lambda`](../../Dockerfile.lambda)
+* **IAM & Security Policies**:
+  - Lambda Deployment Policy: [`../../../tools/iam/github-actions-lambda-deploy-policy.json`](../../../tools/iam/github-actions-lambda-deploy-policy.json)
+  - Continuous Deployment Investigation Report: [`../../../agent-docs/DATA-LOADER-LAMBDA-CD-REPORT.md`](../../../agent-docs/DATA-LOADER-LAMBDA-CD-REPORT.md)
 * **Terraform Infrastructure Modules**:
   - Shared ECR & IAM OIDC Module: [`../../../babylon_deploy/terraform/modules/ecr/`](../../../babylon_deploy/terraform/modules/ecr/README.md)
     - ECR Data Source: [`../../../babylon_deploy/terraform/modules/ecr/main.tf`](../../../babylon_deploy/terraform/modules/ecr/main.tf)
