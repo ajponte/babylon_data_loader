@@ -33,6 +33,8 @@ GO_IMPORTS_FMT := $(shell go env GOPATH)/bin/goimports
 # use the `gofumpt` package for strict formatting.
 GO_FMT_STRICT := $(shell go env GOPATH)/bin/gofumpt
 
+WAILS ?= $(shell which wails 2>/dev/null || echo "$$(go env GOPATH)/bin/wails")
+
 GOLANGCI_LINT ?= golangci-lint
 
 
@@ -159,10 +161,10 @@ run-generate-mongo: ## runs the go binary to generate synthetic data and persist
 
 ## Desktop
 run-desktop: ## runs the desktop application in development mode
-	cd desktop && /Users/aponte/go/bin/wails dev
+	cd desktop && $(WAILS) dev
 
 build-desktop: ## builds the desktop application
-	cd desktop && /Users/aponte/go/bin/wails build
+	cd desktop && $(WAILS) build
 
 run-ui: ## runs the frontend UI development server only (Vite)
 	cd desktop/frontend && [ -d node_modules ] || npm install

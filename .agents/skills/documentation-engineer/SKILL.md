@@ -29,7 +29,7 @@ When organizing and writing document content, strictly follow the **Inverted Pyr
 
 ## 4. Guidelines for LLM Agent Compatibility
 - **Relative Link Integrity**: All file links inside documentation must use relative paths relative to the current file (e.g., `[Development Guide](development.md)` or `[Go Module](../go.mod)`). 
-- **No Personal Directories**: Absolutely do not include references to personal local directories (such as `file:///Users/aponte/...` or absolute local paths).
+- **No Personal Directories**: Absolutely do not include references to personal local directories (such as personal home directories or absolute local paths). Always use relative paths from the repository root or current file location.
 - **Clickable Symbols**: Reference source code files, classes, structs, and key methods with markdown links to their source paths.
 - **Context Harnesses**: Maintain clean indexes (like `docs/README.md` or `CLAUDE.md`) that allow agents to traverse the project's documentation easily.
 - **Ubiquitous Language**: Standardize term names throughout all documentation (e.g., `Transaction`, `DataSource`, `IngestionJob`, `AccountID`).

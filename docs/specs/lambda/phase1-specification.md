@@ -1,7 +1,7 @@
 # Phase 1 Specification: AWS Lambda Serverless Adapter & ARM64 Packaging
 
 > [!NOTE]
-> **Tech Lead Note**: This specification establishes the Phase 1 cloud-native serverless architecture implemented on the `feature/lambda-adapter` branch for [babylon_data_loader](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader). It enables event-driven S3 ingestion executed on **AWS Lambda** (ARM64 Graviton) backed by AWS Secrets Manager credential caching and multi-stage container packaging, while maintaining 100% backward compatibility with the existing CLI and local desktop workflows.
+> **Tech Lead Note**: This specification establishes the Phase 1 cloud-native serverless architecture implemented on the `feature/lambda-adapter` branch for [babylon_data_loader](file://../../..). It enables event-driven S3 ingestion executed on **AWS Lambda** (ARM64 Graviton) backed by AWS Secrets Manager credential caching and multi-stage container packaging, while maintaining 100% backward compatibility with the existing CLI and local desktop workflows.
 
 ---
 
@@ -71,7 +71,7 @@ sequenceDiagram
 
 ## 3. Component Specifications & Interfaces
 
-### 3.1. Go Dependencies ([`go.mod`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/go.mod))
+### 3.1. Go Dependencies ([`go.mod`](../../../go.mod))
 Added AWS SDK v2 and Lambda libraries, fully vendored in `vendor/`:
 ```go
 require (
@@ -86,7 +86,7 @@ require (
 
 ---
 
-### 3.2. Secrets Manager Credential Helper ([`config/secrets.go`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/config/secrets.go))
+### 3.2. Secrets Manager Credential Helper ([`config/secrets.go`](../../../config/secrets.go))
 Provides structured JSON parsing, URI reconstruction, environment fallback, and thread-safe in-memory caching.
 
 #### Interface & Data Structures:
@@ -125,7 +125,7 @@ type SecretsClient interface {
 
 ---
 
-### 3.3. S3 Storage Helper & Client Abstraction ([`storage/s3.go`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/storage/s3.go))
+### 3.3. S3 Storage Helper & Client Abstraction ([`storage/s3.go`](../../../storage/s3.go))
 Decouples AWS S3 API calls from the Lambda handler to facilitate testing:
 
 ```go
@@ -151,7 +151,7 @@ func (s *S3Storage) Delete(ctx context.Context, bucket, key string) error
 
 ---
 
-### 3.4. Lambda Handler Entrypoint ([`cmd/lambda/main.go`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/cmd/lambda/main.go))
+### 3.4. Lambda Handler Entrypoint ([`cmd/lambda/main.go`](../../../cmd/lambda/main.go))
 The main execution entrypoint for AWS Lambda:
 
 #### Handler Structure & Dependency Injection:
@@ -179,7 +179,7 @@ func (h *Handler) HandleS3Event(ctx context.Context, event events.S3Event) error
 
 ## 4. Container Packaging & Build Automation
 
-### 4.1. Multi-Stage ARM64 Dockerfile ([`Dockerfile.lambda`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/Dockerfile.lambda))
+### 4.1. Multi-Stage ARM64 Dockerfile ([`Dockerfile.lambda`](../../../Dockerfile.lambda))
 Optimized for AWS Lambda Graviton2 provided runtime:
 
 ```dockerfile
@@ -206,8 +206,8 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 CMD ["/var/runtime/bootstrap"]
 ```
 
-### 4.2. Build Context Optimization ([`.dockerignore`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/.dockerignore))
-To prevent sending local binaries, test coverage profiles, and frontend `node_modules` to the Docker daemon, [`.dockerignore`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/.dockerignore) excludes:
+### 4.2. Build Context Optimization ([`.dockerignore`](../../../.dockerignore))
+To prevent sending local binaries, test coverage profiles, and frontend `node_modules` to the Docker daemon, [`.dockerignore`](../../../.dockerignore) excludes:
 - `.git/` and `.github/`
 - `out/` and `bin/`
 - `*.out`, `*.test`, `coverage.*`, `report.json`
@@ -216,7 +216,7 @@ To prevent sending local binaries, test coverage profiles, and frontend `node_mo
 
 **Context Reduction**: Reduced context transfer from **235.52 MB** to **1.16 MB** (~99.5% reduction), cutting build times to ~11s.
 
-### 4.3. Makefile Targets ([`makefile`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/makefile))
+### 4.3. Makefile Targets ([`makefile`](../../../makefile))
 ```makefile
 ## Lambda Targets
 build-lambda: ## build static linux/arm64 binary for lambda
@@ -238,9 +238,9 @@ All components are covered by unit tests using mock AWS SDK clients and race det
 
 | Test Suite | File | Coverage Areas | Result |
 | :--- | :--- | :--- | :---: |
-| **Secrets Manager Tests** | [`config/secrets_test.go`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/config/secrets_test.go) | `MONGO_URI` env fallback, JSON secret parsing, component URI building, plaintext URI, binary secrets, cache hits, 20-goroutine concurrent access, error handling | **PASS (100%)** |
-| **S3 Storage Tests** | [`storage/s3_test.go`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/storage/s3_test.go) | Download success/error/validation, Copy success/error/validation, Delete success/error/validation | **PASS (100%)** |
-| **Lambda Handler Tests** | [`cmd/lambda/main_test.go`](file:///Users/aponte/personal_workspace/babylon-2.0/babylon_data_loader/cmd/lambda/main_test.go) | Non-CSV filtering, prefix filtering, URL-decoded key unescaping, download errors, secret resolution errors, ingest errors, copy errors, delete errors, success path, MongoDB connect errors | **PASS (100%)** |
+| **Secrets Manager Tests** | [`config/secrets_test.go`](../../../config/secrets_test.go) | `MONGO_URI` env fallback, JSON secret parsing, component URI building, plaintext URI, binary secrets, cache hits, 20-goroutine concurrent access, error handling | **PASS (100%)** |
+| **S3 Storage Tests** | [`storage/s3_test.go`](../../../storage/s3_test.go) | Download success/error/validation, Copy success/error/validation, Delete success/error/validation | **PASS (100%)** |
+| **Lambda Handler Tests** | [`cmd/lambda/main_test.go`](../../../cmd/lambda/main_test.go) | Non-CSV filtering, prefix filtering, URL-decoded key unescaping, download errors, secret resolution errors, ingest errors, copy errors, delete errors, success path, MongoDB connect errors | **PASS (100%)** |
 | **Code Quality Gate** | `make check-quality` | `golangci-lint` (0 issues), `go vet`, `gofumpt`, `goimports` | **PASS (100%)** |
 | **Full Regression Suite** | `make all` | Quality gate + all package unit tests with coverage + CLI binary build | **PASS (100%)** |
 
