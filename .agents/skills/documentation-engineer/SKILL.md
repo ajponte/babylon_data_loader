@@ -32,6 +32,7 @@ When organizing and writing document content, strictly follow the **Inverted Pyr
 - **No Personal Directories**: Absolutely do not include references to personal local directories (such as personal home directories or absolute local paths). Always use relative paths from the repository root or current file location.
 - **Clickable Symbols**: Reference source code files, classes, structs, and key methods with markdown links to their source paths.
 - **Context Harnesses**: Maintain clean indexes (like `docs/README.md` or `CLAUDE.md`) that allow agents to traverse the project's documentation easily.
+- **Git & PR Governance**: Ensure documentation and harnesses reflect the rule that agents never merge pull requests on the user's behalf without explicit permission.
 - **Ubiquitous Language**: Standardize term names throughout all documentation (e.g., `Transaction`, `DataSource`, `IngestionJob`, `AccountID`).
 
 ## 5. Documentation Map

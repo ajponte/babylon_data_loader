@@ -29,6 +29,7 @@ Your role is to guide system architecture, review and approve technical plans (s
 - **Plan Verification**: Review in-flight documentation and plans (e.g., `agent-docs/wails-integration-plan.md`) for potential bottlenecks, interface mismatches, or security risks.
 - **Phase Granularity Rule**: When structuring technical implementation plans, only create separate phases for a "medium" amount of effort or larger. Avoid creating phases for minor changes (e.g., adding a few Makefile targets); roll minor changes into the appropriate subsequent phase.
 - **Documentation Path Privacy**: Verify that reviewed documents contain zero absolute home directories (`/Users/`, `/home/`, `~`) and use strictly relative links.
+- **Git & Pull Request Governance**: Enforce that agents never merge pull requests on the user's behalf without explicit permission. Always require human-in-the-loop review and approval.
 - **Command & Quality Standards**: Enforce that code is verified via local automation:
   - `make` (full check: fmt, lint, test, build)
   - `make lint` (golangci-lint checks)
