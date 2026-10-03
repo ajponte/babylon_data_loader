@@ -37,6 +37,21 @@ on:
         type: string
         required: false
         default: "GitHubActions-ECRDeploy"
+      update_lambda:
+        description: "Whether to update an AWS Lambda function with the newly pushed image"
+        type: boolean
+        required: false
+        default: false
+      lambda_function_name:
+        description: "Name of the target AWS Lambda function (e.g. babylon-data-loader)"
+        type: string
+        required: false
+        default: ""
+      lambda_deploy_tag:
+        description: "Specific image tag to deploy to Lambda (e.g. data-loader-sha-abc1234)"
+        type: string
+        required: false
+        default: ""
     secrets:
       aws_access_key_id:
         description: "Fallback AWS Access Key ID (if OIDC is not used)"
@@ -105,4 +120,14 @@ jobs:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ inputs.ecr_repository }}
           IMAGE_TAGS: ${{ inputs.image_tags }}
+          AWS_REGION: ${{ inputs.aws_region }}
+
+      - name: Deploy Image to AWS Lambda
+        if: ${{ inputs.update_lambda == true && inputs.lambda_function_name != '' }}
+        run: ./.github/scripts/deploy-lambda.sh
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          LAMBDA_FUNCTION_NAME: ${{ inputs.lambda_function_name }}
+          DEPLOY_TAG: ${{ inputs.lambda_deploy_tag }}
           AWS_REGION: ${{ inputs.aws_region }}
