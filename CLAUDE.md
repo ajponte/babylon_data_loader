@@ -17,6 +17,8 @@ This project contains a comprehensive agent documentation harness under the [doc
 
 ### Build and Clean
 - **Build application**: `make build` (creates executable in `out/data-loader`)
+- **Build Lambda binary**: `make build-lambda` (compiles static Linux/ARM64 binary to `out/bootstrap`)
+- **Build Lambda container**: `make docker-build-lambda` (builds multi-stage ARM64 Docker container image)
 - **Clean build artifacts**: `make clean`
 - **Tidy Go modules**: `make tidy`
 - **Vendoring dependencies**: `make vendor`
@@ -29,11 +31,35 @@ This project contains a comprehensive agent documentation harness under the [doc
 ### Test and Quality
 - **All Quality Checks (Lint, Format, Vet)**: `make check-quality`
 - **Run unit tests**: `make unit-test`
+- **Run Lambda tests**: `make test-lambda` (runs race-detected unit tests for Lambda handler, config, and storage)
 - **Run tests with JSON output (CI)**: `make test-ci`
 - **Show test coverage in HTML**: `make coverage`
 - **Format code**: `make fmt` (runs `goimports` and `gofumpt`)
 - **Lint code**: `make lint` (runs `golangci-lint`)
 - **Vet code**: `make vet` (runs `go vet`)
+
+---
+
+## Continuous Delivery & Deployment
+
+The delivery pipeline is automated via GitHub Actions ([`.github/workflows/cd.yml`](.github/workflows/cd.yml)):
+
+- **Automated Production Deployment (`main`)**:
+  - Merging or pushing to `main` executes pre-flight checks, SemVer resolution, cross-compiled CLI binary publishing to GitHub Releases, and Linux ARM64 container image compilation.
+  - The container image is pushed to Amazon ECR (`ajp/babylon`) tagged with SemVer, `data-loader-latest`, and immutable commit SHA `data-loader-sha-<short_sha>`.
+  - [`.github/scripts/deploy-lambda.sh`](.github/scripts/deploy-lambda.sh) automatically updates the production AWS Lambda function (`babylon-data-loader`) with the commit SHA image and awaits confirmation that the function state is `Active` and update status is `Successful`.
+- **Branch Test Execution (`workflow_dispatch`)**:
+  - Developers can trigger container builds from any feature branch using GitHub CLI:
+    ```bash
+    gh workflow run cd.yml \
+      --ref feature/my-feature-branch \
+      -f deploy_binaries=false \
+      -f deploy_ecr=true \
+      -f is_test_image=true
+    ```
+  - Pushes test images tagged `data-loader-test-<branch>-<short_sha>` and `data-loader-test-latest` to Amazon ECR.
+  - Automatically bypasses GitHub Releases and suppresses Lambda deployment (`update_lambda` evaluates to `false`), isolating production Lambda from branch experiments.
+  - Ephemeral test images are governed by an automated 14-day Amazon ECR lifecycle expiration policy.
 
 ---
 

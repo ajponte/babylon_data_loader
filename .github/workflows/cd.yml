@@ -111,10 +111,10 @@ jobs:
       prerelease: false
 
   # -------------------------------------------------------------------------
-  # Job 4: Build & Deploy Lambda Docker Image to Amazon ECR
+  # Job 4: Build & Deploy Lambda Docker Image to Amazon ECR & AWS Lambda
   # -------------------------------------------------------------------------
   deploy-ecr-image:
-    name: Deploy to Amazon ECR
+    name: Deploy to Amazon ECR & AWS Lambda
     needs: [preflight-check, resolve-metadata]
     if: |
       always() &&
@@ -130,6 +130,9 @@ jobs:
       aws_region: ${{ vars.AWS_REGION || 'us-west-2' }}
       role_to_assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
       role_session_name: "GitHubActions-DataLoader-CD"
+      update_lambda: ${{ needs.resolve-metadata.outputs.is_test == 'false' }}
+      lambda_function_name: ${{ vars.LAMBDA_FUNCTION_NAME || 'babylon-data-loader' }}
+      lambda_deploy_tag: "data-loader-sha-${{ needs.resolve-metadata.outputs.short_sha }}"
     secrets:
       aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
       aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
