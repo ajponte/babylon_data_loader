@@ -4,8 +4,9 @@ package secretsmanager
 
 import (
 	"context"
-	"github.com/aws/smithy-go/middleware"
 	"time"
+
+	"github.com/aws/smithy-go/middleware"
 )
 
 // Deletes a secret and all of its versions. You can specify a recovery window

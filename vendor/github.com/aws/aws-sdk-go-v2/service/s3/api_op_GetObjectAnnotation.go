@@ -4,13 +4,14 @@ package s3
 
 import (
 	"context"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"io"
+	"time"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	internalChecksum "github.com/aws/aws-sdk-go-v2/service/internal/checksum"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
-	"io"
-	"time"
 )
 
 // Retrieves an annotation from an Amazon S3 object. To use this operation, you

@@ -4,12 +4,13 @@ package s3
 
 import (
 	"context"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"io"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	internalChecksum "github.com/aws/aws-sdk-go-v2/service/internal/checksum"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
-	"io"
 )
 
 // Attaches an annotation to an Amazon S3 object. An annotation is a named payload

@@ -4,14 +4,15 @@ package s3
 
 import (
 	"context"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"io"
+	"time"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	internalChecksum "github.com/aws/aws-sdk-go-v2/service/internal/checksum"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
-	"io"
-	"time"
 )
 
 // End of support notice: As of October 1, 2025, Amazon S3 has discontinued

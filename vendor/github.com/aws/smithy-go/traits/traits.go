@@ -8,37 +8,49 @@ import smithy "github.com/aws/smithy-go"
 type Sensitive struct{}
 
 // TraitID identifies the trait.
-func (*Sensitive) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.api", Name: "sensitive"} }
+func (*Sensitive) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.api", Name: "sensitive"}
+}
 
 // EventHeader represents smithy.api#eventHeader.
 type EventHeader struct{}
 
 // TraitID identifies the trait.
-func (*EventHeader) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.api", Name: "eventHeader"} }
+func (*EventHeader) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.api", Name: "eventHeader"}
+}
 
 // EventPayload represents smithy.api#eventPayload.
 type EventPayload struct{}
 
 // TraitID identifies the trait.
-func (*EventPayload) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.api", Name: "eventPayload"} }
+func (*EventPayload) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.api", Name: "eventPayload"}
+}
 
 // Streaming represents smithy.api#streaming.
 type Streaming struct{}
 
 // TraitID identifies the trait.
-func (*Streaming) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.api", Name: "streaming"} }
+func (*Streaming) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.api", Name: "streaming"}
+}
 
 // HostLabel represents smithy.api#hostLabel.
 type HostLabel struct{}
 
 // TraitID identifies the trait.
-func (*HostLabel) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.api", Name: "hostLabel"} }
+func (*HostLabel) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.api", Name: "hostLabel"}
+}
 
 // ContextParam represents smithy.rules#contextParam.
 type ContextParam struct{}
 
 // TraitID identifies the trait.
-func (*ContextParam) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.rules", Name: "contextParam"} }
+func (*ContextParam) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.rules", Name: "contextParam"}
+}
 
 // AWSQueryError represents aws.protocols#awsQueryError.
 type AWSQueryError struct {
@@ -47,7 +59,9 @@ type AWSQueryError struct {
 }
 
 // TraitID identifies the trait.
-func (*AWSQueryError) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "aws.protocols", Name: "awsQueryError"} }
+func (*AWSQueryError) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "aws.protocols", Name: "awsQueryError"}
+}
 
 // EC2QueryName represents aws.protocols#ec2QueryName.
 type EC2QueryName struct {
@@ -55,13 +69,17 @@ type EC2QueryName struct {
 }
 
 // TraitID identifies the trait.
-func (*EC2QueryName) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "aws.protocols", Name: "ec2QueryName"} }
+func (*EC2QueryName) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "aws.protocols", Name: "ec2QueryName"}
+}
 
 // AWSQueryCompatible represents aws.protocols#awsQueryCompatible.
 type AWSQueryCompatible struct{}
 
 // TraitID identifies the trait.
-func (*AWSQueryCompatible) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "aws.protocols", Name: "awsQueryCompatible"} }
+func (*AWSQueryCompatible) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "aws.protocols", Name: "awsQueryCompatible"}
+}
 
 // UnitShape is a synthetic trait applied to input/output shapes that were
 // backfilled from Unit. It indicates the shape has no defined members and
@@ -69,4 +87,6 @@ func (*AWSQueryCompatible) TraitID() smithy.ShapeID { return smithy.ShapeID{Name
 type UnitShape struct{}
 
 // TraitID identifies the trait.
-func (*UnitShape) TraitID() smithy.ShapeID { return smithy.ShapeID{Namespace: "smithy.go", Name: "unitShape"} }
+func (*UnitShape) TraitID() smithy.ShapeID {
+	return smithy.ShapeID{Namespace: "smithy.go", Name: "unitShape"}
+}

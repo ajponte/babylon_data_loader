@@ -3,8 +3,9 @@
 package types
 
 import (
-	smithydocument "github.com/aws/smithy-go/document"
 	"time"
+
+	smithydocument "github.com/aws/smithy-go/document"
 )
 
 // The error Secrets Manager encountered while retrieving an individual secret as

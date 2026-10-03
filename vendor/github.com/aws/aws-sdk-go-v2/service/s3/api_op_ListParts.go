@@ -5,11 +5,12 @@ package s3
 import (
 	"context"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"time"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
-	"time"
 )
 
 // Lists the parts that have been uploaded for a specific multipart upload.

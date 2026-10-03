@@ -4,9 +4,10 @@ package sts
 
 import (
 	"context"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"github.com/aws/smithy-go/middleware"
-	"time"
 )
 
 // Returns a signed JSON Web Token (JWT) that represents the calling Amazon Web

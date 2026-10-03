@@ -4,11 +4,12 @@ package s3
 
 import (
 	"context"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"io"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"
-	"io"
 )
 
 // This operation is not supported for directory buckets.

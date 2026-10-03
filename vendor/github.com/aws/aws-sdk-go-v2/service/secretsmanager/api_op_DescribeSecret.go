@@ -4,9 +4,10 @@ package secretsmanager
 
 import (
 	"context"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/smithy-go/middleware"
-	"time"
 )
 
 // Retrieves the details of a secret. It does not include the encrypted secret

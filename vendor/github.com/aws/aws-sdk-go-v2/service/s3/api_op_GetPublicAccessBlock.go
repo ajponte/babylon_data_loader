@@ -4,7 +4,8 @@ package s3
 
 import (
 	"context"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	s3cust "github.com/aws/aws-sdk-go-v2/service/s3/internal/customizations"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/middleware"

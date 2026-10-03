@@ -5,6 +5,7 @@ package signin
 import (
 	"context"
 	"fmt"
+
 	"github.com/aws/smithy-go/middleware"
 	"github.com/aws/smithy-go/ptr"
 )

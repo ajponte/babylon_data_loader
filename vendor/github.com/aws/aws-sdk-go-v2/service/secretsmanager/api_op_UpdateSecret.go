@@ -5,6 +5,7 @@ package secretsmanager
 import (
 	"context"
 	"fmt"
+
 	"github.com/aws/smithy-go/middleware"
 )
 

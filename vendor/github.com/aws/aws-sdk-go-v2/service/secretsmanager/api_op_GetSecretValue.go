@@ -4,8 +4,9 @@ package secretsmanager
 
 import (
 	"context"
-	"github.com/aws/smithy-go/middleware"
 	"time"
+
+	"github.com/aws/smithy-go/middleware"
 )
 
 // Retrieves the contents of the encrypted fields SecretString or SecretBinary
