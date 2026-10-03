@@ -251,9 +251,11 @@ All components are covered by unit tests using mock AWS SDK clients and race det
 This specification provides the foundation for **Phase 2 (Terraform deployment in `babylon_deploy`)**. The Terraform module (`modules/data-loader`) will consume the following contracts:
 
 ### 6.1. Container & Runtime Specifications
-- **ECR Repository**: `babylon/data-loader`
-- **Architectures**: `["arm64"]`
-- **Image URI**: `${aws_ecr_repository.data_loader.repository_url}:latest`
+- **ECR Repository**: `ajp/babylon` (Shared registry: `615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon`)
+- **AWS Region**: `us-west-2`
+- **Architectures**: `["arm64"]` (AWS Graviton)
+- **Tagging Convention**: `data-loader-latest` (production rolling), `data-loader-vX.Y.Z` (SemVer release), `data-loader-sha-<short_sha>` (commit immutable)
+- **Image URI**: `615471835001.dkr.ecr.us-west-2.amazonaws.com/ajp/babylon:data-loader-latest`
 - **Package Type**: `Image`
 - **Memory Size**: `512` MB
 - **Timeout**: `300` seconds (5 minutes)
