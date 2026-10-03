@@ -71,3 +71,15 @@ The repository includes a comprehensive `makefile` for build, test, and containe
 - **Financial Precision**: Do not use floating-point types (`float32`, `float64`) for financial currency amounts.
 - **Modularity & DDD**: Keep clear separation between data lake repositories, storage adapters, parsing engines, and invocation entry points.
 - **Pre-commit Quality**: Always verify changes by running `make check-quality` and `make unit-test`.
+
+---
+
+## Git & Pull Request Governance
+
+> [!IMPORTANT]
+> **PULL REQUEST MERGE POLICY**:
+> Agents must **NEVER** merge pull requests (`gh pr merge`, GitHub API merges, or direct merges into `main`) on the user's behalf without explicit, unambiguous permission from the user.
+
+- **Human-in-the-Loop Review**: After opening a PR and verifying that automated CI checks pass, report the PR URL, summary of changes, and verification records to the user.
+- **Await Instruction**: Stop execution and allow the user to review and merge the pull request manually, or wait for explicit instructions to merge.
+

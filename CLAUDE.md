@@ -61,3 +61,11 @@ This project contains a comprehensive agent documentation harness under the [doc
 - **Function Comments**: Write clear comments on exported package functions and structs.
 - **Inline Comments**: Use inline comments sparsely and only when describing complex business logic or edge cases.
 - **Testing**: Always run `make unit-test` after making changes to verify correctness.
+
+---
+
+## Git & Pull Request Safety Constraints
+
+- **No Unauthorized PR Merges**: Never merge pull requests (`gh pr merge` or direct merges into `main`) on the user's behalf without explicit permission.
+- **Review Handoff**: When a PR is created and checks pass, provide the pull request link to the user and wait for human review and merge instructions.
+
