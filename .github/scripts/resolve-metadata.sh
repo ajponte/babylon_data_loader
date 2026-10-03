@@ -20,10 +20,34 @@ fi
 if [ -n "${CUSTOM_VERSION}" ]; then
   VERSION="${CUSTOM_VERSION}"
 else
-  LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
-  VERSION="${LATEST_TAG}"
-  if [ "${IS_TEST}" = "true" ]; then
-    VERSION="${LATEST_TAG}-test.${SHORT_SHA}"
+  # Check if HEAD is directly tagged
+  EXACT_TAG=$(git describe --tags --exact-match 2>/dev/null || true)
+  if [ -n "${EXACT_TAG}" ]; then
+    VERSION="${EXACT_TAG}"
+    if [ "${IS_TEST}" = "true" ]; then
+      VERSION="${EXACT_TAG}-test.${SHORT_SHA}"
+    fi
+  else
+    LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+    if [ -z "${LATEST_TAG}" ]; then
+      VERSION="v0.1.0"
+      if [ "${IS_TEST}" = "true" ]; then
+        VERSION="v0.1.0-test.${SHORT_SHA}"
+      fi
+    elif [ "${IS_TEST}" = "true" ]; then
+      VERSION="${LATEST_TAG}-test.${SHORT_SHA}"
+    else
+      # When on main and HEAD is not an exact tag match, auto-increment patch version
+      if [[ "${LATEST_TAG}" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        MAJOR="${BASH_REMATCH[1]}"
+        MINOR="${BASH_REMATCH[2]}"
+        PATCH="${BASH_REMATCH[3]}"
+        NEXT_PATCH=$((PATCH + 1))
+        VERSION="v${MAJOR}.${MINOR}.${NEXT_PATCH}"
+      else
+        VERSION="${LATEST_TAG}"
+      fi
+    fi
   fi
 fi
 

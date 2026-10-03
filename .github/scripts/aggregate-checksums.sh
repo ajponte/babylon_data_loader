@@ -20,12 +20,14 @@ cat checksums.txt
 cd - >/dev/null
 
 echo "==> Ensuring Git tag ${VERSION} exists..."
-git config user.name "github-actions[bot]"
-git config user.email "github-actions[bot]@users.noreply.github.com"
-if ! git rev-parse "${VERSION}" >/dev/null 2>&1; then
-  echo "Creating tag ${VERSION}..."
-  git tag -a "${VERSION}" -m "Release ${VERSION}"
-  git push origin "${VERSION}"
+git fetch --tags origin 2>/dev/null || true
+
+if git ls-remote --tags origin "refs/tags/${VERSION}" | grep -q "${VERSION}"; then
+  echo "Tag ${VERSION} already exists on remote origin. Skipping tag creation."
 else
-  echo "Tag ${VERSION} already exists."
+  echo "Tag ${VERSION} not found on remote origin. Creating tag ${VERSION}..."
+  git config user.name "github-actions[bot]"
+  git config user.email "github-actions[bot]@users.noreply.github.com"
+  git tag -a "${VERSION}" -m "Release ${VERSION}"
+  git push origin "${VERSION}" || echo "Warning: failed to push tag ${VERSION}; may have been pushed concurrently."
 fi
