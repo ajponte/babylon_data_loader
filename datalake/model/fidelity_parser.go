@@ -80,6 +80,7 @@ func MapRawRecordToFidelityPosition(
 	asOfDate time.Time,
 	source SourceLineage,
 ) (FidelityPosition, error) {
+	// todo: Should we extend to a utility module/object?
 	qty, err := ParseFidelityQuantity(record["quantity"])
 	if err != nil {
 		return FidelityPosition{}, err

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/iotest"
 
 	"babylon/dataloader/storage"
 
@@ -117,6 +118,66 @@ func TestS3Storage_Download(t *testing.T) {
 			t.Error("expected error for empty localPath")
 		}
 	})
+}
+
+func TestS3Storage_Download_MkdirError(t *testing.T) {
+	mockClient := &mockS3Client{
+		getObjectFunc: func(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			return &s3.GetObjectOutput{
+				Body: io.NopCloser(bytes.NewBufferString("test")),
+			}, nil
+		},
+	}
+
+	s3Storage := storage.NewS3Storage(mockClient)
+	tmpDir := t.TempDir()
+	blockerFile := filepath.Join(tmpDir, "blocker")
+	if err := os.WriteFile(blockerFile, []byte("blocker"), 0o600); err != nil {
+		t.Fatalf("failed to create blocker file: %v", err)
+	}
+	localFile := filepath.Join(blockerFile, "nested", "test.csv")
+
+	err := s3Storage.Download(context.Background(), "my-bucket", "test.csv", localFile)
+	if err == nil {
+		t.Fatal("expected mkdir error, got nil")
+	}
+}
+
+func TestS3Storage_Download_CreateError(t *testing.T) {
+	mockClient := &mockS3Client{
+		getObjectFunc: func(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			return &s3.GetObjectOutput{
+				Body: io.NopCloser(bytes.NewBufferString("test")),
+			}, nil
+		},
+	}
+
+	s3Storage := storage.NewS3Storage(mockClient)
+	tmpDir := t.TempDir()
+
+	err := s3Storage.Download(context.Background(), "my-bucket", "test.csv", tmpDir)
+	if err == nil {
+		t.Fatal("expected file create error, got nil")
+	}
+}
+
+func TestS3Storage_Download_CopyError(t *testing.T) {
+	mockClient := &mockS3Client{
+		getObjectFunc: func(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			return &s3.GetObjectOutput{
+				Body: io.NopCloser(iotest.ErrReader(errors.New("simulated read error"))),
+			}, nil
+		},
+	}
+
+	s3Storage := storage.NewS3Storage(mockClient)
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "test.csv")
+
+	err := s3Storage.Download(context.Background(), "my-bucket", "test.csv", localFile)
+	if err == nil {
+		t.Fatal("expected io copy error, got nil")
+	}
 }
 
 func TestS3Storage_Copy_Success(t *testing.T) {
