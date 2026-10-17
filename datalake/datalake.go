@@ -1,6 +1,7 @@
 package datalake
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -131,15 +132,33 @@ func (p *CSVFileProcessor) processFile(
 		return err
 	}
 
-	// Create transaction mappings.
-	transactions, err := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
-	if err != nil {
-		return err
-	}
+	switch datasource.DataSource(sourceInfo.DataSource) {
+	case datasource.Fidelity:
+		positions, mapErr := mapRawRecordsToFidelityPositions(
+			ctx,
+			rawRecords,
+			unprocessedFilePath,
+			unprocessedFile.Name(),
+		)
+		if mapErr != nil {
+			return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
+		}
+		if _, err = p.Repo.BulkUpsertFidelityPositions(ctx, positions); err != nil {
+			return fmt.Errorf("failed to bulk upsert Fidelity positions: %w", err)
+		}
+	case datasource.Generic, datasource.Chase, datasource.Synthetic:
+		fallthrough
+	default:
+		// Create transaction mappings.
+		transactions, mapErr := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
+		if mapErr != nil {
+			return mapErr
+		}
 
-	// Upsert documents to datalake collection.
-	if _, err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
-		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
+		// Upsert documents to datalake collection.
+		if _, err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
+			return fmt.Errorf("failed to bulk upsert transactions: %w", err)
+		}
 	}
 
 	// Move the file, only if moveProcessedFiles is enabled.
@@ -198,18 +217,24 @@ func (p *CSVFileProcessor) processSingleFile(
 		TotalRecords: totalRecords,
 	})
 
-	transactions, err := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
-	if err != nil {
-		return p.handleFailure(fileName, err, reporter)
-	}
+	var upsertStats repository.UpsertStats
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return p.handleFailure(fileName, ctxErr, reporter)
-	}
+	switch datasource.DataSource(dataSource) {
+	case datasource.Fidelity:
+		stats, upsertErr := p.upsertFidelityPositions(ctx, fileName, rawRecords, unprocessedFilePath, reporter)
+		if upsertErr != nil {
+			return upsertErr
+		}
+		upsertStats = stats
 
-	upsertStats, err := p.Repo.BulkUpsertTransactions(ctx, transactions)
-	if err != nil {
-		return p.handleFailure(fileName, fmt.Errorf("failed to bulk upsert transactions: %w", err), reporter)
+	case datasource.Generic, datasource.Chase, datasource.Synthetic:
+		fallthrough
+	default:
+		stats, upsertErr := p.upsertTransactions(ctx, fileName, rawRecords, dataSource, accountID, reporter)
+		if upsertErr != nil {
+			return upsertErr
+		}
+		upsertStats = stats
 	}
 
 	p.reportProgress(reporter, ProgressEvent{
@@ -241,6 +266,67 @@ func (p *CSVFileProcessor) processSingleFile(
 	})
 
 	return nil
+}
+
+func (p *CSVFileProcessor) upsertFidelityPositions(
+	ctx context.Context,
+	fileName string,
+	rawRecords []map[string]string,
+	unprocessedFilePath string,
+	reporter ProgressReporter,
+) (repository.UpsertStats, error) {
+	positions, mapErr := mapRawRecordsToFidelityPositions(ctx, rawRecords, unprocessedFilePath, fileName)
+	if mapErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to map Fidelity positions: %w", mapErr),
+			reporter,
+		)
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
+	}
+
+	stats, upsertErr := p.Repo.BulkUpsertFidelityPositions(ctx, positions)
+	if upsertErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to bulk upsert Fidelity positions: %w", upsertErr),
+			reporter,
+		)
+	}
+
+	return stats, nil
+}
+
+func (p *CSVFileProcessor) upsertTransactions(
+	ctx context.Context,
+	fileName string,
+	rawRecords []map[string]string,
+	dataSource string,
+	accountID string,
+	reporter ProgressReporter,
+) (repository.UpsertStats, error) {
+	transactions, mapErr := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
+	if mapErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(fileName, mapErr, reporter)
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
+	}
+
+	stats, upsertErr := p.Repo.BulkUpsertTransactions(ctx, transactions)
+	if upsertErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to bulk upsert transactions: %w", upsertErr),
+			reporter,
+		)
+	}
+
+	return stats, nil
 }
 
 func (p *CSVFileProcessor) parseCSVFile(
@@ -304,6 +390,75 @@ func getPostingDate(record map[string]string, validHeaders []string) string {
 		}
 	}
 	return ""
+}
+
+func mapRawRecordsToFidelityPositions(
+	ctx context.Context,
+	rawRecords []map[string]string,
+	filePath string,
+	fileName string,
+) ([]model.FidelityPosition, error) {
+	if len(rawRecords) == 0 {
+		return []model.FidelityPosition{}, nil
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+
+	fileHash, err := ComputeFileSHA256(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute sha256 for file %s: %w", filePath, err)
+	}
+
+	asOfDate := extractFidelityAsOfDate(filePath)
+	ingestedAt := time.Now().UTC()
+
+	positions := make([]model.FidelityPosition, 0, len(rawRecords))
+	for _, record := range rawRecords {
+		var rowNumber int64
+		if rowStr, ok := record["__row_number"]; ok && rowStr != "" {
+			if parsedRow, parseErr := strconv.ParseInt(rowStr, 10, 64); parseErr == nil {
+				rowNumber = parsedRow
+			}
+		}
+
+		source := model.SourceLineage{
+			FileName:   fileName,
+			RowNumber:  rowNumber,
+			IngestedAt: ingestedAt,
+			SHA256:     fileHash,
+		}
+
+		pos, mapErr := model.MapRawRecordToFidelityPosition(record, asOfDate, source)
+		if mapErr != nil {
+			return nil, fmt.Errorf("failed to map raw record to Fidelity position (row %d): %w", rowNumber, mapErr)
+		}
+		positions = append(positions, pos)
+	}
+
+	return positions, nil
+}
+
+func extractFidelityAsOfDate(filePath string) time.Time {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return time.Now().UTC()
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		clean := strings.Trim(line, `" `)
+		if strings.HasPrefix(clean, "Date downloaded ") {
+			if parsedDate, parseErr := model.ParseFidelityDateDownloaded(line); parseErr == nil {
+				return parsedDate.UTC()
+			}
+		}
+	}
+
+	return time.Now().UTC()
 }
 
 func mapRawRecordsToTransactions(

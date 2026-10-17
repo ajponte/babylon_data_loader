@@ -17,8 +17,18 @@ const (
 
 // ---- Abstractions for Testability ----
 
+// IndexView defines the interface for index creation operations.
+type IndexView interface {
+	CreateOne(
+		ctx context.Context,
+		model mongo.IndexModel,
+		opts ...*options.CreateIndexesOptions,
+	) (string, error)
+}
+
 // DataStore defines the interface for database operations.
 type DataStore interface {
+	Indexes() IndexView
 	BulkWrite(
 		ctx context.Context,
 		models []mongo.WriteModel,
@@ -41,6 +51,11 @@ type CollectionProvider interface {
 // MongoCollection adapts *mongo.Collection to DataStore.
 type MongoCollection struct {
 	*mongo.Collection
+}
+
+// Indexes returns an IndexView for index creation on the collection.
+func (c *MongoCollection) Indexes() IndexView {
+	return c.Collection.Indexes()
 }
 
 // BulkWrite performs a bulk write operation.

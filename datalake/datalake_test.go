@@ -17,9 +17,11 @@ import (
 
 // mockRepository implements repository.Repository for testing.
 type mockRepository struct {
-	bulkUpsertTransactionsCalled bool
-	transactions                 []model.Transaction
-	err                          error
+	bulkUpsertTransactionsCalled      bool
+	transactions                      []model.Transaction
+	bulkUpsertFidelityPositionsCalled bool
+	fidelityPositions                 []model.FidelityPosition
+	err                               error
 }
 
 func (m *mockRepository) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) (repository.UpsertStats, error) {
@@ -27,6 +29,14 @@ func (m *mockRepository) BulkUpsertTransactions(ctx context.Context, transaction
 	m.transactions = transactions
 	return repository.UpsertStats{
 		UpsertedCount: int64(len(transactions)),
+	}, m.err
+}
+
+func (m *mockRepository) BulkUpsertFidelityPositions(ctx context.Context, positions []model.FidelityPosition) (repository.UpsertStats, error) {
+	m.bulkUpsertFidelityPositionsCalled = true
+	m.fidelityPositions = positions
+	return repository.UpsertStats{
+		UpsertedCount: int64(len(positions)),
 	}, m.err
 }
 
@@ -362,5 +372,161 @@ DEBIT,01/31/2023,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",-75.77,DEB
 	movedPath := filepath.Join(processedDir, "generic_test.csv")
 	if _, statErr := os.Stat(movedPath); os.IsNotExist(statErr) {
 		t.Errorf("Expected moved file to exist in processedDir, but it doesn't")
+	}
+}
+
+func TestDatalake_ProcessFidelityFile(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Portfolio_Positions_20260925.csv"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	csvContent := `Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash
+SYNTH-401K-202,TRADITIONAL 401K,FXAIX,FIDELITY 500 INDEX,25.500,$180.20,-$0.80,$4595.10,-$20.40,-0.44%,+$595.10,+14.88%,100.00%,$4000.00,$156.86,Cash
+
+"The data and information in this spreadsheet is provided to you solely for your use."
+
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test Fidelity CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		true, // moveProcessedFiles
+		stats,
+		logger,
+	)
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to stat test file: %v", err)
+	}
+	dirEntry := newMockDirEntry(fileInfo)
+
+	if processErr := processor.processFile(ctx, dirEntry); processErr != nil {
+		t.Fatalf("processFile failed: %v", processErr)
+	}
+
+	// Verify routing assertions
+	if !mockRepo.bulkUpsertFidelityPositionsCalled {
+		t.Errorf("expected BulkUpsertFidelityPositions to be called")
+	}
+	if mockRepo.bulkUpsertTransactionsCalled {
+		t.Errorf("expected BulkUpsertTransactions NOT to be called")
+	}
+	if len(mockRepo.fidelityPositions) != 2 {
+		t.Fatalf("expected 2 Fidelity positions upserted, got %d", len(mockRepo.fidelityPositions))
+	}
+
+	// Verify first position details and lineage
+	pos1 := mockRepo.fidelityPositions[0]
+	if pos1.AccountNumber != "SYNTH-ROTH-101" || pos1.Symbol != "FSKAX" {
+		t.Errorf("unexpected position data: %+v", pos1)
+	}
+	if pos1.CurrentValue != 6787.50 {
+		t.Errorf("expected currentValue 6787.50, got %f", pos1.CurrentValue)
+	}
+	if pos1.Source.FileName != fileName {
+		t.Errorf("expected Source.FileName %s, got %s", fileName, pos1.Source.FileName)
+	}
+	if pos1.Source.RowNumber != 2 {
+		t.Errorf("expected Source.RowNumber 2, got %d", pos1.Source.RowNumber)
+	}
+	if pos1.Source.SHA256 == "" {
+		t.Errorf("expected non-empty Source.SHA256")
+	}
+	if pos1.Source.IngestedAt.IsZero() {
+		t.Errorf("expected non-zero Source.IngestedAt")
+	}
+	if pos1.AsOfDate.IsZero() {
+		t.Errorf("expected non-zero AsOfDate")
+	}
+
+	// Verify second position row number
+	pos2 := mockRepo.fidelityPositions[1]
+	if pos2.Source.RowNumber != 3 {
+		t.Errorf("expected Source.RowNumber 3, got %d", pos2.Source.RowNumber)
+	}
+
+	// Verify file movement to processedDir
+	if _, statErr := os.Stat(filePath); !os.IsNotExist(statErr) {
+		t.Errorf("expected source file to be removed from unprocessedDir, but it still exists")
+	}
+	destPath := filepath.Join(processedDir, fileName)
+	if _, statErr := os.Stat(destPath); os.IsNotExist(statErr) {
+		t.Errorf("expected moved file to exist in processedDir, but it does not")
+	}
+}
+
+func TestDatalake_ProcessSingleFile_Fidelity(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Portfolio_Positions_20260925.csv"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	csvContent := `Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash
+
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test Fidelity CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		false,
+		stats,
+		logger,
+	)
+
+	reporter := &mockProgressReporter{}
+	err := processor.processSingleFile(ctx, fileName, string(datasource.Fidelity), "portfolio", reporter)
+	if err != nil {
+		t.Fatalf("processSingleFile failed: %v", err)
+	}
+
+	if !mockRepo.bulkUpsertFidelityPositionsCalled {
+		t.Errorf("expected BulkUpsertFidelityPositions to be called")
+	}
+	if len(mockRepo.fidelityPositions) != 1 {
+		t.Errorf("expected 1 Fidelity position, got %d", len(mockRepo.fidelityPositions))
 	}
 }
