@@ -146,12 +146,6 @@ func formatMongoURI(
 	}
 
 	mongoHost := os.Getenv(envMongoHost)
-	// if mongoHost == "" {
-	// 	mongoHost = defaultMongoHost
-	// 	logger.DebugContext(ctx, "Using default MongoDB host", "host", mongoHost)
-	// } else {
-	// 	logger.DebugContext(ctx, "Using MongoDB host from environment variable", "host", mongoHost)
-	// }
 
 	mongoHost = determineMongoHost(ctx)
 
