@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -419,6 +421,7 @@ SYNTH-401K-202,TRADITIONAL 401K,FXAIX,FIDELITY 500 INDEX,25.500,$180.20,-$0.80,$
 		stats,
 		logger,
 	)
+	processor.S3URI = "s3://test-bucket/datalake/fidelity.csv"
 
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
@@ -448,6 +451,9 @@ SYNTH-401K-202,TRADITIONAL 401K,FXAIX,FIDELITY 500 INDEX,25.500,$180.20,-$0.80,$
 	}
 	if pos1.CurrentValue != 6787.50 {
 		t.Errorf("expected currentValue 6787.50, got %f", pos1.CurrentValue)
+	}
+	if pos1.Source.S3URI != processor.S3URI {
+		t.Errorf("expected Source.S3URI %s, got %s", processor.S3URI, pos1.Source.S3URI)
 	}
 	if pos1.Source.FileName != fileName {
 		t.Errorf("expected Source.FileName %s, got %s", fileName, pos1.Source.FileName)
@@ -524,6 +530,7 @@ SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,
 		stats,
 		logger,
 	)
+	processor.S3URI = "s3://test-bucket/datalake/fidelity.csv"
 
 	reporter := &mockProgressReporter{}
 	err := processor.processSingleFile(ctx, fileName, string(datasource.Fidelity), "portfolio", reporter)
@@ -536,5 +543,222 @@ SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,
 	}
 	if len(mockRepo.fidelityPositions) != 1 {
 		t.Errorf("expected 1 Fidelity position, got %d", len(mockRepo.fidelityPositions))
+	}
+	if mockRepo.fidelityPositions[0].Source.S3URI != processor.S3URI {
+		t.Errorf("expected Source.S3URI %s, got %s", processor.S3URI, mockRepo.fidelityPositions[0].Source.S3URI)
+	}
+}
+
+func TestDatalake_ProcessFidelityFile_MissingDateFooter(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Portfolio_Positions_20260925.csv"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	// CSV content without the "Date downloaded ..." footer
+	csvContent := `Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash
+`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		true, // moveProcessedFiles
+		stats,
+		logger,
+	)
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	dirEntry := newMockDirEntry(fileInfo)
+
+	// Ingest file through ingestCSVFile so stats and file retention are tested
+	ingestErr := processor.ingestCSVFile(ctx, dirEntry)
+	if ingestErr == nil {
+		t.Fatalf("expected ingestCSVFile to return error for missing date footer, got nil")
+	}
+
+	if stats.FailedFiles != 1 {
+		t.Errorf("expected FailedFiles to be 1, got %d", stats.FailedFiles)
+	}
+	if stats.ProcessedFiles != 0 {
+		t.Errorf("expected ProcessedFiles to be 0, got %d", stats.ProcessedFiles)
+	}
+
+	// Verify file is left in unprocessed directory and NOT moved to processed directory
+	if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
+		t.Errorf("expected file to remain in unprocessedDir, but it was removed")
+	}
+	destPath := filepath.Join(processedDir, fileName)
+	if _, statErr := os.Stat(destPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected file NOT to exist in processedDir, but it was found")
+	}
+
+	if mockRepo.bulkUpsertFidelityPositionsCalled {
+		t.Errorf("expected BulkUpsertFidelityPositions NOT to be called")
+	}
+}
+
+func TestDatalake_ProcessFidelityFile_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel context immediately before calling
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Portfolio_Positions_20260925.csv"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	csvContent := `Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash
+
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		true,
+		stats,
+		logger,
+	)
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	dirEntry := newMockDirEntry(fileInfo)
+
+	processErr := processor.processFile(ctx, dirEntry)
+	if processErr == nil {
+		t.Fatalf("expected error due to canceled context, got nil")
+	}
+
+	if mockRepo.bulkUpsertFidelityPositionsCalled {
+		t.Errorf("expected BulkUpsertFidelityPositions NOT to be called on canceled context")
+	}
+
+	// Verify file was NOT moved
+	if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
+		t.Errorf("expected file to remain in unprocessedDir on canceled context")
+	}
+}
+
+func TestDatalake_ProcessFidelityFile_RepositoryError(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Portfolio_Positions_20260925.csv"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	csvContent := `Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash
+
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test CSV: %v", err)
+	}
+
+	dbErr := errors.New("mongodb cluster unreachable")
+	mockRepo := &mockRepository{err: dbErr}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		true,
+		stats,
+		logger,
+	)
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	dirEntry := newMockDirEntry(fileInfo)
+
+	processErr := processor.processFile(ctx, dirEntry)
+	if processErr == nil {
+		t.Fatalf("expected error from repository failure, got nil")
+	}
+	if !errors.Is(processErr, dbErr) && !strings.Contains(processErr.Error(), dbErr.Error()) {
+		t.Errorf("expected error to contain repository error message, got %v", processErr)
+	}
+
+	// Verify file was NOT moved
+	if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
+		t.Errorf("expected file to remain in unprocessedDir on repository error")
+	}
+
+	// Also test processSingleFile error propagation
+	reporter := &mockProgressReporter{}
+	singleErr := processor.processSingleFile(ctx, fileName, string(datasource.Fidelity), "portfolio", reporter)
+	if singleErr == nil {
+		t.Fatalf("expected processSingleFile to return repository error, got nil")
+	}
+	if !errors.Is(singleErr, dbErr) && !strings.Contains(singleErr.Error(), dbErr.Error()) {
+		t.Errorf("expected error to wrap db error, got %v", singleErr)
+	}
+
+	// Ensure reporter recorded PhaseFailed
+	hasFailedPhase := false
+	for _, ev := range reporter.events {
+		if ev.Phase == PhaseFailed {
+			hasFailedPhase = true
+			break
+		}
+	}
+	if !hasFailedPhase {
+		t.Errorf("expected reporter to record PhaseFailed event")
 	}
 }

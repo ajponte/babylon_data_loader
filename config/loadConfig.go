@@ -145,13 +145,7 @@ func formatMongoURI(
 		return mongoURI
 	}
 
-	mongoHost := os.Getenv(envMongoHost)
-	if mongoHost == "" {
-		mongoHost = defaultMongoHost
-		logger.DebugContext(ctx, "Using default MongoDB host", "host", mongoHost)
-	} else {
-		logger.DebugContext(ctx, "Using MongoDB host from environment variable", "host", mongoHost)
-	}
+	mongoHost := determineMongoHost(ctx)
 
 	mongoUser := os.Getenv(envMongoUser)
 	mongoPassword := os.Getenv(envMongoPassword)
@@ -170,4 +164,17 @@ func formatMongoURI(
 		logger.DebugContext(ctx, "Using default MongoDB URI", "uri", mongoURI)
 	}
 	return mongoURI
+}
+
+// determineMongoHost returns a formatted mongo host string.
+func determineMongoHost(ctx context.Context) string {
+	logger := bcontext.LoggerFromContext(ctx)
+	mongoHost := os.Getenv(envMongoHost)
+	if mongoHost == "" {
+		mongoHost = defaultMongoHost
+		logger.DebugContext(ctx, "Using default MongoDB host", "host", mongoHost)
+	} else {
+		logger.DebugContext(ctx, "Using MongoDB host from environment variable", "host", mongoHost)
+	}
+	return mongoHost
 }
