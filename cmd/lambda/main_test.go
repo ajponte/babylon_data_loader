@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"babylon/dataloader/config"
@@ -455,4 +456,188 @@ func TestDefaultIngestRunner_NonExistentDir(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on non-existent directory, got nil")
 	}
+}
+
+func TestHandler_CreateStagingDirs_Success(t *testing.T) {
+	h := NewHandler(&mockStorageService{}, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+	staging, cleanup, err := h.createStagingDirs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer cleanup()
+
+	if staging == nil {
+		t.Fatal("expected non-nil stagingDirs")
+	}
+	if _, statErr := os.Stat(staging.rootDir); statErr != nil {
+		t.Errorf("expected rootDir %s to exist: %v", staging.rootDir, statErr)
+	}
+	if _, statErr := os.Stat(staging.unprocessedDir); statErr != nil {
+		t.Errorf("expected unprocessedDir %s to exist: %v", staging.unprocessedDir, statErr)
+	}
+	if _, statErr := os.Stat(staging.processedDir); statErr != nil {
+		t.Errorf("expected processedDir %s to exist: %v", staging.processedDir, statErr)
+	}
+
+	// Invoke cleanup and verify removal
+	cleanup()
+	if _, statErr := os.Stat(staging.rootDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected rootDir %s to be removed after cleanup", staging.rootDir)
+	}
+}
+
+func TestHandler_ValidateS3Key(t *testing.T) {
+	ctx := context.Background()
+	h := NewHandler(&mockStorageService{}, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+
+	tests := []struct {
+		name         string
+		bucket       string
+		key          string
+		wantFilename string
+		wantValid    bool
+	}{
+		{
+			name:         "valid key",
+			bucket:       "b",
+			key:          "unprocessed/chase.csv",
+			wantFilename: "chase.csv",
+			wantValid:    true,
+		},
+		{
+			name:         "valid uppercase extension",
+			bucket:       "b",
+			key:          "unprocessed/fidelity.CSV",
+			wantFilename: "fidelity.CSV",
+			wantValid:    true,
+		},
+		{
+			name:         "nested valid key",
+			bucket:       "b",
+			key:          "unprocessed/2026/01/report.csv",
+			wantFilename: "report.csv",
+			wantValid:    true,
+		},
+		{
+			name:         "missing unprocessed prefix",
+			bucket:       "b",
+			key:          "processed/chase.csv",
+			wantFilename: "",
+			wantValid:    false,
+		},
+		{
+			name:         "non csv extension",
+			bucket:       "b",
+			key:          "unprocessed/data.json",
+			wantFilename: "",
+			wantValid:    false,
+		},
+		{
+			name:         "unprocessed prefix only with no filename",
+			bucket:       "b",
+			key:          "unprocessed/",
+			wantFilename: "",
+			wantValid:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			filename, valid := h.validateS3Key(ctx, tc.bucket, tc.key)
+			if valid != tc.wantValid {
+				t.Errorf("validateS3Key(%q) valid = %v, want %v", tc.key, valid, tc.wantValid)
+			}
+			if filename != tc.wantFilename {
+				t.Errorf("validateS3Key(%q) filename = %q, want %q", tc.key, filename, tc.wantFilename)
+			}
+		})
+	}
+}
+
+func TestHandler_DownloadFile(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success", func(t *testing.T) {
+		mockStore := &mockStorageService{}
+		h := NewHandler(mockStore, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+		dest := filepath.Join(t.TempDir(), "test.csv")
+		err := h.downloadFile(ctx, "my-bucket", "unprocessed/test.csv", dest)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !mockStore.downloadCalled {
+			t.Error("expected download to be called")
+		}
+	})
+
+	t.Run("failure wraps s3 URI", func(t *testing.T) {
+		mockStore := &mockStorageService{
+			downloadFunc: func(ctx context.Context, bucket, key, localPath string) error {
+				return errors.New("access denied")
+			},
+		}
+		h := NewHandler(mockStore, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+		err := h.downloadFile(ctx, "my-bucket", "unprocessed/test.csv", "/tmp/nonexistent")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		expectedSub := "s3://my-bucket/unprocessed/test.csv"
+		if !strings.Contains(err.Error(), expectedSub) {
+			t.Errorf("expected error %q to contain %q", err.Error(), expectedSub)
+		}
+	})
+}
+
+func TestHandler_ArchiveS3File(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success with nested directory key", func(t *testing.T) {
+		mockStore := &mockStorageService{}
+		h := NewHandler(mockStore, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+		err := h.archiveS3File(ctx, "my-bucket", "unprocessed/2026/01/data.csv")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !mockStore.copyCalled {
+			t.Error("expected copy to be called")
+		}
+		if mockStore.copyDestKey != "processed/2026/01/data.csv" {
+			t.Errorf("expected dest key 'processed/2026/01/data.csv', got %q", mockStore.copyDestKey)
+		}
+		if !mockStore.deleteCalled {
+			t.Error("expected delete to be called")
+		}
+	})
+
+	t.Run("copy failure prevents delete", func(t *testing.T) {
+		mockStore := &mockStorageService{
+			copyFunc: func(ctx context.Context, srcBucket, srcKey, destBucket, destKey string) error {
+				return errors.New("copy failed")
+			},
+		}
+		h := NewHandler(mockStore, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+		err := h.archiveS3File(ctx, "my-bucket", "unprocessed/test.csv")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if mockStore.deleteCalled {
+			t.Error("delete should not be called when copy fails")
+		}
+	})
+
+	t.Run("delete failure returns error", func(t *testing.T) {
+		mockStore := &mockStorageService{
+			deleteFunc: func(ctx context.Context, bucket, key string) error {
+				return errors.New("delete failed")
+			},
+		}
+		h := NewHandler(mockStore, &mockSecretsClient{}, "", t.TempDir(), nil, discardLogger())
+		err := h.archiveS3File(ctx, "my-bucket", "unprocessed/test.csv")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !mockStore.copyCalled {
+			t.Error("copy should be called before delete")
+		}
+	})
 }

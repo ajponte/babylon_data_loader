@@ -16,15 +16,24 @@ import (
 
 const (
 	TransactionsCollection      = "transactions"
+	ChaseTransactionsCollection = "transactions_chase"
 	FidelityPositionsCollection = "positions_fidelity"
 	syncTableName               = "dataSync"
+
+	mongoSetOp       = "$set"
+	fieldAccountID   = "accountId"
+	fieldPostingDate = "postingDate"
 )
+
+var _ repository.Repository = (*MongoRepository)(nil)
 
 // MongoRepository implements the datalake.Repository interface for MongoDB.
 type MongoRepository struct {
-	provider  CollectionProvider
-	indexOnce sync.Once
-	indexErr  error
+	provider            CollectionProvider
+	indexOnce           sync.Once
+	indexErr            error
+	chaseIndexMu        sync.RWMutex
+	chaseIndexesCreated bool
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -56,7 +65,7 @@ func (r *MongoRepository) BulkUpsertTransactions(
 			"dataSource":  doc.DataSource,
 			"accountID":   doc.AccountID,
 		}
-		update := bson.M{"$set": doc}
+		update := bson.M{mongoSetOp: doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 
@@ -83,11 +92,7 @@ func (r *MongoRepository) BulkUpsertTransactions(
 		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
-	return repository.UpsertStats{
-		UpsertedCount: res.UpsertedCount,
-		MatchedCount:  res.MatchedCount,
-		ModifiedCount: res.ModifiedCount,
-	}, nil
+	return toUpsertStats(res), nil
 }
 
 // ensureFidelityIndexes ensures the compound unique index exists for Fidelity positions.
@@ -132,7 +137,7 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 			"symbol":        doc.Symbol,
 			"asOfDate":      doc.AsOfDate,
 		}
-		update := bson.M{"$set": doc}
+		update := bson.M{mongoSetOp: doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 
@@ -157,11 +162,141 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
+	return toUpsertStats(res), nil
+}
+
+// ensureChaseIndexes ensures the compound indexes exist for Chase transactions.
+func (r *MongoRepository) ensureChaseIndexes(ctx context.Context) error {
+	r.chaseIndexMu.RLock()
+	if r.chaseIndexesCreated {
+		r.chaseIndexMu.RUnlock()
+		return nil
+	}
+	r.chaseIndexMu.RUnlock()
+
+	r.chaseIndexMu.Lock()
+	defer r.chaseIndexMu.Unlock()
+
+	if r.chaseIndexesCreated {
+		return nil
+	}
+
+	collection := r.provider.Collection(ChaseTransactionsCollection)
+
+	queryIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: fieldAccountID, Value: 1},
+			{Key: fieldPostingDate, Value: -1},
+		},
+		Options: options.Index().SetName("idx_chase_account_posting_date"),
+	}
+
+	uniqueIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: fieldAccountID, Value: 1},
+			{Key: fieldPostingDate, Value: 1},
+			{Key: "description", Value: 1},
+			{Key: "amount", Value: 1},
+			{Key: "source.rowNumber", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetSparse(true).SetName("idx_chase_account_post_desc_amount_row"),
+	}
+
+	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{queryIndex, uniqueIndex})
+	if err != nil {
+		return fmt.Errorf("failed to create indexes on %s: %w", ChaseTransactionsCollection, err)
+	}
+
+	r.chaseIndexesCreated = true
+	return nil
+}
+
+// BulkUpsertChaseTransactions bulk upserts Chase transactions into the "transactions_chase" collection.
+func (r *MongoRepository) BulkUpsertChaseTransactions(
+	ctx context.Context,
+	transactions []model.ChaseTransaction,
+) (repository.UpsertStats, error) {
+	if len(transactions) == 0 {
+		return repository.UpsertStats{}, nil
+	}
+
+	if err := r.ensureChaseIndexes(ctx); err != nil {
+		return repository.UpsertStats{}, err
+	}
+
+	models := buildChaseWriteModels(transactions)
+	res, err := r.executeBulkWrite(ctx, ChaseTransactionsCollection, models)
+	stats := toUpsertStats(res)
+	if err != nil {
+		return stats, err
+	}
+
+	if auditErr := r.recordSyncAuditLog(ctx, ChaseTransactionsCollection, int64(len(transactions))); auditErr != nil {
+		return stats, auditErr
+	}
+
+	return stats, nil
+}
+
+func buildChaseWriteModels(transactions []model.ChaseTransaction) []mongo.WriteModel {
+	models := make([]mongo.WriteModel, 0, len(transactions))
+	for _, doc := range transactions {
+		filter := buildChaseFilter(doc)
+		update := bson.M{mongoSetOp: doc}
+		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
+	}
+	return models
+}
+
+func buildChaseFilter(doc model.ChaseTransaction) bson.M {
+	return bson.M{
+		fieldAccountID:     doc.AccountID,
+		fieldPostingDate:   doc.PostingDate,
+		"description":      doc.Description,
+		"amount":           doc.Amount,
+		"source.rowNumber": doc.Source.RowNumber,
+	}
+}
+
+func toUpsertStats(res *mongo.BulkWriteResult) repository.UpsertStats {
+	if res == nil {
+		return repository.UpsertStats{}
+	}
 	return repository.UpsertStats{
 		UpsertedCount: res.UpsertedCount,
 		MatchedCount:  res.MatchedCount,
 		ModifiedCount: res.ModifiedCount,
-	}, nil
+	}
+}
+
+func (r *MongoRepository) executeBulkWrite(
+	ctx context.Context,
+	collectionName string,
+	models []mongo.WriteModel,
+) (*mongo.BulkWriteResult, error) {
+	collection := r.provider.Collection(collectionName)
+	res, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	if err != nil {
+		return res, fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
+	}
+	return res, nil
+}
+
+func (r *MongoRepository) recordSyncAuditLog(
+	ctx context.Context,
+	collectionName string,
+	recordCount int64,
+) error {
+	syncCollection := r.provider.Collection(syncTableName)
+	syncLog := model.SyncLog{
+		CollectionName:  collectionName,
+		SyncTimestamp:   time.Now(),
+		RecordsUploaded: recordCount,
+	}
+	if _, err := syncCollection.InsertOne(ctx, syncLog); err != nil {
+		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
+	}
+	return nil
 }
 
 // GetSyncLogs retrieves all sync logs from the dataSync collection, sorted by sync_timestamp descending.

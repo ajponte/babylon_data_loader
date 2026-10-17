@@ -43,11 +43,15 @@ type mockRepo struct {
 }
 
 func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) (repository.UpsertStats, error) {
-	return repository.UpsertStats{}, nil
+	return repository.UpsertStats{}, m.err
+}
+
+func (m *mockRepo) BulkUpsertChaseTransactions(ctx context.Context, transactions []model.ChaseTransaction) (repository.UpsertStats, error) {
+	return repository.UpsertStats{}, m.err
 }
 
 func (m *mockRepo) BulkUpsertFidelityPositions(ctx context.Context, positions []model.FidelityPosition) (repository.UpsertStats, error) {
-	return repository.UpsertStats{}, nil
+	return repository.UpsertStats{}, m.err
 }
 
 func (m *mockRepo) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
