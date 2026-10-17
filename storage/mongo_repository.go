@@ -218,9 +218,25 @@ func (r *MongoRepository) BulkUpsertChaseTransactions(
 		return repository.UpsertStats{}, err
 	}
 
-	collection := r.provider.Collection(ChaseTransactionsCollection)
+	models := buildChaseWriteModels(transactions)
+	res, err := r.executeBulkWrite(ctx, ChaseTransactionsCollection, models)
+	if err != nil {
+		return repository.UpsertStats{}, err
+	}
 
-	var models []mongo.WriteModel
+	if auditErr := r.recordSyncAuditLog(ctx, ChaseTransactionsCollection, int64(len(transactions))); auditErr != nil {
+		return repository.UpsertStats{}, auditErr
+	}
+
+	return repository.UpsertStats{
+		UpsertedCount: res.UpsertedCount,
+		MatchedCount:  res.MatchedCount,
+		ModifiedCount: res.ModifiedCount,
+	}, nil
+}
+
+func buildChaseWriteModels(transactions []model.ChaseTransaction) []mongo.WriteModel {
+	models := make([]mongo.WriteModel, 0, len(transactions))
 	for _, doc := range transactions {
 		filter := bson.M{
 			fieldAccountID:     doc.AccountID,
@@ -232,33 +248,37 @@ func (r *MongoRepository) BulkUpsertChaseTransactions(
 		update := bson.M{mongoSetOp: doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
+	return models
+}
 
+func (r *MongoRepository) executeBulkWrite(
+	ctx context.Context,
+	collectionName string,
+	models []mongo.WriteModel,
+) (*mongo.BulkWriteResult, error) {
+	collection := r.provider.Collection(collectionName)
 	res, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		return repository.UpsertStats{}, fmt.Errorf(
-			"failed to perform bulk write for collection %s: %w",
-			ChaseTransactionsCollection,
-			err,
-		)
+		return nil, fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
 	}
+	return res, nil
+}
 
-	// Update sync log audit trail
+func (r *MongoRepository) recordSyncAuditLog(
+	ctx context.Context,
+	collectionName string,
+	recordCount int64,
+) error {
 	syncCollection := r.provider.Collection(syncTableName)
 	syncLog := model.SyncLog{
-		CollectionName:  ChaseTransactionsCollection,
+		CollectionName:  collectionName,
 		SyncTimestamp:   time.Now(),
-		RecordsUploaded: int64(len(transactions)),
+		RecordsUploaded: recordCount,
 	}
-	_, err = syncCollection.InsertOne(ctx, syncLog)
-	if err != nil {
-		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
+	if _, err := syncCollection.InsertOne(ctx, syncLog); err != nil {
+		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
-
-	return repository.UpsertStats{
-		UpsertedCount: res.UpsertedCount,
-		MatchedCount:  res.MatchedCount,
-		ModifiedCount: res.ModifiedCount,
-	}, nil
+	return nil
 }
 
 // GetSyncLogs retrieves all sync logs from the dataSync collection, sorted by sync_timestamp descending.
