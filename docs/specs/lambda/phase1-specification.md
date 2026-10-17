@@ -123,6 +123,15 @@ type SecretsClient interface {
    - Plaintext MongoDB connection string (`mongodb://` or `mongodb+srv://`).
    - Binary secret payloads (`SecretBinary`).
 
+#### 3.2.1. MongoDB Atlas Cloud Integration & Egress Security
+The production Lambda function connects to a cloud-hosted MongoDB Atlas cluster:
+- **Cluster Deployment**: MongoDB Atlas M0 cluster (`babylon-datalake`) in AWS region `us-west-2` (Oregon).
+- **Target Database**: `datalake` with dynamic collection partitioning (`transactions_<datasource>`, e.g., `transactions_chase`, `transactions_synthetic`) and audit logging (`dataSync`).
+- **Serverless Network Access**: Because the function operates in default serverless mode (outside a VPC), egress IPs are dynamic within AWS's regional public pools. Network access is governed by the Atlas IP Access List with entry `0.0.0.0/0` (`AWS Lambda Serverless Egress`).
+- **Security in Depth**: Traffic is encrypted in transit via TLS 1.3, authenticated via SCRAM-SHA-256 with user `babylon_app`, and access is restricted to read/write privileges on the `datalake` database.
+
+For complete datalake specifications, see [`docs/specs/mongodb-atlas-datalake.md`](../mongodb-atlas-datalake.md).
+
 ---
 
 ### 3.3. S3 Storage Helper & Client Abstraction ([`storage/s3.go`](../../../storage/s3.go))
