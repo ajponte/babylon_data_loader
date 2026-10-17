@@ -95,6 +95,7 @@ Financial transactions are segregated by data source to allow independent schema
 | Collection Name | Source / File Format | Description |
 | :--- | :--- | :--- |
 | **`transactions_chase`** | `Chase*_Activity_*.CSV` | Checking, savings, and credit card statements from Chase Bank |
+| **`positions_fidelity`** | `Portfolio_Positions_*.csv` | Fidelity individual and retirement portfolio point-in-time asset holdings snapshots |
 | **`transactions_synthetic`** | Synthetic generator CSVs | Test transaction datasets generated for QA without real PII |
 | **`transactions_<custom>`** | Future statement formats | Dynamic collections created based on detected file header extractors |
 
@@ -123,6 +124,7 @@ Tracks synchronization logs for every file processed by the loader engine to enf
   "_id": "67104b2b8c9d123456789abd",
   "fileName": "Chase6896_Activity_20230312.CSV",
   "fileHash": "283d4493dc4e0ed154928aed2a9dbe8f25f5add70f220bfdc0d624c0af8f9834",
+  "collectionName": "transactions_chase",
   "recordCount": 93,
   "upsertedCount": 93,
   "matchedCount": 0,
@@ -146,6 +148,7 @@ mongosh "<mongo-uri>" --eval "db.getCollectionNames()"
 # Inspect record counts across collections
 mongosh "<mongo-uri>" --eval "
   print('transactions_chase:', db.transactions_chase.countDocuments());
+  print('positions_fidelity:', db.positions_fidelity.countDocuments());
   print('transactions_synthetic:', db.transactions_synthetic.countDocuments());
   print('dataSync logs:', db.dataSync.countDocuments());
 "
