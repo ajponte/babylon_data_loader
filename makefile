@@ -92,6 +92,21 @@ docker-build-lambda: ## build arm64 lambda container image
 test-lambda: ## run unit tests for lambda handler, secrets, and storage
 	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
 
+upload-synthetic-dryrun: ## simulate S3 upload of synthetic test data
+	../tools/upload-csv-s3.sh --dry-run tmp/synthetic/test-synthetic-data.csv
+
+upload-synthetic: ## upload synthetic test data to S3 landing bucket
+	../tools/upload-csv-s3.sh tmp/synthetic/test-synthetic-data.csv
+
+logs-lambda: ## view recent Lambda logs from the last 15 minutes
+	aws logs tail /aws/lambda/babylon-data-loader --since 15m --region $(AWS_REGION)
+
+logs-lambda-tail: ## stream live Lambda logs in real time (follow mode)
+	aws logs tail /aws/lambda/babylon-data-loader --follow --region $(AWS_REGION)
+
+logs-lambda-errors: ## filter Lambda logs for ERROR level messages
+	aws logs tail /aws/lambda/babylon-data-loader --filter-pattern "ERROR" --since 1h --region $(AWS_REGION)
+
 AWS_ACCOUNT_ID ?= 615471835001
 AWS_REGION     ?= us-west-2
 ECR_REPO       ?= ajp/babylon
