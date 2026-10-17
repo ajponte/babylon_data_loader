@@ -92,11 +92,7 @@ func (r *MongoRepository) BulkUpsertTransactions(
 		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
-	return repository.UpsertStats{
-		UpsertedCount: res.UpsertedCount,
-		MatchedCount:  res.MatchedCount,
-		ModifiedCount: res.ModifiedCount,
-	}, nil
+	return toUpsertStats(res), nil
 }
 
 // ensureFidelityIndexes ensures the compound unique index exists for Fidelity positions.
@@ -166,11 +162,7 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
-	return repository.UpsertStats{
-		UpsertedCount: res.UpsertedCount,
-		MatchedCount:  res.MatchedCount,
-		ModifiedCount: res.ModifiedCount,
-	}, nil
+	return toUpsertStats(res), nil
 }
 
 // ensureChaseIndexes ensures the compound indexes exist for Chase transactions.
@@ -234,51 +226,47 @@ func (r *MongoRepository) BulkUpsertChaseTransactions(
 
 	models := buildChaseWriteModels(transactions)
 	res, err := r.executeBulkWrite(ctx, ChaseTransactionsCollection, models)
+	stats := toUpsertStats(res)
 	if err != nil {
-		var stats repository.UpsertStats
-		if res != nil {
-			stats = repository.UpsertStats{
-				UpsertedCount: res.UpsertedCount,
-				MatchedCount:  res.MatchedCount,
-				ModifiedCount: res.ModifiedCount,
-			}
-		}
 		return stats, err
 	}
 
 	if auditErr := r.recordSyncAuditLog(ctx, ChaseTransactionsCollection, int64(len(transactions))); auditErr != nil {
-		var stats repository.UpsertStats
-		if res != nil {
-			stats = repository.UpsertStats{
-				UpsertedCount: res.UpsertedCount,
-				MatchedCount:  res.MatchedCount,
-				ModifiedCount: res.ModifiedCount,
-			}
-		}
 		return stats, auditErr
 	}
 
-	return repository.UpsertStats{
-		UpsertedCount: res.UpsertedCount,
-		MatchedCount:  res.MatchedCount,
-		ModifiedCount: res.ModifiedCount,
-	}, nil
+	return stats, nil
 }
 
 func buildChaseWriteModels(transactions []model.ChaseTransaction) []mongo.WriteModel {
 	models := make([]mongo.WriteModel, 0, len(transactions))
 	for _, doc := range transactions {
-		filter := bson.M{
-			fieldAccountID:     doc.AccountID,
-			fieldPostingDate:   doc.PostingDate,
-			"description":      doc.Description,
-			"amount":           doc.Amount,
-			"source.rowNumber": doc.Source.RowNumber,
-		}
+		filter := buildChaseFilter(doc)
 		update := bson.M{mongoSetOp: doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 	return models
+}
+
+func buildChaseFilter(doc model.ChaseTransaction) bson.M {
+	return bson.M{
+		fieldAccountID:     doc.AccountID,
+		fieldPostingDate:   doc.PostingDate,
+		"description":      doc.Description,
+		"amount":           doc.Amount,
+		"source.rowNumber": doc.Source.RowNumber,
+	}
+}
+
+func toUpsertStats(res *mongo.BulkWriteResult) repository.UpsertStats {
+	if res == nil {
+		return repository.UpsertStats{}
+	}
+	return repository.UpsertStats{
+		UpsertedCount: res.UpsertedCount,
+		MatchedCount:  res.MatchedCount,
+		ModifiedCount: res.ModifiedCount,
+	}
 }
 
 func (r *MongoRepository) executeBulkWrite(
