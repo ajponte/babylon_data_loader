@@ -201,21 +201,33 @@ func (p *CSVFileProcessor) processChaseRecords(
 	filePath, fileName, accountID string,
 	rawRecords []map[string]string,
 ) error {
-	mapper, mapInitErr := NewChaseMapper(ctx, filePath, fileName, p.S3URI, accountID)
-	if mapInitErr != nil {
-		return fmt.Errorf("failed to initialize Chase mapper: %w", mapInitErr)
-	}
-	transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
-	if mapErr != nil {
-		return fmt.Errorf("failed to map Chase transactions: %w", mapErr)
+	transactions, err := p.mapChaseTransactions(ctx, filePath, fileName, accountID, rawRecords)
+	if err != nil {
+		return err
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
-	if _, err := p.Repo.BulkUpsertChaseTransactions(ctx, transactions); err != nil {
-		return fmt.Errorf("failed to bulk upsert Chase transactions: %w", err)
+	if _, upsertErr := p.Repo.BulkUpsertChaseTransactions(ctx, transactions); upsertErr != nil {
+		return fmt.Errorf("failed to bulk upsert Chase transactions: %w", upsertErr)
 	}
 	return nil
+}
+
+func (p *CSVFileProcessor) mapChaseTransactions(
+	ctx context.Context,
+	filePath, fileName, accountID string,
+	rawRecords []map[string]string,
+) ([]model.ChaseTransaction, error) {
+	mapper, err := NewChaseMapper(ctx, filePath, fileName, p.S3URI, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Chase mapper: %w", err)
+	}
+	transactions, err := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if err != nil {
+		return nil, fmt.Errorf("failed to map Chase transactions: %w", err)
+	}
+	return transactions, nil
 }
 
 func (p *CSVFileProcessor) processGenericRecords(
@@ -400,34 +412,24 @@ func (p *CSVFileProcessor) upsertChaseTransactions(
 	accountID string,
 	reporter ProgressReporter,
 ) (repository.UpsertStats, error) {
-	mapper, mapInitErr := NewChaseMapper(
-		ctx,
-		unprocessedFilePath,
-		fileName,
-		p.S3URI,
-		accountID,
-	)
-	if mapInitErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(
-			fileName,
-			fmt.Errorf("failed to initialize Chase mapper: %w", mapInitErr),
-			reporter,
-		)
-	}
-
-	transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
-	if mapErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(
-			fileName,
-			fmt.Errorf("failed to map Chase transactions: %w", mapErr),
-			reporter,
-		)
+	transactions, err := p.mapChaseTransactions(ctx, unprocessedFilePath, fileName, accountID, rawRecords)
+	if err != nil {
+		return repository.UpsertStats{}, p.handleFailure(fileName, err, reporter)
 	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
 	}
 
+	return p.executeChaseUpsert(ctx, fileName, transactions, reporter)
+}
+
+func (p *CSVFileProcessor) executeChaseUpsert(
+	ctx context.Context,
+	fileName string,
+	transactions []model.ChaseTransaction,
+	reporter ProgressReporter,
+) (repository.UpsertStats, error) {
 	p.reportProgress(reporter, ProgressEvent{
 		Phase:        PhaseUpserting,
 		FileName:     fileName,
