@@ -135,13 +135,16 @@ func (p *CSVFileProcessor) processFile(
 
 	switch datasource.DataSource(sourceInfo.DataSource) {
 	case datasource.Fidelity:
-		positions, mapErr := mapRawRecordsToFidelityPositions(
+		mapper, mapInitErr := NewFidelityMapper(
 			ctx,
-			rawRecords,
 			unprocessedFilePath,
 			unprocessedFile.Name(),
 			p.S3URI,
 		)
+		if mapInitErr != nil {
+			return fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr)
+		}
+		positions, mapErr := mapper.MapRecords(rawRecords)
 		if mapErr != nil {
 			return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
 		}
@@ -277,13 +280,21 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	unprocessedFilePath string,
 	reporter ProgressReporter,
 ) (repository.UpsertStats, error) {
-	positions, mapErr := mapRawRecordsToFidelityPositions(
+	mapper, mapInitErr := NewFidelityMapper(
 		ctx,
-		rawRecords,
 		unprocessedFilePath,
 		fileName,
 		p.S3URI,
 	)
+	if mapInitErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr),
+			reporter,
+		)
+	}
+
+	positions, mapErr := mapper.MapRecords(rawRecords)
 	if mapErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(
 			fileName,
@@ -398,25 +409,6 @@ func getPostingDate(record map[string]string, validHeaders []string) string {
 		}
 	}
 	return ""
-}
-
-func mapRawRecordsToFidelityPositions(
-	ctx context.Context,
-	rawRecords []map[string]string,
-	filePath string,
-	fileName string,
-	s3URI string,
-) ([]model.FidelityPosition, error) {
-	if len(rawRecords) == 0 {
-		return []model.FidelityPosition{}, nil
-	}
-
-	mapper, err := NewFidelityMapper(ctx, filePath, fileName, s3URI)
-	if err != nil {
-		return nil, err
-	}
-
-	return mapper.MapRecordsWithContext(ctx, rawRecords)
 }
 
 func mapRawRecordsToTransactions(
