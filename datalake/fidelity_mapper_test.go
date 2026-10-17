@@ -1451,4 +1451,3 @@ func TestFidelityMapper_ScanFileWithFallback_HeaderFallback(t *testing.T) {
 		t.Errorf("expected date %v, got %v", expectedDate, gotDate)
 	}
 }
-
