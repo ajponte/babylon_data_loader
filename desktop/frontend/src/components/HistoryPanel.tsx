@@ -75,19 +75,41 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ refreshTrigger = 0 }
           <table className="history-table">
             <thead>
               <tr>
-                <th>Collection Ingested</th>
-                <th>Records Ingested</th>
-                <th>Ingestion Timestamp</th>
+                <th>Status</th>
+                <th>File Name</th>
+                <th>Collection</th>
+                <th>Records / Upserted</th>
+                <th>Duplicates</th>
+                <th>Duration</th>
+                <th>Timestamp</th>
               </tr>
             </thead>
             <tbody>
-              {history.map((log, index) => (
-                <tr key={index}>
-                  <td className="col-name">{log.collectionName}</td>
-                  <td className="records-count">{String(log.recordsUploaded)}</td>
-                  <td className="timestamp">{formatTimestamp(log.syncTimestamp)}</td>
-                </tr>
-              ))}
+              {history.map((log, index) => {
+                const status = log.status || 'SUCCESS';
+                const isSuccess = status === 'SUCCESS';
+                const fileName = log.fileName || 'N/A';
+                const records = log.upsertedCount ?? log.recordsUploaded ?? 0;
+                const duplicates = log.matchedCount ?? 0;
+                const duration = log.durationMs !== undefined && log.durationMs !== null ? `${log.durationMs}ms` : 'N/A';
+                const timestamp = log.syncedAt || log.syncTimestamp;
+
+                return (
+                  <tr key={index}>
+                    <td className="status">
+                      <span className={`status-badge ${isSuccess ? 'badge-success' : 'badge-failed'}`}>
+                        {status}
+                      </span>
+                    </td>
+                    <td className="file-name" title={log.fileName || ''}>{fileName}</td>
+                    <td className="col-name">{log.collectionName}</td>
+                    <td className="records-count">{String(records)}</td>
+                    <td className="duplicates-count">{String(duplicates)}</td>
+                    <td className="duration">{duration}</td>
+                    <td className="timestamp">{formatTimestamp(timestamp)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

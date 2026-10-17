@@ -106,25 +106,12 @@ func TestBulkUpsertTransactions_Success(t *testing.T) {
 			}
 			return &mongo.BulkWriteResult{UpsertedCount: 2}, nil
 		},
-		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
-			syncLog, ok := document.(model.SyncLog)
-			if !ok {
-				t.Errorf("Expected SyncLog document, got %T", document)
-			}
-			if syncLog.CollectionName != "transactions_synthetic" {
-				t.Errorf("Expected CollectionName %s, got %s", "transactions_synthetic", syncLog.CollectionName)
-			}
-			if syncLog.LegacyRecordsUploaded != int64(len(transactions)) {
-				t.Errorf("Expected RecordsUploaded %d, got %d", len(transactions), syncLog.LegacyRecordsUploaded)
-			}
-			return &mongo.InsertOneResult{}, nil
-		},
 	}
 
 	provider := &mockCollectionProvider{
 		collectionFunc: func(name string) storage.DataStore {
-			if name != "transactions_synthetic" && name != "dataSync" {
-				t.Errorf("Expected collection name %s or dataSync, got %s", "transactions_synthetic", name)
+			if name != "transactions_synthetic" {
+				t.Errorf("Expected collection name %s, got %s", "transactions_synthetic", name)
 			}
 			return mockDS
 		},
@@ -175,35 +162,6 @@ func TestBulkUpsertTransactions_BulkWriteError(t *testing.T) {
 	_, err := repo.BulkUpsertTransactions(ctx, transactions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("Expected bulk write error, got: %v", err)
-	}
-}
-
-func TestBulkUpsertTransactions_SyncLogError(t *testing.T) {
-	ctx := context.Background()
-	transactions := []model.Transaction{
-		{Details: "Test1", PostingDate: "2024-01-01", DataSource: "synthetic", AccountID: "123"},
-	}
-	expectedErr := errors.New("sync log error")
-
-	mockDS := &mockDataStore{
-		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
-			return &mongo.BulkWriteResult{UpsertedCount: 1}, nil
-		},
-		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
-			return nil, expectedErr
-		},
-	}
-
-	provider := &mockCollectionProvider{
-		collectionFunc: func(name string) storage.DataStore {
-			return mockDS
-		},
-	}
-
-	repo := storage.NewMongoRepository(provider)
-	_, err := repo.BulkUpsertTransactions(ctx, transactions)
-	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
-		t.Errorf("Expected sync log error, got: %v", err)
 	}
 }
 
@@ -556,36 +514,6 @@ func TestBulkUpsertFidelity_HistoricalSnapshots(t *testing.T) {
 	}
 }
 
-// TC-14: Asserts a record is inserted into datalake.dataSync with collectionName == "positions_fidelity" and recordsUploaded == 5.
-func TestBulkUpsertFidelity_DataSyncLog(t *testing.T) {
-	ctx := context.Background()
-	provider, store := newFidelityMockProvider()
-	repo := storage.NewMongoRepository(provider)
-
-	asOfDate := time.Date(2026, time.September, 25, 21, 50, 0, 0, time.UTC)
-	positions := sampleFidelityPositions(asOfDate)
-
-	_, err := repo.BulkUpsertFidelityPositions(ctx, positions)
-	if err != nil {
-		t.Fatalf("BulkUpsertFidelityPositions failed: %v", err)
-	}
-
-	if len(store.syncLogs) != 1 {
-		t.Fatalf("expected 1 sync log, got %d", len(store.syncLogs))
-	}
-
-	log := store.syncLogs[0]
-	if log.CollectionName != storage.FidelityPositionsCollection {
-		t.Errorf("expected CollectionName %s, got %s", storage.FidelityPositionsCollection, log.CollectionName)
-	}
-	if log.LegacyRecordsUploaded != 5 {
-		t.Errorf("expected RecordsUploaded == 5, got %d", log.LegacyRecordsUploaded)
-	}
-	if log.LegacySyncTimestamp.IsZero() {
-		t.Errorf("expected non-zero SyncTimestamp")
-	}
-}
-
 func TestBulkUpsertFidelity_EmptyPositions(t *testing.T) {
 	ctx := context.Background()
 	repo := storage.NewMongoRepository(&mockCollectionProvider{})
@@ -619,33 +547,6 @@ func TestBulkUpsertFidelity_BulkWriteError(t *testing.T) {
 	_, err := repo.BulkUpsertFidelityPositions(ctx, positions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("expected bulk write error containing %q, got: %v", expectedErr.Error(), err)
-	}
-}
-
-func TestBulkUpsertFidelity_SyncLogError(t *testing.T) {
-	ctx := context.Background()
-	expectedErr := errors.New("simulated sync log insert failure")
-
-	mockDS := &mockDataStore{
-		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
-			return &mongo.BulkWriteResult{UpsertedCount: 1}, nil
-		},
-		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
-			return nil, expectedErr
-		},
-	}
-
-	provider := &mockCollectionProvider{
-		collectionFunc: func(name string) storage.DataStore {
-			return mockDS
-		},
-	}
-
-	repo := storage.NewMongoRepository(provider)
-	positions := []model.FidelityPosition{{AccountNumber: "TEST", Symbol: "SYM"}}
-	_, err := repo.BulkUpsertFidelityPositions(ctx, positions)
-	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
-		t.Errorf("expected sync log error containing %q, got: %v", expectedErr.Error(), err)
 	}
 }
 
@@ -727,24 +628,11 @@ func TestBulkUpsertChaseTransactions_Success(t *testing.T) {
 			capturedModels = models
 			return &mongo.BulkWriteResult{UpsertedCount: 2, MatchedCount: 0}, nil
 		},
-		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
-			syncLog, ok := document.(model.SyncLog)
-			if !ok {
-				t.Errorf("Expected SyncLog document, got %T", document)
-			}
-			if syncLog.CollectionName != storage.ChaseTransactionsCollection {
-				t.Errorf("Expected CollectionName %s, got %s", storage.ChaseTransactionsCollection, syncLog.CollectionName)
-			}
-			if syncLog.LegacyRecordsUploaded != int64(len(transactions)) {
-				t.Errorf("Expected RecordsUploaded %d, got %d", len(transactions), syncLog.LegacyRecordsUploaded)
-			}
-			return &mongo.InsertOneResult{}, nil
-		},
 	}
 
 	provider := &mockCollectionProvider{
 		collectionFunc: func(name string) storage.DataStore {
-			if name != storage.ChaseTransactionsCollection && name != "dataSync" {
+			if name != storage.ChaseTransactionsCollection {
 				t.Errorf("Unexpected collection name %s", name)
 			}
 			return mockDS
@@ -984,36 +872,6 @@ func TestBulkUpsertChaseTransactions_BulkWriteError(t *testing.T) {
 	}
 	if stats.UpsertedCount != 2 || stats.MatchedCount != 1 {
 		t.Errorf("expected partial stats (upserted: 2, matched: 1), got %+v", stats)
-	}
-}
-
-func TestBulkUpsertChaseTransactions_SyncLogError(t *testing.T) {
-	ctx := context.Background()
-	expectedErr := errors.New("simulated sync log insert failure")
-
-	mockDS := &mockDataStore{
-		indexesFunc: func() storage.IndexView {
-			return &mockIndexView{}
-		},
-		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
-			return &mongo.BulkWriteResult{UpsertedCount: 1}, nil
-		},
-		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
-			return nil, expectedErr
-		},
-	}
-
-	provider := &mockCollectionProvider{
-		collectionFunc: func(name string) storage.DataStore {
-			return mockDS
-		},
-	}
-
-	repo := storage.NewMongoRepository(provider)
-	transactions := []model.ChaseTransaction{{AccountID: "TEST", Description: "DESC"}}
-	_, err := repo.BulkUpsertChaseTransactions(ctx, transactions)
-	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
-		t.Errorf("expected sync log error containing %q, got: %v", expectedErr.Error(), err)
 	}
 }
 

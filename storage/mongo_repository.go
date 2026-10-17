@@ -83,22 +83,6 @@ func (r *MongoRepository) BulkUpsertTransactions(
 		)
 	}
 
-	// Update sync log
-	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.NewSuccessSyncLog(
-		"",
-		"",
-		collectionName,
-		int64(len(transactions)),
-		int64(len(transactions)),
-		0,
-		time.Now(),
-		0,
-	)
-	if _, err = syncCollection.InsertOne(ctx, syncLog); err != nil {
-		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
-	}
-
 	return toUpsertStats(res), nil
 }
 
@@ -155,22 +139,6 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 			FidelityPositionsCollection,
 			err,
 		)
-	}
-
-	// Update sync log audit trail
-	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.NewSuccessSyncLog(
-		"",
-		"",
-		FidelityPositionsCollection,
-		int64(len(positions)),
-		int64(len(positions)),
-		0,
-		time.Now(),
-		0,
-	)
-	if _, err = syncCollection.InsertOne(ctx, syncLog); err != nil {
-		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
 	return toUpsertStats(res), nil
@@ -237,16 +205,7 @@ func (r *MongoRepository) BulkUpsertChaseTransactions(
 
 	models := buildChaseWriteModels(transactions)
 	res, err := r.executeBulkWrite(ctx, ChaseTransactionsCollection, models)
-	stats := toUpsertStats(res)
-	if err != nil {
-		return stats, err
-	}
-
-	if auditErr := r.recordSyncAuditLog(ctx, ChaseTransactionsCollection, int64(len(transactions))); auditErr != nil {
-		return stats, auditErr
-	}
-
-	return stats, nil
+	return toUpsertStats(res), err
 }
 
 func buildChaseWriteModels(transactions []model.ChaseTransaction) []mongo.WriteModel {
@@ -350,19 +309,6 @@ func (r *MongoRepository) RecordSyncLog(ctx context.Context, log model.SyncLog) 
 		return fmt.Errorf("failed to insert audit log into %s: %w", syncTableName, err)
 	}
 
-	return nil
-}
-
-func (r *MongoRepository) recordSyncAuditLog(
-	ctx context.Context,
-	collectionName string,
-	recordCount int64,
-) error {
-	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.NewSuccessSyncLog("", "", collectionName, recordCount, recordCount, 0, time.Now(), 0)
-	if _, err := syncCollection.InsertOne(ctx, syncLog); err != nil {
-		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
-	}
 	return nil
 }
 

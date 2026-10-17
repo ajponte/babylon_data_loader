@@ -27,7 +27,10 @@ var (
 )
 
 const (
-	msgUpsertingToDB = "Upserting to database"
+	TransactionsCollection      = "transactions"
+	ChaseTransactionsCollection = "transactions_chase"
+	FidelityPositionsCollection = "positions_fidelity"
+	msgUpsertingToDB            = "Upserting to database"
 )
 
 func ValidFileNotFoundError(filePath string) error {
@@ -78,174 +81,232 @@ func NewCSVFileProcessor(
 	}
 }
 
-// Ingest a CSV file into the datalake.
-
+// Ingest a CSV file into the datalake with start-to-finish lifecycle timing and audit logging.
 func (p *CSVFileProcessor) ingestCSVFile(
 	ctx context.Context,
-
 	file os.DirEntry,
 ) error {
+	startTime := time.Now().UTC()
+	fileName := file.Name()
+
 	if !validateCSVFile(file) {
 		reason := "Not a valid CSV file"
-		p.Stats.AddFailure(file.Name(), reason)
-		p.Logger.WarnContext(ctx, "file was not processed", "fileName", file.Name(), "reason", reason)
+		p.Stats.AddFailure(fileName, reason)
+		p.Logger.WarnContext(ctx, "file was not processed", "fileName", fileName, "reason", reason)
 
-		return fmt.Errorf("file %s is not a valid CSV file", file.Name())
+		durationMs := time.Since(startTime).Milliseconds()
+		failLog := model.NewFailedSyncLog(fileName, "", "", reason, 0, startTime, durationMs)
+		_ = p.Repo.RecordSyncLog(ctx, failLog)
 
+		return fmt.Errorf("file %s is not a valid CSV file", fileName)
 	}
 
-	// Process the file.
-	err := p.processFile(
-		ctx,
-		file)
+	err := p.processFileWithAudit(ctx, file, startTime)
 	if err != nil {
-		p.Stats.AddFailure(file.Name(), err.Error())
-		p.Logger.ErrorContext(ctx, "failed to process file", "file", file.Name(), "error", err)
-
-		return fmt.Errorf("failed to process file %s: %w", file.Name(), err)
-
+		p.Stats.AddFailure(fileName, err.Error())
+		p.Logger.ErrorContext(ctx, "failed to process file", "file", fileName, "error", err)
+		return fmt.Errorf("failed to process file %s: %w", fileName, err)
 	}
 
 	p.Stats.IncrementProcessed()
-
 	return nil
 }
 
-// Process the file in the directory.
-// This function will:
-//   - Parse the unprocessedFile csv in unprocessedDir row by row.
-//   - Map each row to mongo datalake models.
-//   - Upsert the models to appropriate collections.
-//   - Move the file to the unprocessedDir, only if the moveProcessedFiles
-//     flag is enabled.
+// processFile processes a CSV file, delegating to processFileWithAudit with the current timestamp.
 func (p *CSVFileProcessor) processFile(
 	ctx context.Context,
 	unprocessedFile os.DirEntry,
 ) error {
-	sourceInfo, err := p.Extractor.ExtractInfo(unprocessedFile.Name())
+	return p.processFileWithAudit(ctx, unprocessedFile, time.Now().UTC())
+}
+
+// processFileWithAudit coordinates the end-to-end ingestion lifecycle for a file:
+// source info extraction, CSV parsing, routing/transformation, repository upsert, and audit logging.
+func (p *CSVFileProcessor) processFileWithAudit(
+	ctx context.Context,
+	unprocessedFile os.DirEntry,
+	startTime time.Time,
+) error {
+	fileName := unprocessedFile.Name()
+	unprocessedFilePath := sanitizeFilePath(unprocessedFile, p.UnprocessedDir)
+
+	// 1. Source Info Extraction
+	sourceInfo, err := p.Extractor.ExtractInfo(fileName)
 	if err != nil {
+		durationMs := time.Since(startTime).Milliseconds()
+		_ = p.Repo.RecordSyncLog(ctx, model.NewFailedSyncLog(
+			fileName,
+			"",
+			"",
+			err.Error(),
+			0,
+			startTime,
+			durationMs,
+		))
 		return fmt.Errorf("failed to extract source info: %w", err)
 	}
 
-	unprocessedFilePath := sanitizeFilePath(unprocessedFile, p.UnprocessedDir)
-
-	// Parse raw records.
+	// 2. CSV Parsing
 	rawRecords, _, err := p.Parser.Parse(ctx, unprocessedFilePath, sourceInfo.DataSource, sourceInfo.AccountID)
 	if err != nil {
+		durationMs := time.Since(startTime).Milliseconds()
+		_ = p.Repo.RecordSyncLog(ctx, model.NewFailedSyncLog(
+			fileName,
+			"",
+			sourceInfo.DataSource,
+			err.Error(),
+			0,
+			startTime,
+			durationMs,
+		))
 		return err
 	}
 
-	if err = p.routeAndUpsertRecords(
+	// 3. Routing, Transformation & Storage
+	upsertStats, collectionName, fileHash, err := p.routeAndUpsertRecordsWithStats(
 		ctx,
 		sourceInfo,
 		unprocessedFilePath,
-		unprocessedFile.Name(),
+		fileName,
 		rawRecords,
-	); err != nil {
+	)
+	if err != nil {
+		durationMs := time.Since(startTime).Milliseconds()
+		_ = p.Repo.RecordSyncLog(ctx, model.NewFailedSyncLog(
+			fileName,
+			fileHash,
+			collectionName,
+			err.Error(),
+			int64(len(rawRecords)),
+			startTime,
+			durationMs,
+		))
 		return err
 	}
 
-	// Move the file, only if moveProcessedFiles is enabled.
+	// 4. Record Successful Audit Log
+	durationMs := time.Since(startTime).Milliseconds()
+	successLog := model.NewSuccessSyncLog(
+		fileName,
+		fileHash,
+		collectionName,
+		int64(len(rawRecords)),
+		upsertStats.UpsertedCount,
+		upsertStats.MatchedCount,
+		startTime,
+		durationMs,
+	)
+	if logErr := p.Repo.RecordSyncLog(ctx, successLog); logErr != nil {
+		p.Logger.WarnContext(ctx, "failed to record success sync log", "fileName", fileName, "error", logErr)
+	}
+
+	// 5. Move Processed File
 	if p.MoveProcessedFiles {
-		err = p.moveFile(ctx, unprocessedFilePath)
-		if err != nil {
-			return fmt.Errorf("failed to move file: %w", err)
+		if moveErr := p.moveFile(ctx, unprocessedFilePath); moveErr != nil {
+			return fmt.Errorf("failed to move file: %w", moveErr)
 		}
 	}
 
 	return nil
 }
 
-func (p *CSVFileProcessor) routeAndUpsertRecords(
+// routeAndUpsertRecordsWithStats routes raw records to their dedicated mapper and repository upsert,
+// returning the resulting UpsertStats, collection name, file hash, and any error encountered.
+func (p *CSVFileProcessor) routeAndUpsertRecordsWithStats(
 	ctx context.Context,
 	sourceInfo *datasource.SourceInfo,
 	unprocessedFilePath, fileName string,
 	rawRecords []map[string]string,
-) error {
+) (repository.UpsertStats, string, string, error) {
 	switch datasource.DataSource(sourceInfo.DataSource) {
 	case datasource.Fidelity:
-		return p.processFidelityRecords(ctx, unprocessedFilePath, fileName, rawRecords)
+		mapper, err := NewFidelityMapper(ctx, unprocessedFilePath, fileName, p.S3URI)
+		if err != nil {
+			return repository.UpsertStats{}, FidelityPositionsCollection, "", fmt.Errorf(
+				"failed to initialize Fidelity mapper: %w",
+				err,
+			)
+		}
+		positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+		if mapErr != nil {
+			return repository.UpsertStats{}, FidelityPositionsCollection, mapper.FileHash(), fmt.Errorf(
+				"failed to map Fidelity positions: %w",
+				mapErr,
+			)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return repository.UpsertStats{}, FidelityPositionsCollection, mapper.FileHash(), ctxErr
+		}
+		stats, upsertErr := p.Repo.BulkUpsertFidelityPositions(ctx, positions)
+		return stats, FidelityPositionsCollection, mapper.FileHash(), upsertErr
+
 	case datasource.Chase:
-		return p.processChaseRecords(ctx, unprocessedFilePath, fileName, sourceInfo.AccountID, rawRecords)
+		mapper, err := NewChaseMapper(ctx, unprocessedFilePath, fileName, p.S3URI, sourceInfo.AccountID)
+		if err != nil {
+			return repository.UpsertStats{}, ChaseTransactionsCollection, "", fmt.Errorf(
+				"failed to initialize Chase mapper: %w",
+				err,
+			)
+		}
+		transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+		if mapErr != nil {
+			return repository.UpsertStats{}, ChaseTransactionsCollection, mapper.FileHash(), fmt.Errorf(
+				"failed to map Chase transactions: %w",
+				mapErr,
+			)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return repository.UpsertStats{}, ChaseTransactionsCollection, mapper.FileHash(), ctxErr
+		}
+		stats, upsertErr := p.Repo.BulkUpsertChaseTransactions(ctx, transactions)
+		return stats, ChaseTransactionsCollection, mapper.FileHash(), upsertErr
+
 	case datasource.Generic, datasource.Synthetic:
 		fallthrough
 	default:
-		return p.processGenericRecords(ctx, sourceInfo.DataSource, sourceInfo.AccountID, rawRecords)
+		collectionName := fmt.Sprintf("%s_%s", TransactionsCollection, sourceInfo.DataSource)
+		transactions, mapErr := mapGenericTransactions(ctx, rawRecords, sourceInfo.DataSource, sourceInfo.AccountID)
+		if mapErr != nil {
+			return repository.UpsertStats{}, collectionName, "", mapErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return repository.UpsertStats{}, collectionName, "", ctxErr
+		}
+		stats, upsertErr := p.Repo.BulkUpsertTransactions(ctx, transactions)
+		return stats, collectionName, "", upsertErr
 	}
 }
 
-func (p *CSVFileProcessor) processFidelityRecords(
+// upsertSingleFileRecords delegates record mapping and database upserting by data source.
+func (p *CSVFileProcessor) upsertSingleFileRecords(
 	ctx context.Context,
-	filePath, fileName string,
+	fileName, dataSource, accountID, unprocessedFilePath string,
 	rawRecords []map[string]string,
-) error {
-	mapper, mapInitErr := NewFidelityMapper(ctx, filePath, fileName, p.S3URI)
-	if mapInitErr != nil {
-		return fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr)
-	}
-	positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
-	if mapErr != nil {
-		return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if _, err := p.Repo.BulkUpsertFidelityPositions(ctx, positions); err != nil {
-		return fmt.Errorf("failed to bulk upsert Fidelity positions: %w", err)
-	}
-	return nil
-}
+	reporter ProgressReporter,
+) (repository.UpsertStats, string, string, error) {
+	switch datasource.DataSource(dataSource) {
+	case datasource.Fidelity:
+		stats, fileHash, err := p.upsertFidelityPositions(ctx, fileName, rawRecords, unprocessedFilePath, reporter)
+		return stats, FidelityPositionsCollection, fileHash, err
 
-func (p *CSVFileProcessor) processChaseRecords(
-	ctx context.Context,
-	filePath, fileName, accountID string,
-	rawRecords []map[string]string,
-) error {
-	transactions, err := p.mapChaseTransactions(ctx, filePath, fileName, accountID, rawRecords)
-	if err != nil {
-		return err
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if _, upsertErr := p.Repo.BulkUpsertChaseTransactions(ctx, transactions); upsertErr != nil {
-		return fmt.Errorf("failed to bulk upsert Chase transactions: %w", upsertErr)
-	}
-	return nil
-}
+	case datasource.Chase:
+		stats, fileHash, err := p.upsertChaseTransactions(
+			ctx,
+			fileName,
+			rawRecords,
+			unprocessedFilePath,
+			accountID,
+			reporter,
+		)
+		return stats, ChaseTransactionsCollection, fileHash, err
 
-func (p *CSVFileProcessor) mapChaseTransactions(
-	ctx context.Context,
-	filePath, fileName, accountID string,
-	rawRecords []map[string]string,
-) ([]model.ChaseTransaction, error) {
-	mapper, err := NewChaseMapper(ctx, filePath, fileName, p.S3URI, accountID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Chase mapper: %w", err)
+	case datasource.Generic, datasource.Synthetic:
+		fallthrough
+	default:
+		collectionName := fmt.Sprintf("%s_%s", TransactionsCollection, dataSource)
+		stats, err := p.upsertTransactions(ctx, fileName, rawRecords, dataSource, accountID, reporter)
+		return stats, collectionName, "", err
 	}
-	transactions, err := mapper.MapRecordsWithContext(ctx, rawRecords)
-	if err != nil {
-		return nil, fmt.Errorf("failed to map Chase transactions: %w", err)
-	}
-	return transactions, nil
-}
-
-func (p *CSVFileProcessor) processGenericRecords(
-	ctx context.Context,
-	dataSource, accountID string,
-	rawRecords []map[string]string,
-) error {
-	transactions, mapErr := mapGenericTransactions(ctx, rawRecords, dataSource, accountID)
-	if mapErr != nil {
-		return mapErr
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if _, err := p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
-		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
-	}
-	return nil
 }
 
 // processSingleFile processes a single file with explicit dataSource, accountID, and progress updates.
@@ -256,6 +317,7 @@ func (p *CSVFileProcessor) processSingleFile(
 	accountID string,
 	reporter ProgressReporter,
 ) error {
+	startTime := time.Now().UTC()
 	unprocessedFilePath := filepath.Join(p.UnprocessedDir, fileName)
 
 	p.reportProgress(reporter, ProgressEvent{
@@ -265,7 +327,18 @@ func (p *CSVFileProcessor) processSingleFile(
 	})
 
 	if !strings.HasSuffix(strings.ToLower(fileName), ".csv") {
-		return p.handleFailure(fileName, fmt.Errorf("file %s is not a valid CSV file", fileName), reporter)
+		durationMs := time.Since(startTime).Milliseconds()
+		valErr := fmt.Errorf("file %s is not a valid CSV file", fileName)
+		_ = p.Repo.RecordSyncLog(ctx, model.NewFailedSyncLog(
+			fileName,
+			"",
+			"",
+			valErr.Error(),
+			0,
+			startTime,
+			durationMs,
+		))
+		return p.handleFailure(fileName, valErr, reporter)
 	}
 
 	p.reportProgress(reporter, ProgressEvent{
@@ -274,50 +347,42 @@ func (p *CSVFileProcessor) processSingleFile(
 		Message:  "Parsing CSV rows",
 	})
 
-	rawRecords, _, err := p.parseCSVFile(
-		ctx,
-		unprocessedFilePath,
-		fileName,
-		dataSource,
-		accountID,
-		reporter,
-	)
+	rawRecords, _, err := p.parseCSVFile(ctx, unprocessedFilePath, fileName, dataSource, accountID, reporter)
 	if err != nil {
+		durationMs := time.Since(startTime).Milliseconds()
+		_ = p.Repo.RecordSyncLog(ctx, model.NewFailedSyncLog(
+			fileName,
+			"",
+			dataSource,
+			err.Error(),
+			0,
+			startTime,
+			durationMs,
+		))
 		return p.handleFailure(fileName, err, reporter)
 	}
 
-	var upsertStats repository.UpsertStats
-
-	switch datasource.DataSource(dataSource) {
-	case datasource.Fidelity:
-		stats, upsertErr := p.upsertFidelityPositions(ctx, fileName, rawRecords, unprocessedFilePath, reporter)
-		if upsertErr != nil {
-			return upsertErr
-		}
-		upsertStats = stats
-
-	case datasource.Chase:
-		stats, upsertErr := p.upsertChaseTransactions(
-			ctx,
+	upsertStats, collectionName, fileHash, upsertErr := p.upsertSingleFileRecords(
+		ctx,
+		fileName,
+		dataSource,
+		accountID,
+		unprocessedFilePath,
+		rawRecords,
+		reporter,
+	)
+	if upsertErr != nil {
+		durationMs := time.Since(startTime).Milliseconds()
+		_ = p.Repo.RecordSyncLog(ctx, model.NewFailedSyncLog(
 			fileName,
-			rawRecords,
-			unprocessedFilePath,
-			accountID,
-			reporter,
-		)
-		if upsertErr != nil {
-			return upsertErr
-		}
-		upsertStats = stats
-
-	case datasource.Generic, datasource.Synthetic:
-		fallthrough
-	default:
-		stats, upsertErr := p.upsertTransactions(ctx, fileName, rawRecords, dataSource, accountID, reporter)
-		if upsertErr != nil {
-			return upsertErr
-		}
-		upsertStats = stats
+			fileHash,
+			collectionName,
+			upsertErr.Error(),
+			int64(len(rawRecords)),
+			startTime,
+			durationMs,
+		))
+		return upsertErr
 	}
 
 	p.reportProgress(reporter, ProgressEvent{
@@ -327,14 +392,50 @@ func (p *CSVFileProcessor) processSingleFile(
 		DuplicateCount: upsertStats.MatchedCount,
 	})
 
+	return p.finalizeSingleFileSuccess(
+		ctx,
+		fileName,
+		fileHash,
+		collectionName,
+		unprocessedFilePath,
+		rawRecords,
+		upsertStats,
+		startTime,
+		reporter,
+	)
+}
+
+// finalizeSingleFileSuccess handles success logging, file archival, and final progress reporting.
+func (p *CSVFileProcessor) finalizeSingleFileSuccess(
+	ctx context.Context,
+	fileName, fileHash, collectionName, unprocessedFilePath string,
+	rawRecords []map[string]string,
+	upsertStats repository.UpsertStats,
+	startTime time.Time,
+	reporter ProgressReporter,
+) error {
+	durationMs := time.Since(startTime).Milliseconds()
+	successLog := model.NewSuccessSyncLog(
+		fileName,
+		fileHash,
+		collectionName,
+		int64(len(rawRecords)),
+		upsertStats.UpsertedCount,
+		upsertStats.MatchedCount,
+		startTime,
+		durationMs,
+	)
+	if logErr := p.Repo.RecordSyncLog(ctx, successLog); logErr != nil {
+		p.Logger.WarnContext(ctx, "failed to record success sync log", "fileName", fileName, "error", logErr)
+	}
+
 	if p.MoveProcessedFiles {
 		p.reportProgress(reporter, ProgressEvent{
 			Phase:    PhaseMoving,
 			FileName: fileName,
 			Message:  "Moving processed file",
 		})
-		err = p.moveFile(ctx, unprocessedFilePath)
-		if err != nil {
+		if err := p.moveFile(ctx, unprocessedFilePath); err != nil {
 			return p.handleFailure(fileName, fmt.Errorf("failed to move file: %w", err), reporter)
 		}
 	}
@@ -357,7 +458,7 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	rawRecords []map[string]string,
 	unprocessedFilePath string,
 	reporter ProgressReporter,
-) (repository.UpsertStats, error) {
+) (repository.UpsertStats, string, error) {
 	mapper, mapInitErr := NewFidelityMapper(
 		ctx,
 		unprocessedFilePath,
@@ -365,7 +466,7 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 		p.S3URI,
 	)
 	if mapInitErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(
+		return repository.UpsertStats{}, "", p.handleFailure(
 			fileName,
 			fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr),
 			reporter,
@@ -374,7 +475,7 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 
 	positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
 	if mapErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(
+		return repository.UpsertStats{}, mapper.FileHash(), p.handleFailure(
 			fileName,
 			fmt.Errorf("failed to map Fidelity positions: %w", mapErr),
 			reporter,
@@ -382,7 +483,7 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
+		return repository.UpsertStats{}, mapper.FileHash(), p.handleFailure(fileName, ctxErr, reporter)
 	}
 
 	p.reportProgress(reporter, ProgressEvent{
@@ -394,14 +495,14 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 
 	stats, upsertErr := p.Repo.BulkUpsertFidelityPositions(ctx, positions)
 	if upsertErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(
+		return repository.UpsertStats{}, mapper.FileHash(), p.handleFailure(
 			fileName,
 			fmt.Errorf("failed to bulk upsert Fidelity positions: %w", upsertErr),
 			reporter,
 		)
 	}
 
-	return stats, nil
+	return stats, mapper.FileHash(), nil
 }
 
 func (p *CSVFileProcessor) upsertChaseTransactions(
@@ -411,17 +512,35 @@ func (p *CSVFileProcessor) upsertChaseTransactions(
 	unprocessedFilePath string,
 	accountID string,
 	reporter ProgressReporter,
-) (repository.UpsertStats, error) {
-	transactions, err := p.mapChaseTransactions(ctx, unprocessedFilePath, fileName, accountID, rawRecords)
+) (repository.UpsertStats, string, error) {
+	mapper, err := NewChaseMapper(ctx, unprocessedFilePath, fileName, p.S3URI, accountID)
 	if err != nil {
-		return repository.UpsertStats{}, p.handleFailure(fileName, err, reporter)
+		return repository.UpsertStats{}, "", p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to initialize Chase mapper: %w", err),
+			reporter,
+		)
+	}
+
+	transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if mapErr != nil {
+		return repository.UpsertStats{}, mapper.FileHash(), p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to map Chase transactions: %w", mapErr),
+			reporter,
+		)
 	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
+		return repository.UpsertStats{}, mapper.FileHash(), p.handleFailure(fileName, ctxErr, reporter)
 	}
 
-	return p.executeChaseUpsert(ctx, fileName, transactions, reporter)
+	stats, upsertErr := p.executeChaseUpsert(ctx, fileName, transactions, reporter)
+	if upsertErr != nil {
+		return stats, mapper.FileHash(), upsertErr
+	}
+
+	return stats, mapper.FileHash(), nil
 }
 
 func (p *CSVFileProcessor) executeChaseUpsert(
