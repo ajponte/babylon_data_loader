@@ -855,3 +855,146 @@ func TestNewFidelityMapper_LargeFileHeaderFallback(t *testing.T) {
 		t.Errorf("expected AsOfDate %v, got %v", parsedDate.UTC(), mapper.AsOfDate())
 	}
 }
+
+// TC-FM-19: Unit createSourceLineage (Zero disk I/O): Asserts lineage field mapping and nil receiver handling.
+func TestFidelityMapper_CreateSourceLineage(t *testing.T) {
+	asOfDate := time.Date(2026, time.September, 25, 21, 50, 0, 0, time.UTC)
+	ingestedAt := time.Date(2026, time.September, 26, 0, 0, 0, 0, time.UTC)
+	s3URI := "s3://bucket/test.csv"
+	fileName := "test.csv"
+	fileHash := "sha256hash"
+
+	mapper := NewFidelityMapperWithMetadata(fileName, s3URI, fileHash, asOfDate, ingestedAt)
+
+	t.Run("valid mapper populates all lineage coordinates", func(t *testing.T) {
+		lineage := mapper.createSourceLineage(42)
+		if lineage.S3URI != s3URI {
+			t.Errorf("expected S3URI %s, got %s", s3URI, lineage.S3URI)
+		}
+		if lineage.FileName != fileName {
+			t.Errorf("expected FileName %s, got %s", fileName, lineage.FileName)
+		}
+		if lineage.RowNumber != 42 {
+			t.Errorf("expected RowNumber 42, got %d", lineage.RowNumber)
+		}
+		if !lineage.IngestedAt.Equal(ingestedAt) {
+			t.Errorf("expected IngestedAt %v, got %v", ingestedAt, lineage.IngestedAt)
+		}
+		if lineage.SHA256 != fileHash {
+			t.Errorf("expected SHA256 %s, got %s", fileHash, lineage.SHA256)
+		}
+	})
+
+	t.Run("nil mapper receiver returns safe fallback lineage", func(t *testing.T) {
+		var nilMapper *FidelityMapper
+		lineage := nilMapper.createSourceLineage(99)
+		if lineage.RowNumber != 99 {
+			t.Errorf("expected RowNumber 99, got %d", lineage.RowNumber)
+		}
+		if lineage.FileName != "" || lineage.S3URI != "" || lineage.SHA256 != "" {
+			t.Errorf("expected empty string fields for nil mapper, got %+v", lineage)
+		}
+	})
+}
+
+// TC-FM-20: Unit formatMappingError (Zero disk I/O): Asserts row-qualified and row-zero error formatting.
+func TestFidelityMapper_FormatMappingError(t *testing.T) {
+	baseErr := errors.New("synthetic parse failure")
+
+	t.Run("nil error returns nil", func(t *testing.T) {
+		if err := formatMappingError(10, nil); err != nil {
+			t.Errorf("expected nil for nil error, got: %v", err)
+		}
+	})
+
+	t.Run("row number > 0 formats with row qualification", func(t *testing.T) {
+		err := formatMappingError(15, baseErr)
+		if err == nil {
+			t.Fatal("expected formatted error, got nil")
+		}
+		expected := "failed to map raw record to Fidelity position (row 15): synthetic parse failure"
+		if err.Error() != expected {
+			t.Errorf("expected %q, got %q", expected, err.Error())
+		}
+		if !errors.Is(err, baseErr) {
+			t.Errorf("expected errors.Is(err, baseErr), got: %v", err)
+		}
+	})
+
+	t.Run("row number <= 0 formats without row qualification", func(t *testing.T) {
+		err := formatMappingError(0, baseErr)
+		if err == nil {
+			t.Fatal("expected formatted error, got nil")
+		}
+		expected := "failed to map raw record to Fidelity position: synthetic parse failure"
+		if err.Error() != expected {
+			t.Errorf("expected %q, got %q", expected, err.Error())
+		}
+		if !errors.Is(err, baseErr) {
+			t.Errorf("expected errors.Is(err, baseErr), got: %v", err)
+		}
+	})
+}
+
+// TC-FM-21: Unit validatePosition (Zero disk I/O): Asserts position symbol validation logic.
+func TestFidelityMapper_ValidatePosition(t *testing.T) {
+	t.Run("valid position returns nil error", func(t *testing.T) {
+		pos := model.FidelityPosition{Symbol: "FXAIX"}
+		if err := validatePosition(pos, 5); err != nil {
+			t.Errorf("expected nil error for valid symbol, got: %v", err)
+		}
+	})
+
+	t.Run("empty symbol with row > 0 returns row-qualified error", func(t *testing.T) {
+		pos := model.FidelityPosition{Symbol: ""}
+		err := validatePosition(pos, 8)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		expected := "invalid Fidelity position (row 8): symbol is required"
+		if err.Error() != expected {
+			t.Errorf("expected %q, got %q", expected, err.Error())
+		}
+	})
+
+	t.Run("whitespace symbol with row <= 0 returns unqualified error", func(t *testing.T) {
+		pos := model.FidelityPosition{Symbol: "   \t"}
+		err := validatePosition(pos, 0)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		expected := "invalid Fidelity position: symbol is required"
+		if err.Error() != expected {
+			t.Errorf("expected %q, got %q", expected, err.Error())
+		}
+	})
+}
+
+// TC-FM-22: Unit mapRecordBatch (Zero disk I/O): Asserts batch context cancellation.
+func TestFidelityMapper_MapRecordBatch_ContextCancellation(t *testing.T) {
+	mapper := NewFidelityMapperWithMetadata(
+		"test.csv",
+		"s3://bucket/test.csv",
+		"hash123",
+		time.Now().UTC(),
+		time.Now().UTC(),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled before batch execution
+
+	records := []map[string]string{
+		{"symbol": "FXAIX", "quantity": "10"},
+	}
+
+	positions, err := mapper.mapRecordBatch(ctx, records)
+	if err == nil {
+		t.Fatal("expected error on canceled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is(err, context.Canceled), got: %v", err)
+	}
+	if positions != nil {
+		t.Errorf("expected nil positions on canceled context, got: %+v", positions)
+	}
+}

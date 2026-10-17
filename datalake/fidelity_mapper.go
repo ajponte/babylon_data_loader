@@ -157,6 +157,13 @@ func (m *FidelityMapper) MapRecordsWithContext(
 		return []model.FidelityPosition{}, nil
 	}
 
+	return m.mapRecordBatch(ctx, rawRecords)
+}
+
+func (m *FidelityMapper) mapRecordBatch(
+	ctx context.Context,
+	rawRecords []map[string]string,
+) ([]model.FidelityPosition, error) {
 	positions := make([]model.FidelityPosition, 0, len(rawRecords))
 	for _, record := range rawRecords {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -180,41 +187,61 @@ func (m *FidelityMapper) MapRecord(record map[string]string) (model.FidelityPosi
 	}
 
 	rowNumber := parseRowNumber(record)
+	source := m.createSourceLineage(rowNumber)
 
-	source := model.SourceLineage{
+	pos, mapErr := model.MapRawRecordToFidelityPosition(record, m.asOfDate, source)
+	if mapErr != nil {
+		return model.FidelityPosition{}, formatMappingError(rowNumber, mapErr)
+	}
+
+	if err := validatePosition(pos, rowNumber); err != nil {
+		return model.FidelityPosition{}, err
+	}
+
+	return pos, nil
+}
+
+func (m *FidelityMapper) createSourceLineage(rowNumber int64) model.SourceLineage {
+	if m == nil {
+		return model.SourceLineage{RowNumber: rowNumber}
+	}
+	return model.SourceLineage{
 		S3URI:      m.s3URI,
 		FileName:   m.fileName,
 		RowNumber:  rowNumber,
 		IngestedAt: m.ingestedAt,
 		SHA256:     m.fileHash,
 	}
+}
 
-	pos, mapErr := model.MapRawRecordToFidelityPosition(record, m.asOfDate, source)
-	if mapErr != nil {
-		if rowNumber > 0 {
-			return model.FidelityPosition{}, fmt.Errorf(
-				"failed to map raw record to Fidelity position (row %d): %w",
-				rowNumber,
-				mapErr,
-			)
-		}
-		return model.FidelityPosition{}, fmt.Errorf(
-			"failed to map raw record to Fidelity position: %w",
-			mapErr,
+func formatMappingError(rowNumber int64, err error) error {
+	if err == nil {
+		return nil
+	}
+	if rowNumber > 0 {
+		return fmt.Errorf(
+			"failed to map raw record to Fidelity position (row %d): %w",
+			rowNumber,
+			err,
 		)
 	}
+	return fmt.Errorf(
+		"failed to map raw record to Fidelity position: %w",
+		err,
+	)
+}
 
+func validatePosition(pos model.FidelityPosition, rowNumber int64) error {
 	if strings.TrimSpace(pos.Symbol) == "" {
 		if rowNumber > 0 {
-			return model.FidelityPosition{}, fmt.Errorf(
+			return fmt.Errorf(
 				"invalid Fidelity position (row %d): symbol is required",
 				rowNumber,
 			)
 		}
-		return model.FidelityPosition{}, errors.New("invalid Fidelity position: symbol is required")
+		return errors.New("invalid Fidelity position: symbol is required")
 	}
-
-	return pos, nil
+	return nil
 }
 
 // parseRowNumber parses the 1-indexed row number injected by the streaming parser.
