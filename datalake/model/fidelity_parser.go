@@ -5,6 +5,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // Embed timezone database to support time.LoadLocation across all environments.
+)
+
+const (
+	edtOffsetSeconds = -4 * 3600 // Eastern Daylight Time UTC offset in seconds
 )
 
 // ParseFidelityCurrency converts "$3250.00", "+$35.26", "-$12.40", "$0.00", "--", or "" to float64.
@@ -16,6 +21,7 @@ func ParseFidelityCurrency(val string) (float64, error) {
 	clean := strings.ReplaceAll(trimmed, "$", "")
 	clean = strings.ReplaceAll(clean, ",", "")
 	clean = strings.ReplaceAll(clean, "+", "")
+	clean = strings.ReplaceAll(clean, " ", "")
 	f, err := strconv.ParseFloat(clean, 64)
 	if err != nil {
 		return 0.0, fmt.Errorf("invalid currency value '%s': %w", val, err)
@@ -30,7 +36,9 @@ func ParseFidelityPercentage(val string) (float64, error) {
 		return 0.0, nil
 	}
 	clean := strings.ReplaceAll(trimmed, "%", "")
+	clean = strings.ReplaceAll(clean, ",", "")
 	clean = strings.ReplaceAll(clean, "+", "")
+	clean = strings.ReplaceAll(clean, " ", "")
 	f, err := strconv.ParseFloat(clean, 64)
 	if err != nil {
 		return 0.0, fmt.Errorf("invalid percentage value '%s': %w", val, err)
@@ -45,6 +53,7 @@ func ParseFidelityQuantity(val string) (float64, error) {
 		return 0.0, nil
 	}
 	clean := strings.ReplaceAll(trimmed, ",", "")
+	clean = strings.ReplaceAll(clean, " ", "")
 	f, err := strconv.ParseFloat(clean, 64)
 	if err != nil {
 		return 0.0, fmt.Errorf("invalid quantity value '%s': %w", val, err)
@@ -65,9 +74,20 @@ func ParseFidelityDateDownloaded(line string) (time.Time, error) {
 	dateStr = strings.ReplaceAll(dateStr, "a.m.", "AM")
 	dateStr = strings.ReplaceAll(dateStr, "p.m", "PM")
 	dateStr = strings.ReplaceAll(dateStr, "a.m", "AM")
-	dateStr = strings.TrimSpace(strings.TrimSuffix(dateStr, "ET"))
 
-	parsed, err := time.Parse("Jan-02-2006 3:04 PM", dateStr)
+	isET := strings.HasSuffix(strings.TrimSpace(dateStr), "ET")
+	dateStr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(dateStr), "ET"))
+
+	loc := time.UTC
+	if isET {
+		var locErr error
+		loc, locErr = time.LoadLocation("America/New_York")
+		if locErr != nil {
+			loc = time.FixedZone("EDT", edtOffsetSeconds)
+		}
+	}
+
+	parsed, err := time.ParseInLocation("Jan-02-2006 3:04 PM", dateStr, loc)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to parse date '%s': %w", dateStr, err)
 	}

@@ -55,12 +55,16 @@ func (p *DefaultParser) ParseStream(
 	_ string,
 	onProgress RowProgressCallback,
 ) ([]map[string]string, int64, error) {
-	totalRecords, err := countRecords(filePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file or directory") {
-			return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)
+	var totalRecords int64
+	if onProgress != nil {
+		var err error
+		totalRecords, err = countRecords(ctx, filePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file or directory") {
+				return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)
+			}
+			return nil, 0, fmt.Errorf("failed to count CSV records from file %s: %w", filePath, err)
 		}
-		return nil, 0, fmt.Errorf("failed to count CSV records from file %s: %w", filePath, err)
 	}
 
 	file, err := os.Open(filePath)
@@ -156,7 +160,7 @@ func createHeaderIndex(reader *csv.Reader) (map[string]int, int, error) {
 	return colIndex, len(header), nil
 }
 
-func countRecords(filePath string) (int64, error) {
+func countRecords(ctx context.Context, filePath string) (int64, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, err
@@ -177,6 +181,10 @@ func countRecords(filePath string) (int64, error) {
 
 	var count int64
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
+
 		record, readErr := reader.Read()
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {

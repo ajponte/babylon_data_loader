@@ -19,6 +19,8 @@ func TestParseFidelityCurrency(t *testing.T) {
 		{name: "negative currency", input: "-$12.40", expected: -12.40},
 		{name: "zero currency", input: "$0.00", expected: 0.0},
 		{name: "with thousands comma", input: "$1,234,567.89", expected: 1234567.89},
+		{name: "currency with space", input: "$ 123.45", expected: 123.45},
+		{name: "negative currency with space", input: "-$ 45.67", expected: -45.67},
 		{name: "placeholder dash", input: "--", expected: 0.0},
 		{name: "empty string", input: "", expected: 0.0},
 		{name: "not applicable", input: "N/A", expected: 0.0},
@@ -54,6 +56,8 @@ func TestParseFidelityPercentage(t *testing.T) {
 		{name: "standard percentage", input: "29.13%", expected: 29.13},
 		{name: "positive percentage", input: "+0.60%", expected: 0.60},
 		{name: "negative percentage", input: "-3.50%", expected: -3.50},
+		{name: "percentage with thousands comma", input: "+1,250.00%", expected: 1250.00},
+		{name: "percentage with space", input: "+ 25.50%", expected: 25.50},
 		{name: "zero percentage", input: "0.00%", expected: 0.0},
 		{name: "placeholder dash", input: "--", expected: 0.0},
 		{name: "empty string", input: "", expected: 0.0},
@@ -89,6 +93,7 @@ func TestParseFidelityQuantity(t *testing.T) {
 		{name: "fractional shares", input: "167.946", expected: 167.946},
 		{name: "thousands quantity", input: "4,968.08", expected: 4968.08},
 		{name: "whole number", input: "10", expected: 10.0},
+		{name: "quantity with space", input: " 100.50 ", expected: 100.50},
 		{name: "placeholder dash", input: "--", expected: 0.0},
 		{name: "empty string", input: "", expected: 0.0},
 		{name: "invalid string", input: "bad", wantErr: true},
@@ -114,6 +119,7 @@ func TestParseFidelityQuantity(t *testing.T) {
 }
 
 func TestParseFidelityDateDownloaded(t *testing.T) {
+	nyLoc, _ := time.LoadLocation("America/New_York")
 	tests := []struct {
 		name     string
 		input    string
@@ -123,12 +129,12 @@ func TestParseFidelityDateDownloaded(t *testing.T) {
 		{
 			name:     "valid pm format",
 			input:    `"Date downloaded Sep-25-2026 9:50 p.m ET"`,
-			expected: time.Date(2026, time.September, 25, 21, 50, 0, 0, time.UTC),
+			expected: time.Date(2026, time.September, 25, 21, 50, 0, 0, nyLoc),
 		},
 		{
 			name:     "valid am format",
 			input:    `Date downloaded Jan-15-2026 10:15 a.m ET`,
-			expected: time.Date(2026, time.January, 15, 10, 15, 0, 0, time.UTC),
+			expected: time.Date(2026, time.January, 15, 10, 15, 0, 0, nyLoc),
 		},
 		{
 			name:    "missing prefix",

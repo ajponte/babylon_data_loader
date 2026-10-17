@@ -29,6 +29,10 @@ func TestGenericExtractor_ExtractInfo_Success(t *testing.T) {
 		{"fidelity_positions_2026.csv", datasource.Fidelity, "portfolio"},
 		{"PORTFOLIO_POSITIONS_export.CSV", datasource.Fidelity, "portfolio"},
 		{"Portfolio_Positions_Synthetic.csv", datasource.Fidelity, "portfolio"},
+		{"unprocessed/Portfolio_Positions_Sep-25-2026.csv", datasource.Fidelity, "portfolio"},
+		{"/tmp/uploads/portfolio_positions.csv", datasource.Fidelity, "portfolio"},
+		{"unprocessed/chase9876_statement.csv", datasource.Chase, "9876"},
+		{"/var/data/synthetic_records.csv", datasource.Synthetic, "0000"},
 	}
 
 	for _, test := range tests {

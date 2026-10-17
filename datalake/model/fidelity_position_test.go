@@ -13,6 +13,7 @@ import (
 func TestMapRawRecordToFidelityPosition_SyntheticFixture(t *testing.T) {
 	ctx := context.Background()
 	parser := csvparser.NewDefaultParser()
+	// todo: We should not to need to rely on a physical `testdata` directory for unit tests. Instead we should auto-generate mocked data.
 	fixturePath := filepath.Join("..", "..", "testdata", "fidelity", "Portfolio_Positions_Synthetic.csv")
 
 	docs, count, err := parser.Parse(ctx, fixturePath, "fidelity", "portfolio")
