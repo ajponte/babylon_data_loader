@@ -27,6 +27,13 @@ This project contains a comprehensive agent documentation harness under the [doc
 - **Run data ingestion**: `make run` or `make run-ingest`
 - **Generate synthetic CSV data**: `make run-generate` (creates synthetic transaction CSVs in `tmp/`)
 - **Generate and persist synthetic data to Mongo**: `make run-generate-mongo`
+- **Upload CSV to S3 Datalake**: `../tools/upload-csv-s3.sh <path/to/file.csv>` (triggers automated Lambda ingestion)
+- **Simulate S3 Upload (Dry-Run)**: `../tools/upload-csv-s3.sh --dry-run <path/to/file.csv>`
+
+### AWS CloudWatch Logs
+- **View recent Lambda logs**: `make logs-lambda` (displays last 15m of logs)
+- **Live stream Lambda logs**: `make logs-lambda-tail` (follow mode)
+- **Filter Lambda errors**: `make logs-lambda-errors` (filters ERROR messages from the last 1h)
 
 ### Test and Quality
 - **All Quality Checks (Lint, Format, Vet)**: `make check-quality`
