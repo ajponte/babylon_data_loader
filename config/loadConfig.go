@@ -145,9 +145,7 @@ func formatMongoURI(
 		return mongoURI
 	}
 
-	mongoHost := os.Getenv(envMongoHost)
-
-	mongoHost = determineMongoHost(ctx)
+	mongoHost := determineMongoHost(ctx)
 
 	mongoUser := os.Getenv(envMongoUser)
 	mongoPassword := os.Getenv(envMongoPassword)

@@ -22,7 +22,7 @@ import (
 
 var (
 	errTargetFileNotFound = errors.New("the valid directory target was not found")
-	errCreateDirectory    = errors.New("the valid directory target was not found")
+	errCreateDirectory    = errors.New("failed to create directory")
 	errMoveFile           = errors.New("failed to move file")
 )
 
@@ -144,9 +144,12 @@ func (p *CSVFileProcessor) processFile(
 		if mapInitErr != nil {
 			return fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr)
 		}
-		positions, mapErr := mapper.MapRecords(rawRecords)
+		positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
 		if mapErr != nil {
 			return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		if _, err = p.Repo.BulkUpsertFidelityPositions(ctx, positions); err != nil {
 			return fmt.Errorf("failed to bulk upsert Fidelity positions: %w", err)
@@ -158,6 +161,9 @@ func (p *CSVFileProcessor) processFile(
 		transactions, mapErr := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
 		if mapErr != nil {
 			return mapErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 
 		// Upsert documents to datalake collection.
@@ -203,7 +209,7 @@ func (p *CSVFileProcessor) processSingleFile(
 		Message:  "Parsing CSV rows",
 	})
 
-	rawRecords, totalRecords, err := p.parseCSVFile(
+	rawRecords, _, err := p.parseCSVFile(
 		ctx,
 		unprocessedFilePath,
 		fileName,
@@ -214,13 +220,6 @@ func (p *CSVFileProcessor) processSingleFile(
 	if err != nil {
 		return p.handleFailure(fileName, err, reporter)
 	}
-
-	p.reportProgress(reporter, ProgressEvent{
-		Phase:        PhaseUpserting,
-		FileName:     fileName,
-		Message:      "Upserting to database",
-		TotalRecords: totalRecords,
-	})
 
 	var upsertStats repository.UpsertStats
 
@@ -294,7 +293,7 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 		)
 	}
 
-	positions, mapErr := mapper.MapRecords(rawRecords)
+	positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
 	if mapErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(
 			fileName,
@@ -306,6 +305,13 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
 	}
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:        PhaseUpserting,
+		FileName:     fileName,
+		Message:      "Upserting to database",
+		TotalRecords: int64(len(positions)),
+	})
 
 	stats, upsertErr := p.Repo.BulkUpsertFidelityPositions(ctx, positions)
 	if upsertErr != nil {
@@ -335,6 +341,13 @@ func (p *CSVFileProcessor) upsertTransactions(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
 	}
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:        PhaseUpserting,
+		FileName:     fileName,
+		Message:      "Upserting to database",
+		TotalRecords: int64(len(transactions)),
+	})
 
 	stats, upsertErr := p.Repo.BulkUpsertTransactions(ctx, transactions)
 	if upsertErr != nil {
@@ -453,6 +466,10 @@ func fromRecords(
 ) []model.Transaction {
 	var transactions []model.Transaction
 	for _, record := range rawRecords {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return transactions
+		}
+
 		postingDateStr := getPostingDate(record, validPostingDateHeaders)
 		if postingDateStr == "" {
 			logger.WarnContext(ctx, "Skipping record with empty posting date", "record", record)
@@ -580,7 +597,7 @@ func checkProcessedDir(ctx context.Context, processedDir string) error {
 	if _, err = os.Stat(processedDir); os.IsNotExist(err) {
 		if err = os.MkdirAll(processedDir, 0o750); err != nil {
 			logger.DebugContext(ctx, "failed to create processed directory")
-			return ValidFileNotFoundError(processedDir)
+			return fmt.Errorf("%w: %w", CreateDirectoryError(processedDir), err)
 		}
 	}
 	logger.DebugContext(ctx, "Processed Directory already exists.")

@@ -395,16 +395,13 @@ func scanForFidelityDate(ctx context.Context, r io.Reader) (time.Time, bool, err
 			return time.Time{}, false, err
 		}
 
-		line := scanner.Bytes()
-		if !isFidelityDateLine(line) {
-			continue
-		}
-
-		date, err := parseFidelityDate(line)
+		date, found, err := parseDateFromLine(scanner.Bytes())
 		if err != nil {
 			return time.Time{}, false, err
 		}
-		return date, true, nil
+		if found {
+			return date, true, nil
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
