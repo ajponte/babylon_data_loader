@@ -46,6 +46,10 @@ func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []mo
 	return repository.UpsertStats{}, nil
 }
 
+func (m *mockRepo) BulkUpsertChaseTransactions(ctx context.Context, transactions []model.ChaseTransaction) (repository.UpsertStats, error) {
+	return repository.UpsertStats{}, nil
+}
+
 func (m *mockRepo) BulkUpsertFidelityPositions(ctx context.Context, positions []model.FidelityPosition) (repository.UpsertStats, error) {
 	return repository.UpsertStats{}, nil
 }

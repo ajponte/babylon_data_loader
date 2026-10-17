@@ -26,6 +26,10 @@ var (
 	errMoveFile           = errors.New("failed to move file")
 )
 
+const (
+	msgUpsertingToDB = "Upserting to database"
+)
+
 func ValidFileNotFoundError(filePath string) error {
 	return fmt.Errorf("%w, %s", errTargetFileNotFound, filePath)
 }
@@ -122,54 +126,23 @@ func (p *CSVFileProcessor) processFile(
 	if err != nil {
 		return fmt.Errorf("failed to extract source info: %w", err)
 	}
-	dataSource := sourceInfo.DataSource
-	accountID := sourceInfo.AccountID
 
 	unprocessedFilePath := sanitizeFilePath(unprocessedFile, p.UnprocessedDir)
 
 	// Parse raw records.
-	rawRecords, _, err := p.Parser.Parse(ctx, unprocessedFilePath, dataSource, accountID)
+	rawRecords, _, err := p.Parser.Parse(ctx, unprocessedFilePath, sourceInfo.DataSource, sourceInfo.AccountID)
 	if err != nil {
 		return err
 	}
 
-	switch datasource.DataSource(sourceInfo.DataSource) {
-	case datasource.Fidelity:
-		mapper, mapInitErr := NewFidelityMapper(
-			ctx,
-			unprocessedFilePath,
-			unprocessedFile.Name(),
-			p.S3URI,
-		)
-		if mapInitErr != nil {
-			return fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr)
-		}
-		positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
-		if mapErr != nil {
-			return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if _, err = p.Repo.BulkUpsertFidelityPositions(ctx, positions); err != nil {
-			return fmt.Errorf("failed to bulk upsert Fidelity positions: %w", err)
-		}
-	case datasource.Generic, datasource.Chase, datasource.Synthetic:
-		fallthrough
-	default:
-		// Create transaction mappings.
-		transactions, mapErr := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
-		if mapErr != nil {
-			return mapErr
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-
-		// Upsert documents to datalake collection.
-		if _, err = p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
-			return fmt.Errorf("failed to bulk upsert transactions: %w", err)
-		}
+	if err = p.routeAndUpsertRecords(
+		ctx,
+		sourceInfo,
+		unprocessedFilePath,
+		unprocessedFile.Name(),
+		rawRecords,
+	); err != nil {
+		return err
 	}
 
 	// Move the file, only if moveProcessedFiles is enabled.
@@ -180,6 +153,86 @@ func (p *CSVFileProcessor) processFile(
 		}
 	}
 
+	return nil
+}
+
+func (p *CSVFileProcessor) routeAndUpsertRecords(
+	ctx context.Context,
+	sourceInfo *datasource.SourceInfo,
+	unprocessedFilePath, fileName string,
+	rawRecords []map[string]string,
+) error {
+	switch datasource.DataSource(sourceInfo.DataSource) {
+	case datasource.Fidelity:
+		return p.processFidelityRecords(ctx, unprocessedFilePath, fileName, rawRecords)
+	case datasource.Chase:
+		return p.processChaseRecords(ctx, unprocessedFilePath, fileName, sourceInfo.AccountID, rawRecords)
+	case datasource.Generic, datasource.Synthetic:
+		fallthrough
+	default:
+		return p.processGenericRecords(ctx, sourceInfo.DataSource, sourceInfo.AccountID, rawRecords)
+	}
+}
+
+func (p *CSVFileProcessor) processFidelityRecords(
+	ctx context.Context,
+	filePath, fileName string,
+	rawRecords []map[string]string,
+) error {
+	mapper, mapInitErr := NewFidelityMapper(ctx, filePath, fileName, p.S3URI)
+	if mapInitErr != nil {
+		return fmt.Errorf("failed to initialize Fidelity mapper: %w", mapInitErr)
+	}
+	positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if mapErr != nil {
+		return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if _, err := p.Repo.BulkUpsertFidelityPositions(ctx, positions); err != nil {
+		return fmt.Errorf("failed to bulk upsert Fidelity positions: %w", err)
+	}
+	return nil
+}
+
+func (p *CSVFileProcessor) processChaseRecords(
+	ctx context.Context,
+	filePath, fileName, accountID string,
+	rawRecords []map[string]string,
+) error {
+	mapper, mapInitErr := NewChaseMapper(ctx, filePath, fileName, p.S3URI, accountID)
+	if mapInitErr != nil {
+		return fmt.Errorf("failed to initialize Chase mapper: %w", mapInitErr)
+	}
+	transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if mapErr != nil {
+		return fmt.Errorf("failed to map Chase transactions: %w", mapErr)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if _, err := p.Repo.BulkUpsertChaseTransactions(ctx, transactions); err != nil {
+		return fmt.Errorf("failed to bulk upsert Chase transactions: %w", err)
+	}
+	return nil
+}
+
+func (p *CSVFileProcessor) processGenericRecords(
+	ctx context.Context,
+	dataSource, accountID string,
+	rawRecords []map[string]string,
+) error {
+	transactions, mapErr := mapGenericTransactions(ctx, rawRecords, dataSource, accountID)
+	if mapErr != nil {
+		return mapErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if _, err := p.Repo.BulkUpsertTransactions(ctx, transactions); err != nil {
+		return fmt.Errorf("failed to bulk upsert transactions: %w", err)
+	}
 	return nil
 }
 
@@ -231,7 +284,21 @@ func (p *CSVFileProcessor) processSingleFile(
 		}
 		upsertStats = stats
 
-	case datasource.Generic, datasource.Chase, datasource.Synthetic:
+	case datasource.Chase:
+		stats, upsertErr := p.upsertChaseTransactions(
+			ctx,
+			fileName,
+			rawRecords,
+			unprocessedFilePath,
+			accountID,
+			reporter,
+		)
+		if upsertErr != nil {
+			return upsertErr
+		}
+		upsertStats = stats
+
+	case datasource.Generic, datasource.Synthetic:
 		fallthrough
 	default:
 		stats, upsertErr := p.upsertTransactions(ctx, fileName, rawRecords, dataSource, accountID, reporter)
@@ -309,7 +376,7 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	p.reportProgress(reporter, ProgressEvent{
 		Phase:        PhaseUpserting,
 		FileName:     fileName,
-		Message:      "Upserting to database",
+		Message:      msgUpsertingToDB,
 		TotalRecords: int64(len(positions)),
 	})
 
@@ -325,6 +392,61 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	return stats, nil
 }
 
+func (p *CSVFileProcessor) upsertChaseTransactions(
+	ctx context.Context,
+	fileName string,
+	rawRecords []map[string]string,
+	unprocessedFilePath string,
+	accountID string,
+	reporter ProgressReporter,
+) (repository.UpsertStats, error) {
+	mapper, mapInitErr := NewChaseMapper(
+		ctx,
+		unprocessedFilePath,
+		fileName,
+		p.S3URI,
+		accountID,
+	)
+	if mapInitErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to initialize Chase mapper: %w", mapInitErr),
+			reporter,
+		)
+	}
+
+	transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if mapErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to map Chase transactions: %w", mapErr),
+			reporter,
+		)
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
+	}
+
+	p.reportProgress(reporter, ProgressEvent{
+		Phase:        PhaseUpserting,
+		FileName:     fileName,
+		Message:      msgUpsertingToDB,
+		TotalRecords: int64(len(transactions)),
+	})
+
+	stats, upsertErr := p.Repo.BulkUpsertChaseTransactions(ctx, transactions)
+	if upsertErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(
+			fileName,
+			fmt.Errorf("failed to bulk upsert Chase transactions: %w", upsertErr),
+			reporter,
+		)
+	}
+
+	return stats, nil
+}
+
 func (p *CSVFileProcessor) upsertTransactions(
 	ctx context.Context,
 	fileName string,
@@ -333,7 +455,7 @@ func (p *CSVFileProcessor) upsertTransactions(
 	accountID string,
 	reporter ProgressReporter,
 ) (repository.UpsertStats, error) {
-	transactions, mapErr := mapRawRecordsToTransactions(ctx, rawRecords, dataSource, accountID)
+	transactions, mapErr := mapGenericTransactions(ctx, rawRecords, dataSource, accountID)
 	if mapErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(fileName, mapErr, reporter)
 	}
@@ -345,7 +467,7 @@ func (p *CSVFileProcessor) upsertTransactions(
 	p.reportProgress(reporter, ProgressEvent{
 		Phase:        PhaseUpserting,
 		FileName:     fileName,
-		Message:      "Upserting to database",
+		Message:      msgUpsertingToDB,
 		TotalRecords: int64(len(transactions)),
 	})
 
@@ -415,114 +537,102 @@ func sanitizeFilePath(file os.DirEntry, dir string) string {
 	return filePath
 }
 
-func getPostingDate(record map[string]string, validHeaders []string) string {
-	for _, header := range validHeaders {
-		if date, ok := record[header]; ok && date != "" {
-			return date
-		}
-	}
-	return ""
-}
-
-func mapRawRecordsToTransactions(
-	ctx context.Context,
-	rawRecords []map[string]string,
-	dataSource string,
-	accountID string,
-) ([]model.Transaction, error) {
-	logger := bcontext.LoggerFromContext(ctx)
-
-	validPostingDateHeaders := []string{
+func parseGenericPostingDate(record map[string]string) (time.Time, bool, error) {
+	dateHeaders := []string{
 		"Post Date",
 		"Posting Date",
 		"post date",
 		"posting date",
 	}
 
-	transactions := fromRecords(
-		ctx,
-		dataSource,
-		accountID,
-		rawRecords,
-		validPostingDateHeaders,
-		*logger,
-	)
+	for _, header := range dateHeaders {
+		if dateStr, ok := record[header]; ok && dateStr != "" {
+			parsed, err := time.Parse("01/02/2006", dateStr)
+			if err != nil {
+				return time.Time{}, false, fmt.Errorf("invalid date %q: %w", dateStr, err)
+			}
+			return parsed, true, nil
+		}
+	}
+	return time.Time{}, false, nil
+}
+
+func parseGenericBalance(ctx context.Context, record map[string]string, logger *slog.Logger) float64 {
+	balanceStr, ok := record["balance"]
+	if !ok || balanceStr == "" {
+		return 0.0
+	}
+	parsed, err := strconv.ParseFloat(balanceStr, 64)
+	if err != nil {
+		logger.WarnContext(ctx, "Skipping invalid balance format", "balance", balanceStr, "error", err)
+		return 0.0
+	}
+	return parsed
+}
+
+func parseGenericRecord(
+	ctx context.Context,
+	record map[string]string,
+	dataSource, accountID string,
+	logger *slog.Logger,
+) (model.Transaction, bool) {
+	parsedDate, found, err := parseGenericPostingDate(record)
+	if err != nil {
+		logger.WarnContext(ctx, "Skipping record with invalid date format", "error", err)
+		return model.Transaction{}, false
+	}
+	if !found {
+		logger.WarnContext(ctx, "Skipping record with empty posting date", "record", record)
+		return model.Transaction{}, false
+	}
+
+	amountStr := record["amount"]
+	amount, err := strconv.ParseFloat(amountStr, 64)
+	if err != nil {
+		logger.WarnContext(ctx, "Skipping record with invalid amount format", "amount", amountStr, "error", err)
+		return model.Transaction{}, false
+	}
+
+	balance := parseGenericBalance(ctx, record, logger)
+
+	return model.Transaction{
+		Details:        record["details"],
+		PostingDate:    parsedDate.Format("01/02/2006"),
+		Description:    record["description"],
+		Amount:         amount,
+		Category:       record["category"],
+		Type:           record["type"],
+		Balance:        balance,
+		CheckOrSlipNum: record["check or slip #"],
+		DataSource:     dataSource,
+		AccountID:      accountID,
+	}, true
+}
+
+func mapGenericTransactions(
+	ctx context.Context,
+	rawRecords []map[string]string,
+	dataSource string,
+	accountID string,
+) ([]model.Transaction, error) {
+	logger := bcontext.LoggerFromContext(ctx)
+	transactions := make([]model.Transaction, 0, len(rawRecords))
+
+	for _, record := range rawRecords {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
+		if tx, ok := parseGenericRecord(ctx, record, dataSource, accountID, logger); ok {
+			transactions = append(transactions, tx)
+		}
+	}
 
 	if len(rawRecords) > 0 && len(transactions) == 0 {
 		return nil, fmt.Errorf("no valid transactions could be processed from %d raw records", len(rawRecords))
 	}
 
 	return transactions, nil
-}
-
-// Map raw records to transaction DTOs.
-func fromRecords(
-	ctx context.Context,
-	dataSource string,
-	accountID string,
-	rawRecords []map[string]string,
-	validPostingDateHeaders []string,
-	logger slog.Logger,
-) []model.Transaction {
-	var transactions []model.Transaction
-	for _, record := range rawRecords {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return transactions
-		}
-
-		postingDateStr := getPostingDate(record, validPostingDateHeaders)
-		if postingDateStr == "" {
-			logger.WarnContext(ctx, "Skipping record with empty posting date", "record", record)
-			continue
-		}
-
-		parsedDate, parseErr := time.Parse("01/02/2006", postingDateStr)
-		if parseErr != nil {
-			logger.WarnContext(
-				ctx,
-				"Skipping record with invalid date format",
-				"date", postingDateStr,
-				"error", parseErr,
-			)
-			continue
-		}
-
-		amountStr := record["amount"]
-		amount, convErr := strconv.ParseFloat(amountStr, 64)
-		if convErr != nil {
-			logger.WarnContext(ctx, "Skipping record with invalid amount format", "amount", amountStr, "error", convErr)
-			continue
-		}
-
-		balance := 0.0
-		if balanceStr, ok := record["balance"]; ok && balanceStr != "" {
-			parsedBalance, balanceConvErr := strconv.ParseFloat(balanceStr, 64)
-			if balanceConvErr != nil {
-				logger.WarnContext(
-					ctx,
-					"Skipping record with invalid balance format",
-					"balance", balanceStr,
-					"error", balanceConvErr,
-				)
-			} else {
-				balance = parsedBalance
-			}
-		}
-
-		transactions = append(transactions, model.Transaction{
-			Details:        record["details"],
-			PostingDate:    parsedDate.Format("01/02/2006"), // Store as formatted string
-			Description:    record["description"],
-			Amount:         amount,
-			Category:       record["category"],
-			Type:           record["type"],
-			Balance:        balance,
-			CheckOrSlipNum: record["check or slip #"],
-			DataSource:     dataSource,
-			AccountID:      accountID,
-		})
-	}
-	return transactions
 }
 
 // Move the file from processedFilePath to processedDir.

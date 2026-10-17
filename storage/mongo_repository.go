@@ -16,15 +16,24 @@ import (
 
 const (
 	TransactionsCollection      = "transactions"
+	ChaseTransactionsCollection = "transactions_chase"
 	FidelityPositionsCollection = "positions_fidelity"
 	syncTableName               = "dataSync"
+
+	mongoSetOp       = "$set"
+	fieldAccountID   = "accountId"
+	fieldPostingDate = "postingDate"
 )
+
+var _ repository.Repository = (*MongoRepository)(nil)
 
 // MongoRepository implements the datalake.Repository interface for MongoDB.
 type MongoRepository struct {
-	provider  CollectionProvider
-	indexOnce sync.Once
-	indexErr  error
+	provider       CollectionProvider
+	indexOnce      sync.Once
+	indexErr       error
+	chaseIndexOnce sync.Once
+	chaseIndexErr  error
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -56,7 +65,7 @@ func (r *MongoRepository) BulkUpsertTransactions(
 			"dataSource":  doc.DataSource,
 			"accountID":   doc.AccountID,
 		}
-		update := bson.M{"$set": doc}
+		update := bson.M{mongoSetOp: doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 
@@ -132,7 +141,7 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 			"symbol":        doc.Symbol,
 			"asOfDate":      doc.AsOfDate,
 		}
-		update := bson.M{"$set": doc}
+		update := bson.M{mongoSetOp: doc}
 		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
 	}
 
@@ -151,6 +160,94 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 		CollectionName:  FidelityPositionsCollection,
 		SyncTimestamp:   time.Now(),
 		RecordsUploaded: int64(len(positions)),
+	}
+	_, err = syncCollection.InsertOne(ctx, syncLog)
+	if err != nil {
+		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
+	}
+
+	return repository.UpsertStats{
+		UpsertedCount: res.UpsertedCount,
+		MatchedCount:  res.MatchedCount,
+		ModifiedCount: res.ModifiedCount,
+	}, nil
+}
+
+// ensureChaseIndexes ensures the compound indexes exist for Chase transactions.
+func (r *MongoRepository) ensureChaseIndexes(ctx context.Context) error {
+	r.chaseIndexOnce.Do(func() {
+		collection := r.provider.Collection(ChaseTransactionsCollection)
+
+		queryIndex := mongo.IndexModel{
+			Keys: bson.D{
+				{Key: fieldAccountID, Value: 1},
+				{Key: fieldPostingDate, Value: -1},
+			},
+			Options: options.Index().SetName("idx_chase_account_posting_date"),
+		}
+
+		uniqueIndex := mongo.IndexModel{
+			Keys: bson.D{
+				{Key: fieldAccountID, Value: 1},
+				{Key: fieldPostingDate, Value: 1},
+				{Key: "description", Value: 1},
+				{Key: "amount", Value: 1},
+				{Key: "source.rowNumber", Value: 1},
+			},
+			Options: options.Index().SetUnique(true).SetName("idx_chase_account_post_desc_amount_row"),
+		}
+
+		_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{queryIndex, uniqueIndex})
+		if err != nil {
+			r.chaseIndexErr = fmt.Errorf("failed to create indexes on %s: %w", ChaseTransactionsCollection, err)
+		}
+	})
+	return r.chaseIndexErr
+}
+
+// BulkUpsertChaseTransactions bulk upserts Chase transactions into the "transactions_chase" collection.
+func (r *MongoRepository) BulkUpsertChaseTransactions(
+	ctx context.Context,
+	transactions []model.ChaseTransaction,
+) (repository.UpsertStats, error) {
+	if len(transactions) == 0 {
+		return repository.UpsertStats{}, nil
+	}
+
+	if err := r.ensureChaseIndexes(ctx); err != nil {
+		return repository.UpsertStats{}, err
+	}
+
+	collection := r.provider.Collection(ChaseTransactionsCollection)
+
+	var models []mongo.WriteModel
+	for _, doc := range transactions {
+		filter := bson.M{
+			fieldAccountID:     doc.AccountID,
+			fieldPostingDate:   doc.PostingDate,
+			"description":      doc.Description,
+			"amount":           doc.Amount,
+			"source.rowNumber": doc.Source.RowNumber,
+		}
+		update := bson.M{mongoSetOp: doc}
+		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
+	}
+
+	res, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	if err != nil {
+		return repository.UpsertStats{}, fmt.Errorf(
+			"failed to perform bulk write for collection %s: %w",
+			ChaseTransactionsCollection,
+			err,
+		)
+	}
+
+	// Update sync log audit trail
+	syncCollection := r.provider.Collection(syncTableName)
+	syncLog := model.SyncLog{
+		CollectionName:  ChaseTransactionsCollection,
+		SyncTimestamp:   time.Now(),
+		RecordsUploaded: int64(len(transactions)),
 	}
 	_, err = syncCollection.InsertOne(ctx, syncLog)
 	if err != nil {

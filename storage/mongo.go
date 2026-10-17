@@ -24,6 +24,11 @@ type IndexView interface {
 		model mongo.IndexModel,
 		opts ...*options.CreateIndexesOptions,
 	) (string, error)
+	CreateMany(
+		ctx context.Context,
+		models []mongo.IndexModel,
+		opts ...*options.CreateIndexesOptions,
+	) ([]string, error)
 }
 
 // DataStore defines the interface for database operations.
