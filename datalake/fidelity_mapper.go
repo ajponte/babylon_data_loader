@@ -19,6 +19,7 @@ const (
 	fidelityScanInitialBufferSize = 64 * 1024
 	fidelityScanMaxBufferSize     = 10 * 1024 * 1024
 	fidelityTailSeekSize          = 64 * 1024
+	fidelityDatePrefix            = "Date downloaded "
 )
 
 // ErrMissingDateFooter is returned when a Fidelity CSV file does not contain a recognizable
@@ -47,29 +48,45 @@ func NewFidelityMapper(
 		return nil, ctxErr
 	}
 
+	fileHash, err := resolveFileHash(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	asOfDate, err := resolveAsOfDate(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewFidelityMapperWithMetadata(
+		fileName,
+		s3URI,
+		fileHash,
+		asOfDate,
+		time.Now().UTC(),
+	), nil
+}
+
+func resolveFileHash(ctx context.Context, filePath string) (string, error) {
 	fileHash, err := ComputeFileSHA256(ctx, filePath)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return "", ctxErr
 		}
-		return nil, fmt.Errorf("failed to compute sha256 for file %s: %w", filePath, err)
+		return "", fmt.Errorf("failed to compute sha256 for file %s: %w", filePath, err)
 	}
+	return fileHash, nil
+}
 
+func resolveAsOfDate(ctx context.Context, filePath string) (time.Time, error) {
 	asOfDate, err := extractFidelityAsOfDate(ctx, filePath)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return time.Time{}, ctxErr
 		}
-		return nil, fmt.Errorf("failed to extract Fidelity asOfDate for file %s: %w", filePath, err)
+		return time.Time{}, fmt.Errorf("failed to extract Fidelity asOfDate for file %s: %w", filePath, err)
 	}
-
-	return &FidelityMapper{
-		fileName:   fileName,
-		s3URI:      s3URI,
-		fileHash:   fileHash,
-		asOfDate:   asOfDate,
-		ingestedAt: time.Now().UTC(),
-	}, nil
+	return asOfDate, nil
 }
 
 // NewFidelityMapperWithMetadata creates a FidelityMapper with explicit metadata parameters.
@@ -250,12 +267,18 @@ func parseRowNumber(record map[string]string) int64 {
 	if record == nil {
 		return 0
 	}
-	if rowStr, ok := record["__row_number"]; ok && rowStr != "" {
-		if parsedRow, parseErr := strconv.ParseInt(rowStr, 10, 64); parseErr == nil && parsedRow > 0 {
-			return parsedRow
-		}
+
+	rowStr := record["__row_number"]
+	if rowStr == "" {
+		return 0
 	}
-	return 0
+
+	parsedRow, err := strconv.ParseInt(rowStr, 10, 64)
+	if err != nil || parsedRow <= 0 {
+		return 0
+	}
+
+	return parsedRow
 }
 
 // extractFidelityAsOfDate scans the file for the "Date downloaded" footer marker.
@@ -277,35 +300,20 @@ func extractFidelityAsOfDate(ctx context.Context, filePath string) (time.Time, e
 		return time.Time{}, fmt.Errorf("failed to stat file %s to extract Fidelity asOfDate: %w", filePath, err)
 	}
 
-	fileSize := stat.Size()
-	var offset int64
-	if fileSize > fidelityTailSeekSize {
-		offset = fileSize - fidelityTailSeekSize
-	}
-
-	if offset > 0 {
-		if _, seekErr := file.Seek(offset, io.SeekStart); seekErr != nil {
-			return time.Time{}, fmt.Errorf("failed to seek to tail of file %s: %w", filePath, seekErr)
-		}
-	}
-
-	foundDate, found, scanErr := scanForFidelityDate(ctx, file)
-	if scanErr != nil {
-		return time.Time{}, scanErr
+	tailOffset := calculateTailOffset(stat.Size())
+	foundDate, found, err := scanFileAtOffset(ctx, file, tailOffset, filePath)
+	if err != nil {
+		return time.Time{}, err
 	}
 	if found {
 		return foundDate, nil
 	}
 
 	// Fallback: If not found in tail and we started at offset > 0, rewind and scan whole file from start.
-	if offset > 0 {
-		if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
-			return time.Time{}, fmt.Errorf("failed to rewind file %s: %w", filePath, seekErr)
-		}
-
-		foundDate, found, scanErr = scanForFidelityDate(ctx, file)
-		if scanErr != nil {
-			return time.Time{}, scanErr
+	if tailOffset > 0 {
+		foundDate, found, err = scanFileAtOffset(ctx, file, 0, filePath)
+		if err != nil {
+			return time.Time{}, err
 		}
 		if found {
 			return foundDate, nil
@@ -315,27 +323,40 @@ func extractFidelityAsOfDate(ctx context.Context, filePath string) (time.Time, e
 	return time.Time{}, fmt.Errorf("%w in file %s", ErrMissingDateFooter, filePath)
 }
 
+func calculateTailOffset(fileSize int64) int64 {
+	if fileSize > fidelityTailSeekSize {
+		return fileSize - fidelityTailSeekSize
+	}
+	return 0
+}
+
+func scanFileAtOffset(
+	ctx context.Context,
+	file *os.File,
+	offset int64,
+	filePath string,
+) (time.Time, bool, error) {
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return time.Time{}, false, fmt.Errorf("failed to seek in file %s to offset %d: %w", filePath, offset, err)
+	}
+	return scanForFidelityDate(ctx, file)
+}
+
 func scanForFidelityDate(ctx context.Context, r io.Reader) (time.Time, bool, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, fidelityScanInitialBufferSize), fidelityScanMaxBufferSize)
 
-	prefix := []byte("Date downloaded ")
 	for scanner.Scan() {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return time.Time{}, false, ctxErr
 		}
-		cleanBytes := bytes.Trim(scanner.Bytes(), "\", \t\r\n")
-		if bytes.HasPrefix(cleanBytes, prefix) {
-			clean := string(cleanBytes)
-			parsedDate, parseErr := model.ParseFidelityDateDownloaded(clean)
-			if parseErr != nil {
-				return time.Time{}, false, fmt.Errorf(
-					"failed to parse Fidelity date downloaded from %q: %w",
-					clean,
-					parseErr,
-				)
-			}
-			return parsedDate.UTC(), true, nil
+
+		date, found, err := parseDateFromLine(scanner.Bytes())
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		if found {
+			return date, true, nil
 		}
 	}
 
@@ -344,4 +365,23 @@ func scanForFidelityDate(ctx context.Context, r io.Reader) (time.Time, bool, err
 	}
 
 	return time.Time{}, false, nil
+}
+
+func parseDateFromLine(rawBytes []byte) (time.Time, bool, error) {
+	cleanBytes := bytes.Trim(rawBytes, "\", \t\r\n")
+	if !bytes.HasPrefix(cleanBytes, []byte(fidelityDatePrefix)) {
+		return time.Time{}, false, nil
+	}
+
+	clean := string(cleanBytes)
+	parsedDate, err := model.ParseFidelityDateDownloaded(clean)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf(
+			"failed to parse Fidelity date downloaded from %q: %w",
+			clean,
+			err,
+		)
+	}
+
+	return parsedDate.UTC(), true, nil
 }

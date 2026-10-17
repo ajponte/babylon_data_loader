@@ -998,3 +998,133 @@ func TestFidelityMapper_MapRecordBatch_ContextCancellation(t *testing.T) {
 		t.Errorf("expected nil positions on canceled context, got: %+v", positions)
 	}
 }
+
+// TC-FM-23: Unit calculateTailOffset (Zero disk I/O): Asserts offset calculation logic for small, exact, and large files.
+func TestFidelityMapper_CalculateTailOffset(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileSize int64
+		expected int64
+	}{
+		{
+			name:     "zero file size",
+			fileSize: 0,
+			expected: 0,
+		},
+		{
+			name:     "small file under tail seek size",
+			fileSize: 1024,
+			expected: 0,
+		},
+		{
+			name:     "exact tail seek size",
+			fileSize: fidelityTailSeekSize,
+			expected: 0,
+		},
+		{
+			name:     "file larger than tail seek size",
+			fileSize: fidelityTailSeekSize + 5000,
+			expected: 5000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := calculateTailOffset(tc.fileSize)
+			if got != tc.expected {
+				t.Errorf("calculateTailOffset(%d) = %d; expected %d", tc.fileSize, got, tc.expected)
+			}
+		})
+	}
+}
+
+// TC-FM-24: Unit parseDateFromLine (Zero disk I/O): Table-driven tests for prefix matching, date parsing, and invalid date formats.
+func TestFidelityMapper_ParseDateFromLine_Valid(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawBytes []byte
+	}{
+		{
+			name:     "valid date line standard",
+			rawBytes: []byte(`"Date downloaded Sep-25-2026 9:50 p.m ET"`),
+		},
+		{
+			name:     "valid date line without quotes",
+			rawBytes: []byte(`Date downloaded Sep-25-2026 9:50 p.m ET`),
+		},
+		{
+			name:     "valid date line with trailing commas",
+			rawBytes: []byte(`"Date downloaded Sep-25-2026 9:50 p.m ET",,,,,`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotDate, found, err := parseDateFromLine(tc.rawBytes)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !found {
+				t.Error("expected found to be true")
+			}
+			if gotDate.IsZero() {
+				t.Error("expected non-zero date")
+			}
+		})
+	}
+}
+
+func TestFidelityMapper_ParseDateFromLine_NotFoundOrError(t *testing.T) {
+	t.Run("line without prefix returns not found", func(t *testing.T) {
+		_, found, err := parseDateFromLine([]byte(`Account Number,Symbol,Quantity`))
+		if err != nil || found {
+			t.Errorf("expected found=false, err=nil; got found=%v, err=%v", found, err)
+		}
+	})
+
+	t.Run("empty line returns not found", func(t *testing.T) {
+		_, found, err := parseDateFromLine([]byte(``))
+		if err != nil || found {
+			t.Errorf("expected found=false, err=nil; got found=%v, err=%v", found, err)
+		}
+	})
+
+	t.Run("prefix present but invalid date content returns error", func(t *testing.T) {
+		_, found, err := parseDateFromLine([]byte(`"Date downloaded NotADate"`))
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if found {
+			t.Error("expected found to be false on error")
+		}
+		if !strings.Contains(err.Error(), "failed to parse Fidelity date downloaded") {
+			t.Errorf("expected parse error context, got: %v", err)
+		}
+	})
+}
+
+// TC-FM-25: Unit resolveFileHash & resolveAsOfDate context cancellation (Zero disk I/O).
+func TestFidelityMapper_ResolveContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("resolveFileHash respects canceled context", func(t *testing.T) {
+		_, err := resolveFileHash(ctx, "nonexistent.csv")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	t.Run("resolveAsOfDate respects canceled context", func(t *testing.T) {
+		_, err := resolveAsOfDate(ctx, "nonexistent.csv")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", err)
+		}
+	})
+}
