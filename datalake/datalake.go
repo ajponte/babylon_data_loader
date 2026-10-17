@@ -1,7 +1,6 @@
 package datalake
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -429,12 +428,7 @@ func mapRawRecordsToFidelityPositions(
 
 	positions := make([]model.FidelityPosition, 0, len(rawRecords))
 	for _, record := range rawRecords {
-		var rowNumber int64
-		if rowStr, ok := record["__row_number"]; ok && rowStr != "" {
-			if parsedRow, parseErr := strconv.ParseInt(rowStr, 10, 64); parseErr == nil {
-				rowNumber = parsedRow
-			}
-		}
+		rowNumber := parseRowNumber(record)
 
 		source := model.SourceLineage{
 			S3URI:      s3URI,
@@ -452,56 +446,6 @@ func mapRawRecordsToFidelityPositions(
 	}
 
 	return positions, nil
-}
-
-const (
-	fidelityScanInitialBufferSize = 64 * 1024
-	fidelityScanMaxBufferSize     = 10 * 1024 * 1024
-)
-
-func extractFidelityAsOfDate(ctx context.Context, filePath string) (time.Time, error) {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return time.Time{}, ctxErr
-	}
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to open file to extract Fidelity asOfDate: %w", err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, fidelityScanInitialBufferSize), fidelityScanMaxBufferSize)
-
-	var foundDate time.Time
-	var hasDate bool
-
-	for scanner.Scan() {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return time.Time{}, ctxErr
-		}
-		line := strings.TrimSpace(scanner.Text())
-		clean := strings.Trim(line, "\", \t\r\n")
-		if strings.HasPrefix(clean, "Date downloaded ") {
-			parsedDate, parseErr := model.ParseFidelityDateDownloaded(line)
-			if parseErr != nil {
-				return time.Time{}, fmt.Errorf("failed to parse Fidelity date downloaded from %q: %w", line, parseErr)
-			}
-			foundDate = parsedDate.UTC()
-			hasDate = true
-			break
-		}
-	}
-
-	if scanErr := scanner.Err(); scanErr != nil {
-		return time.Time{}, fmt.Errorf("failed to scan file for Fidelity asOfDate: %w", scanErr)
-	}
-
-	if !hasDate {
-		return time.Time{}, fmt.Errorf("no valid Fidelity date downloaded header/footer found in file %s", filePath)
-	}
-
-	return foundDate, nil
 }
 
 func mapRawRecordsToTransactions(
