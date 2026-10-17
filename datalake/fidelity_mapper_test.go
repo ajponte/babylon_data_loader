@@ -377,7 +377,12 @@ func TestFidelityMapper_ParseRowNumber(t *testing.T) {
 		{
 			name:     "negative integer string",
 			record:   map[string]string{"__row_number": "-10"},
-			expected: -10,
+			expected: 0,
+		},
+		{
+			name:     "zero integer string",
+			record:   map[string]string{"__row_number": "0"},
+			expected: 0,
 		},
 	}
 
@@ -483,8 +488,14 @@ func TestNewFidelityMapper_MissingDateFooter(t *testing.T) {
 	if mapper != nil {
 		t.Errorf("expected nil mapper on error, got: %+v", mapper)
 	}
+	if !errors.Is(err, ErrMissingDateFooter) {
+		t.Errorf("expected errors.Is(err, ErrMissingDateFooter), got: %v", err)
+	}
 	if !strings.Contains(err.Error(), "no valid Fidelity date downloaded") {
 		t.Errorf("expected error to contain 'no valid Fidelity date downloaded', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to extract Fidelity asOfDate for file") {
+		t.Errorf("expected error to contain 'failed to extract Fidelity asOfDate for file', got: %v", err)
 	}
 }
 
@@ -513,6 +524,9 @@ func TestNewFidelityMapper_UnparseableDateFooter(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to parse Fidelity date downloaded") {
 		t.Errorf("expected error to contain 'failed to parse Fidelity date downloaded', got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "failed to extract Fidelity asOfDate for file") {
+		t.Errorf("expected error to contain 'failed to extract Fidelity asOfDate for file', got: %v", err)
+	}
 }
 
 // TC-FM-10: Unit/IO NewFidelityMapper (Zero - cancelled context): Cancelled context aborts before disk I/O.
@@ -536,5 +550,308 @@ func TestNewFidelityMapper_CanceledContext(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected errors.Is(err, context.Canceled), got: %v", err)
+	}
+}
+
+// TC-FM-11: Nil receiver guards for MapRecord, MapRecords, and MapRecordsWithContext.
+func TestFidelityMapper_NilReceiver_MapMethods(t *testing.T) {
+	var mapper *FidelityMapper
+
+	t.Run("MapRecord returns error on nil receiver", func(t *testing.T) {
+		_, err := mapper.MapRecord(map[string]string{"symbol": "FXAIX"})
+		if err == nil {
+			t.Fatal("expected error on nil receiver, got nil")
+		}
+		if !strings.Contains(err.Error(), "cannot map record: FidelityMapper instance is nil") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("MapRecords returns error on nil receiver", func(t *testing.T) {
+		_, err := mapper.MapRecords([]map[string]string{{"symbol": "FXAIX"}})
+		if err == nil {
+			t.Fatal("expected error on nil receiver, got nil")
+		}
+		if !strings.Contains(err.Error(), "cannot map records: FidelityMapper instance is nil") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("MapRecordsWithContext returns error on nil receiver", func(t *testing.T) {
+		_, err := mapper.MapRecordsWithContext(context.Background(), []map[string]string{{"symbol": "FXAIX"}})
+		if err == nil {
+			t.Fatal("expected error on nil receiver, got nil")
+		}
+		if !strings.Contains(err.Error(), "cannot map records: FidelityMapper instance is nil") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+	})
+}
+
+// TC-FM-12: Nil receiver guards for exported getters.
+func TestFidelityMapper_NilReceiver_Getters(t *testing.T) {
+	var mapper *FidelityMapper
+
+	if mapper.FileName() != "" {
+		t.Errorf("expected empty FileName, got %q", mapper.FileName())
+	}
+	if mapper.S3URI() != "" {
+		t.Errorf("expected empty S3URI, got %q", mapper.S3URI())
+	}
+	if mapper.FileHash() != "" {
+		t.Errorf("expected empty FileHash, got %q", mapper.FileHash())
+	}
+	if !mapper.AsOfDate().IsZero() {
+		t.Errorf("expected zero AsOfDate, got %v", mapper.AsOfDate())
+	}
+	if !mapper.IngestedAt().IsZero() {
+		t.Errorf("expected zero IngestedAt, got %v", mapper.IngestedAt())
+	}
+}
+
+// TC-FM-12: Exported getters return expected provenance metadata.
+func TestFidelityMapper_Getters(t *testing.T) {
+	asOfDate := time.Date(2026, time.September, 25, 21, 50, 0, 0, time.UTC)
+	ingestedAt := time.Date(2026, time.September, 26, 0, 0, 0, 0, time.UTC)
+	fileName := "Portfolio_Positions_Sep-25-2026.csv"
+	s3URI := "s3://bucket/fidelity/Portfolio_Positions_Sep-25-2026.csv"
+	fileHash := "hash123456"
+
+	mapper := NewFidelityMapperWithMetadata(fileName, s3URI, fileHash, asOfDate, ingestedAt)
+
+	if mapper.FileName() != fileName {
+		t.Errorf("FileName() = %q, expected %q", mapper.FileName(), fileName)
+	}
+	if mapper.S3URI() != s3URI {
+		t.Errorf("S3URI() = %q, expected %q", mapper.S3URI(), s3URI)
+	}
+	if mapper.FileHash() != fileHash {
+		t.Errorf("FileHash() = %q, expected %q", mapper.FileHash(), fileHash)
+	}
+	if !mapper.AsOfDate().Equal(asOfDate) {
+		t.Errorf("AsOfDate() = %v, expected %v", mapper.AsOfDate(), asOfDate)
+	}
+	if !mapper.IngestedAt().Equal(ingestedAt) {
+		t.Errorf("IngestedAt() = %v, expected %v", mapper.IngestedAt(), ingestedAt)
+	}
+}
+
+// TC-FM-13: Symbol validation requires non-empty, non-whitespace symbol.
+func TestFidelityMapper_SymbolValidation(t *testing.T) {
+	mapper := NewFidelityMapperWithMetadata(
+		"test.csv",
+		"s3://bucket/test.csv",
+		"hash123",
+		time.Now().UTC(),
+		time.Now().UTC(),
+	)
+
+	t.Run("missing symbol with row number returns row qualified error", func(t *testing.T) {
+		record := map[string]string{
+			"quantity":     "10.0",
+			"__row_number": "5",
+		}
+		pos, err := mapper.MapRecord(record)
+		if err == nil {
+			t.Fatal("expected error for missing symbol, got nil")
+		}
+		expectedErr := "invalid Fidelity position (row 5): symbol is required"
+		if err.Error() != expectedErr {
+			t.Errorf("expected %q, got %q", expectedErr, err.Error())
+		}
+		if pos != (model.FidelityPosition{}) {
+			t.Errorf("expected empty position on error, got %+v", pos)
+		}
+	})
+
+	t.Run("whitespace symbol with row number 0 returns unqualified error", func(t *testing.T) {
+		record := map[string]string{
+			"symbol":       "   ",
+			"quantity":     "10.0",
+			"__row_number": "0",
+		}
+		pos, err := mapper.MapRecord(record)
+		if err == nil {
+			t.Fatal("expected error for whitespace symbol, got nil")
+		}
+		expectedErr := "invalid Fidelity position: symbol is required"
+		if err.Error() != expectedErr {
+			t.Errorf("expected %q, got %q", expectedErr, err.Error())
+		}
+		if pos != (model.FidelityPosition{}) {
+			t.Errorf("expected empty position on error, got %+v", pos)
+		}
+	})
+}
+
+// TC-FM-14: Clean row formatting in errors omits (row 0) when rowNumber <= 0.
+func TestFidelityMapper_ErrorFormatting_RowZero(t *testing.T) {
+	mapper := NewFidelityMapperWithMetadata(
+		"test.csv",
+		"s3://bucket/test.csv",
+		"hash123",
+		time.Now().UTC(),
+		time.Now().UTC(),
+	)
+
+	record := map[string]string{
+		"symbol":   "FXAIX",
+		"quantity": "not-a-number",
+	}
+
+	_, err := mapper.MapRecord(record)
+	if err == nil {
+		t.Fatal("expected error for malformed quantity, got nil")
+	}
+	if strings.Contains(err.Error(), "row 0") {
+		t.Errorf("expected error to omit '(row 0)', got: %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "failed to map raw record to Fidelity position: ") {
+		t.Errorf("expected error prefix 'failed to map raw record to Fidelity position: ', got: %v", err)
+	}
+}
+
+// TC-FM-15: MapRecordsWithContext respects context cancellation before and during mapping.
+func TestFidelityMapper_MapRecordsWithContext(t *testing.T) {
+	mapper := NewFidelityMapperWithMetadata(
+		"test.csv",
+		"s3://bucket/test.csv",
+		"hash123",
+		time.Now().UTC(),
+		time.Now().UTC(),
+	)
+
+	rawRecords := []map[string]string{
+		{"symbol": "FXAIX", "quantity": "10.0", "__row_number": "2"},
+		{"symbol": "FSKAX", "quantity": "20.0", "__row_number": "3"},
+	}
+
+	t.Run("succeeds with active context", func(t *testing.T) {
+		positions, err := mapper.MapRecordsWithContext(context.Background(), rawRecords)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(positions) != 2 {
+			t.Fatalf("expected 2 positions, got %d", len(positions))
+		}
+	})
+
+	t.Run("pre-canceled context returns context.Canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		positions, err := mapper.MapRecordsWithContext(ctx, rawRecords)
+		if err == nil {
+			t.Fatal("expected error with canceled context, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected errors.Is(err, context.Canceled), got: %v", err)
+		}
+		if positions != nil {
+			t.Errorf("expected nil positions on error, got %+v", positions)
+		}
+	})
+}
+
+// TC-FM-16: Trailing delimiters and commas in date downloaded footer parse successfully.
+func TestNewFidelityMapper_TrailingDelimiters(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "Portfolio_Positions_Trailing.csv")
+	content := "Account Number,Symbol,Current Value\nACC123,FXAIX,$1000.00\n\n\"Date downloaded Sep-25-2026 9:50 p.m ET\",,,,,\n"
+
+	if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	mapper, err := NewFidelityMapper(
+		context.Background(),
+		filePath,
+		"Portfolio_Positions_Trailing.csv",
+		"s3://bucket/Portfolio_Positions_Trailing.csv",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error parsing date with trailing delimiters: %v", err)
+	}
+	if mapper == nil {
+		t.Fatal("expected non-nil mapper")
+	}
+
+	parsedDate, _ := model.ParseFidelityDateDownloaded("Date downloaded Sep-25-2026 9:50 p.m ET")
+	if !mapper.AsOfDate().Equal(parsedDate.UTC()) {
+		t.Errorf("expected AsOfDate %v, got %v", parsedDate.UTC(), mapper.AsOfDate())
+	}
+}
+
+// TC-FM-17: Large file (>64KB) tail seeking finds footer at end in O(1).
+func TestNewFidelityMapper_LargeFileTailSeek(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "Portfolio_Positions_Large.csv")
+
+	// Generate a file larger than 64KB (e.g. ~80KB)
+	var sb strings.Builder
+	sb.WriteString("Account Number,Symbol,Quantity,Current Value\n")
+	paddingRow := "ACC123,FXAIX,10.0,$1500.00\n"
+	for sb.Len() < 80*1024 {
+		sb.WriteString(paddingRow)
+	}
+	sb.WriteString("\n\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n")
+
+	if err := os.WriteFile(filePath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatalf("failed to write large test file: %v", err)
+	}
+
+	mapper, err := NewFidelityMapper(
+		context.Background(),
+		filePath,
+		"Portfolio_Positions_Large.csv",
+		"s3://bucket/Portfolio_Positions_Large.csv",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error from tail seek on large file: %v", err)
+	}
+	if mapper == nil {
+		t.Fatal("expected non-nil mapper")
+	}
+
+	parsedDate, _ := model.ParseFidelityDateDownloaded("Date downloaded Sep-25-2026 9:50 p.m ET")
+	if !mapper.AsOfDate().Equal(parsedDate.UTC()) {
+		t.Errorf("expected AsOfDate %v, got %v", parsedDate.UTC(), mapper.AsOfDate())
+	}
+}
+
+// TC-FM-18: Large file (>64KB) fallback rewinds and finds date header at start of file.
+func TestNewFidelityMapper_LargeFileHeaderFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "Portfolio_Positions_Fallback.csv")
+
+	// Place date at top, followed by >64KB of padding
+	var sb strings.Builder
+	sb.WriteString("\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n")
+	sb.WriteString("Account Number,Symbol,Quantity,Current Value\n")
+	paddingRow := "ACC123,FXAIX,10.0,$1500.00\n"
+	for sb.Len() < 80*1024 {
+		sb.WriteString(paddingRow)
+	}
+
+	if err := os.WriteFile(filePath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatalf("failed to write large fallback test file: %v", err)
+	}
+
+	mapper, err := NewFidelityMapper(
+		context.Background(),
+		filePath,
+		"Portfolio_Positions_Fallback.csv",
+		"s3://bucket/Portfolio_Positions_Fallback.csv",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error from rewind fallback on large file: %v", err)
+	}
+	if mapper == nil {
+		t.Fatal("expected non-nil mapper")
+	}
+
+	parsedDate, _ := model.ParseFidelityDateDownloaded("Date downloaded Sep-25-2026 9:50 p.m ET")
+	if !mapper.AsOfDate().Equal(parsedDate.UTC()) {
+		t.Errorf("expected AsOfDate %v, got %v", parsedDate.UTC(), mapper.AsOfDate())
 	}
 }

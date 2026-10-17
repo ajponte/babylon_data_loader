@@ -411,41 +411,12 @@ func mapRawRecordsToFidelityPositions(
 		return []model.FidelityPosition{}, nil
 	}
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, ctxErr
-	}
-
-	fileHash, err := ComputeFileSHA256(ctx, filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute sha256 for file %s: %w", filePath, err)
-	}
-
-	asOfDate, err := extractFidelityAsOfDate(ctx, filePath)
+	mapper, err := NewFidelityMapper(ctx, filePath, fileName, s3URI)
 	if err != nil {
 		return nil, err
 	}
-	ingestedAt := time.Now().UTC()
 
-	positions := make([]model.FidelityPosition, 0, len(rawRecords))
-	for _, record := range rawRecords {
-		rowNumber := parseRowNumber(record)
-
-		source := model.SourceLineage{
-			S3URI:      s3URI,
-			FileName:   fileName,
-			RowNumber:  rowNumber,
-			IngestedAt: ingestedAt,
-			SHA256:     fileHash,
-		}
-
-		pos, mapErr := model.MapRawRecordToFidelityPosition(record, asOfDate, source)
-		if mapErr != nil {
-			return nil, fmt.Errorf("failed to map raw record to Fidelity position (row %d): %w", rowNumber, mapErr)
-		}
-		positions = append(positions, pos)
-	}
-
-	return positions, nil
+	return mapper.MapRecordsWithContext(ctx, rawRecords)
 }
 
 func mapRawRecordsToTransactions(
