@@ -74,87 +74,69 @@ func ParseFidelityDateDownloaded(line string) (time.Time, error) {
 	return parsed, nil
 }
 
+// fidelityRecordParser encapsulates a CSV record map and accumulates the first parsing error encountered.
+type fidelityRecordParser struct {
+	record map[string]string
+	err    error
+}
+
+func (p *fidelityRecordParser) parse(key string, fn func(string) (float64, error)) float64 {
+	if p.err != nil {
+		return 0.0
+	}
+	val, err := fn(p.record[key])
+	if err != nil {
+		p.err = err
+		return 0.0
+	}
+	return val
+}
+
+func (p *fidelityRecordParser) currency(key string) float64 {
+	return p.parse(key, ParseFidelityCurrency)
+}
+
+func (p *fidelityRecordParser) percentage(key string) float64 {
+	return p.parse(key, ParseFidelityPercentage)
+}
+
+func (p *fidelityRecordParser) quantity(key string) float64 {
+	return p.parse(key, ParseFidelityQuantity)
+}
+
 // MapRawRecordToFidelityPosition converts a raw record map into a typed FidelityPosition.
 func MapRawRecordToFidelityPosition(
 	record map[string]string,
 	asOfDate time.Time,
 	source SourceLineage,
 ) (FidelityPosition, error) {
-	// todo: Should we extend to a utility module/object?
-	qty, err := ParseFidelityQuantity(record["quantity"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
+	p := fidelityRecordParser{record: record}
 
-	lastPrice, err := ParseFidelityCurrency(record["last price"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	lastPriceChange, err := ParseFidelityCurrency(record["last price change"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	currentVal, err := ParseFidelityCurrency(record["current value"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	todaysGainLossDollar, err := ParseFidelityCurrency(record["today's gain/loss dollar"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	todaysGainLossPct, err := ParseFidelityPercentage(record["today's gain/loss percent"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	totalGainLossDollar, err := ParseFidelityCurrency(record["total gain/loss dollar"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	totalGainLossPct, err := ParseFidelityPercentage(record["total gain/loss percent"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	percentOfAccount, err := ParseFidelityPercentage(record["percent of account"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	costBasisTotal, err := ParseFidelityCurrency(record["cost basis total"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	avgCostBasis, err := ParseFidelityCurrency(record["average cost basis"])
-	if err != nil {
-		return FidelityPosition{}, err
-	}
-
-	return FidelityPosition{
+	pos := FidelityPosition{
 		AccountNumber:        record["account number"],
 		AccountName:          record["account name"],
 		Symbol:               record["symbol"],
 		Description:          record["description"],
-		Quantity:             qty,
-		LastPrice:            lastPrice,
-		LastPriceChange:      lastPriceChange,
-		CurrentValue:         currentVal,
-		TodaysGainLossDollar: todaysGainLossDollar,
-		TodaysGainLossPct:    todaysGainLossPct,
-		TotalGainLossDollar:  totalGainLossDollar,
-		TotalGainLossPct:     totalGainLossPct,
-		PercentOfAccount:     percentOfAccount,
-		CostBasisTotal:       costBasisTotal,
-		AverageCostBasis:     avgCostBasis,
+		Quantity:             p.quantity("quantity"),
+		LastPrice:            p.currency("last price"),
+		LastPriceChange:      p.currency("last price change"),
+		CurrentValue:         p.currency("current value"),
+		TodaysGainLossDollar: p.currency("today's gain/loss dollar"),
+		TodaysGainLossPct:    p.percentage("today's gain/loss percent"),
+		TotalGainLossDollar:  p.currency("total gain/loss dollar"),
+		TotalGainLossPct:     p.percentage("total gain/loss percent"),
+		PercentOfAccount:     p.percentage("percent of account"),
+		CostBasisTotal:       p.currency("cost basis total"),
+		AverageCostBasis:     p.currency("average cost basis"),
 		Type:                 record["type"],
 		AsOfDate:             asOfDate,
 		DataSource:           "fidelity",
 		Source:               source,
-	}, nil
+	}
+
+	if p.err != nil {
+		return FidelityPosition{}, p.err
+	}
+
+	return pos, nil
 }

@@ -113,3 +113,50 @@ func assertZeroPosition(t *testing.T, zeroPos model.FidelityPosition) {
 		t.Errorf("expected quantity 0.00, got %f", zeroPos.Quantity)
 	}
 }
+
+func TestMapRawRecordToFidelityPosition_ErrorHandling(t *testing.T) {
+	asOfDate := time.Date(2026, time.September, 25, 21, 50, 0, 0, time.UTC)
+	lineage := model.SourceLineage{FileName: "test.csv", RowNumber: 2}
+
+	t.Run("invalid quantity error", func(t *testing.T) {
+		record := map[string]string{
+			"quantity": "not-a-number",
+		}
+		pos, err := model.MapRawRecordToFidelityPosition(record, asOfDate, lineage)
+		if err == nil {
+			t.Fatal("expected quantity error, got nil")
+		}
+		if pos != (model.FidelityPosition{}) {
+			t.Errorf("expected empty position on error, got: %+v", pos)
+		}
+	})
+
+	t.Run("invalid currency error", func(t *testing.T) {
+		record := map[string]string{
+			"quantity":   "10",
+			"last price": "not-a-price",
+		}
+		pos, err := model.MapRawRecordToFidelityPosition(record, asOfDate, lineage)
+		if err == nil {
+			t.Fatal("expected currency error, got nil")
+		}
+		if pos != (model.FidelityPosition{}) {
+			t.Errorf("expected empty position on error, got: %+v", pos)
+		}
+	})
+
+	t.Run("invalid percentage error", func(t *testing.T) {
+		record := map[string]string{
+			"quantity":                  "10",
+			"last price":                "$100.00",
+			"today's gain/loss percent": "not-a-percent",
+		}
+		pos, err := model.MapRawRecordToFidelityPosition(record, asOfDate, lineage)
+		if err == nil {
+			t.Fatal("expected percentage error, got nil")
+		}
+		if pos != (model.FidelityPosition{}) {
+			t.Errorf("expected empty position on error, got: %+v", pos)
+		}
+	})
+}
