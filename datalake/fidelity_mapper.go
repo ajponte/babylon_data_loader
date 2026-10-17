@@ -293,38 +293,55 @@ func extractFidelityAsOfDate(ctx context.Context, filePath string) (time.Time, e
 		return time.Time{}, ctxErr
 	}
 
-	file, err := os.Open(filePath)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to open file to extract Fidelity asOfDate: %w", err)
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to stat file %s to extract Fidelity asOfDate: %w", filePath, err)
-	}
-
-	tailOffset := calculateTailOffset(stat.Size())
-	foundDate, found, err := scanFileAtOffset(ctx, file, tailOffset, filePath)
+	file, fileSize, err := openStatementFile(filePath)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if found {
-		return foundDate, nil
+	defer file.Close()
+
+	return scanFileWithFallback(ctx, file, fileSize, filePath)
+}
+
+func openStatementFile(filePath string) (*os.File, int64, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to open file to extract Fidelity asOfDate: %w", err)
 	}
 
-	// Fallback: If not found in tail and we started at offset > 0, rewind and scan whole file from start.
-	if tailOffset > 0 {
-		foundDate, found, err = scanFileAtOffset(ctx, file, 0, filePath)
+	stat, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, 0, fmt.Errorf("failed to stat file %s to extract Fidelity asOfDate: %w", filePath, err)
+	}
+
+	return file, stat.Size(), nil
+}
+
+func scanFileWithFallback(
+	ctx context.Context,
+	file *os.File,
+	fileSize int64,
+	filePath string,
+) (time.Time, error) {
+	for _, offset := range offsetsToScan(fileSize) {
+		date, found, err := scanFileAtOffset(ctx, file, offset, filePath)
 		if err != nil {
 			return time.Time{}, err
 		}
 		if found {
-			return foundDate, nil
+			return date, nil
 		}
 	}
 
 	return time.Time{}, fmt.Errorf("%w in file %s", ErrMissingDateFooter, filePath)
+}
+
+func offsetsToScan(fileSize int64) []int64 {
+	tailOffset := calculateTailOffset(fileSize)
+	if tailOffset > 0 {
+		return []int64{tailOffset, 0}
+	}
+	return []int64{0}
 }
 
 func calculateTailOffset(fileSize int64) int64 {

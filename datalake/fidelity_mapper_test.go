@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1294,3 +1295,160 @@ type errTestReader struct {
 func (e *errTestReader) Read(_ []byte) (int, error) {
 	return 0, e.err
 }
+
+// TC-FM-31: Unit offsetsToScan (Zero disk I/O): Asserts offset sequences for 0, < 64KB, = 64KB, and > 64KB files.
+func TestFidelityMapper_OffsetsToScan(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileSize int64
+		expected []int64
+	}{
+		{
+			name:     "zero file size",
+			fileSize: 0,
+			expected: []int64{0},
+		},
+		{
+			name:     "file smaller than 64KB",
+			fileSize: fidelityTailSeekSize - 1,
+			expected: []int64{0},
+		},
+		{
+			name:     "file exactly 64KB",
+			fileSize: fidelityTailSeekSize,
+			expected: []int64{0},
+		},
+		{
+			name:     "file larger than 64KB",
+			fileSize: fidelityTailSeekSize + 5000,
+			expected: []int64{5000, 0},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := offsetsToScan(tc.fileSize)
+			if !slices.Equal(got, tc.expected) {
+				t.Errorf("offsetsToScan(%d) = %v; expected %v", tc.fileSize, got, tc.expected)
+			}
+		})
+	}
+}
+
+// TC-FM-32: Unit openStatementFile: Asserts file opening and sizing, and wrapped error on nonexistent file.
+func TestFidelityMapper_OpenStatementFile(t *testing.T) {
+	t.Run("valid file returns file pointer and size", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		filePath := filepath.Join(tmpDir, "statement.csv")
+		content := "sample content"
+		if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+			t.Fatalf("failed to write test file: %v", err)
+		}
+
+		f, size, err := openStatementFile(filePath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer f.Close()
+
+		if size != int64(len(content)) {
+			t.Errorf("expected size %d, got %d", len(content), size)
+		}
+	})
+
+	t.Run("nonexistent file returns wrapped error", func(t *testing.T) {
+		nonExistentPath := filepath.Join(t.TempDir(), "nonexistent.csv")
+		f, size, err := openStatementFile(nonExistentPath)
+		if err == nil {
+			t.Fatal("expected error for nonexistent file, got nil")
+		}
+		if f != nil {
+			_ = f.Close()
+			t.Error("expected nil file pointer on error")
+		}
+		if size != 0 {
+			t.Errorf("expected size 0, got %d", size)
+		}
+		if !strings.Contains(err.Error(), "failed to open file to extract Fidelity asOfDate:") {
+			t.Errorf("expected error message to contain context, got: %v", err)
+		}
+	})
+}
+
+// TC-FM-33: Unit scanFileWithFallback (Zero/TempDir I/O): Asserts ErrMissingDateFooter when date is absent.
+func TestFidelityMapper_ScanFileWithFallback_MissingFooter(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "missing.csv")
+	content := "Account Number,Symbol,Current Value\nACC123,FXAIX,$1000.00\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	file, size, err := openStatementFile(filePath)
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	defer file.Close()
+
+	_, scanErr := scanFileWithFallback(context.Background(), file, size, filePath)
+	if scanErr == nil {
+		t.Fatal("expected error when date footer missing, got nil")
+	}
+	if !errors.Is(scanErr, ErrMissingDateFooter) {
+		t.Errorf("expected ErrMissingDateFooter, got: %v", scanErr)
+	}
+}
+
+// TC-FM-34: Unit scanFileWithFallback: Asserts date extracted from tail scan.
+func TestFidelityMapper_ScanFileWithFallback_TailSeek(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "valid_tail.csv")
+	content := "Account Number,Symbol,Current Value\nACC123,FXAIX,$1000.00\n\n\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	file, size, err := openStatementFile(filePath)
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	defer file.Close()
+
+	gotDate, scanErr := scanFileWithFallback(context.Background(), file, size, filePath)
+	if scanErr != nil {
+		t.Fatalf("unexpected scan error: %v", scanErr)
+	}
+	expectedDate := time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC)
+	if !gotDate.Equal(expectedDate) {
+		t.Errorf("expected date %v, got %v", expectedDate, gotDate)
+	}
+}
+
+// TC-FM-35: Unit scanFileWithFallback: Asserts fallback rewinds and finds header on large files.
+func TestFidelityMapper_ScanFileWithFallback_HeaderFallback(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "fallback.csv")
+	var sb strings.Builder
+	sb.WriteString("\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n")
+	sb.WriteString("Account Number,Symbol,Quantity,Current Value\n")
+	paddingRow := "ACC123,FXAIX,10.0,$1500.00\n"
+	for sb.Len() < 80*1024 {
+		sb.WriteString(paddingRow)
+	}
+	if err := os.WriteFile(filePath, []byte(sb.String()), 0o600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	file, size, err := openStatementFile(filePath)
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	defer file.Close()
+
+	gotDate, scanErr := scanFileWithFallback(context.Background(), file, size, filePath)
+	if scanErr != nil {
+		t.Fatalf("unexpected scan error: %v", scanErr)
+	}
+	expectedDate := time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC)
+	if !gotDate.Equal(expectedDate) {
+		t.Errorf("expected date %v, got %v", expectedDate, gotDate)
+	}
+}
+
