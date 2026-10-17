@@ -63,12 +63,13 @@ func ParseFidelityQuantity(val string) (float64, error) {
 
 // ParseFidelityDateDownloaded extracts timestamp from "Date downloaded Sep-25-2026 9:50 p.m ET".
 func ParseFidelityDateDownloaded(line string) (time.Time, error) {
-	clean := strings.Trim(line, `" `)
+	clean := strings.Trim(line, "\", \t\r\n")
 	prefix := "Date downloaded "
 	if !strings.HasPrefix(clean, prefix) {
 		return time.Time{}, fmt.Errorf("line does not contain Date downloaded prefix: %s", line)
 	}
 	dateStr := strings.TrimPrefix(clean, prefix)
+	dateStr = strings.Trim(dateStr, "\", \t\r\n")
 	// Normalize variations of a.m./p.m. to standard AM/PM for Go time parsing
 	dateStr = strings.ReplaceAll(dateStr, "p.m.", "PM")
 	dateStr = strings.ReplaceAll(dateStr, "a.m.", "AM")
@@ -89,7 +90,11 @@ func ParseFidelityDateDownloaded(line string) (time.Time, error) {
 
 	parsed, err := time.ParseInLocation("Jan-02-2006 3:04 PM", dateStr, loc)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse date '%s': %w", dateStr, err)
+		var errSingle error
+		parsed, errSingle = time.ParseInLocation("Jan-2-2006 3:04 PM", dateStr, loc)
+		if errSingle != nil {
+			return time.Time{}, fmt.Errorf("failed to parse date '%s': %w", dateStr, err)
+		}
 	}
 	return parsed, nil
 }

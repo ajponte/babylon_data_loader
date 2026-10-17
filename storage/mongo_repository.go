@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"babylon/dataloader/datalake/model"
@@ -14,13 +15,16 @@ import (
 )
 
 const (
-	TransactionsCollection = "transactions"
-	syncTableName          = "dataSync"
+	TransactionsCollection      = "transactions"
+	FidelityPositionsCollection = "positions_fidelity"
+	syncTableName               = "dataSync"
 )
 
 // MongoRepository implements the datalake.Repository interface for MongoDB.
 type MongoRepository struct {
-	provider CollectionProvider
+	provider  CollectionProvider
+	indexOnce sync.Once
+	indexErr  error
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -73,6 +77,80 @@ func (r *MongoRepository) BulkUpsertTransactions(
 		CollectionName:  collectionName,
 		SyncTimestamp:   time.Now(),
 		RecordsUploaded: int64(len(transactions)), // Using len(transactions) for recordsUploaded
+	}
+	_, err = syncCollection.InsertOne(ctx, syncLog)
+	if err != nil {
+		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
+	}
+
+	return repository.UpsertStats{
+		UpsertedCount: res.UpsertedCount,
+		MatchedCount:  res.MatchedCount,
+		ModifiedCount: res.ModifiedCount,
+	}, nil
+}
+
+// ensureFidelityIndexes ensures the compound unique index exists for Fidelity positions.
+func (r *MongoRepository) ensureFidelityIndexes(ctx context.Context) error {
+	r.indexOnce.Do(func() {
+		collection := r.provider.Collection(FidelityPositionsCollection)
+		indexModel := mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "accountNumber", Value: 1},
+				{Key: "symbol", Value: 1},
+				{Key: "asOfDate", Value: 1},
+			},
+			Options: options.Index().SetUnique(true).SetName("idx_account_symbol_asof"),
+		}
+		_, err := collection.Indexes().CreateOne(ctx, indexModel)
+		if err != nil {
+			r.indexErr = fmt.Errorf("failed to create index on %s: %w", FidelityPositionsCollection, err)
+		}
+	})
+	return r.indexErr
+}
+
+// BulkUpsertFidelityPositions bulk upserts portfolio positions into the "positions_fidelity" collection.
+func (r *MongoRepository) BulkUpsertFidelityPositions(
+	ctx context.Context,
+	positions []model.FidelityPosition,
+) (repository.UpsertStats, error) {
+	if len(positions) == 0 {
+		return repository.UpsertStats{}, nil
+	}
+
+	if err := r.ensureFidelityIndexes(ctx); err != nil {
+		return repository.UpsertStats{}, err
+	}
+
+	collection := r.provider.Collection(FidelityPositionsCollection)
+
+	var models []mongo.WriteModel
+	for _, doc := range positions {
+		filter := bson.M{
+			"accountNumber": doc.AccountNumber,
+			"symbol":        doc.Symbol,
+			"asOfDate":      doc.AsOfDate,
+		}
+		update := bson.M{"$set": doc}
+		models = append(models, mongo.NewUpdateOneModel().SetFilter(filter).SetUpdate(update).SetUpsert(true))
+	}
+
+	res, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	if err != nil {
+		return repository.UpsertStats{}, fmt.Errorf(
+			"failed to perform bulk write for collection %s: %w",
+			FidelityPositionsCollection,
+			err,
+		)
+	}
+
+	// Update sync log audit trail
+	syncCollection := r.provider.Collection(syncTableName)
+	syncLog := model.SyncLog{
+		CollectionName:  FidelityPositionsCollection,
+		SyncTimestamp:   time.Now(),
+		RecordsUploaded: int64(len(positions)),
 	}
 	_, err = syncCollection.InsertOne(ctx, syncLog)
 	if err != nil {

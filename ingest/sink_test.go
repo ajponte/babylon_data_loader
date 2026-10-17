@@ -36,6 +36,12 @@ func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []mo
 	}, m.err
 }
 
+func (m *mockRepo) BulkUpsertFidelityPositions(ctx context.Context, positions []model.FidelityPosition) (repository.UpsertStats, error) {
+	return repository.UpsertStats{
+		UpsertedCount: int64(len(positions)),
+	}, m.err
+}
+
 func (m *mockRepo) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
 	return nil, m.err
 }

@@ -169,3 +169,14 @@ func TestMongoCollection_Find_Error(t *testing.T) {
 		t.Errorf("expected nil cursor on error, got: %v", cursor)
 	}
 }
+
+// TestMongoCollection_Indexes verifies that Indexes returns a non-nil IndexView.
+func TestMongoCollection_Indexes(t *testing.T) {
+	mongoColl, cleanup := setupTestMongoCollection(t)
+	defer cleanup()
+
+	idxView := mongoColl.Indexes()
+	if idxView == nil {
+		t.Fatal("expected non-nil IndexView from mongoColl.Indexes()")
+	}
+}

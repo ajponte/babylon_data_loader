@@ -137,6 +137,21 @@ func TestParseFidelityDateDownloaded(t *testing.T) {
 			expected: time.Date(2026, time.January, 15, 10, 15, 0, 0, nyLoc),
 		},
 		{
+			name:     "single digit day",
+			input:    `"Date downloaded Sep-5-2026 9:50 p.m ET"`,
+			expected: time.Date(2026, time.September, 5, 21, 50, 0, 0, nyLoc),
+		},
+		{
+			name:     "trailing delimiter commas",
+			input:    `"Date downloaded Sep-25-2026 9:50 p.m ET",,,,,`,
+			expected: time.Date(2026, time.September, 25, 21, 50, 0, 0, nyLoc),
+		},
+		{
+			name:     "single digit day with trailing commas",
+			input:    `"Date downloaded Oct-3-2026 8:30 a.m. ET",,,`,
+			expected: time.Date(2026, time.October, 3, 8, 30, 0, 0, nyLoc),
+		},
+		{
 			name:    "missing prefix",
 			input:   `"Downloaded on Sep-25-2026"`,
 			wantErr: true,

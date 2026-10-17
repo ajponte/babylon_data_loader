@@ -179,12 +179,14 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 		return fmt.Errorf("failed to resolve MongoDB URI: %w", secretErr)
 	}
 
+	s3URI := fmt.Sprintf("s3://%s/%s", bucket, key)
 	cfg := &config.Config{
 		MongoURI:           mongoURI,
 		UnprocessedDir:     unprocessedDir,
 		ProcessedDir:       processedDir,
 		MoveProcessedFiles: true,
 		Timeout:            defaultIngestTimeout,
+		S3URI:              s3URI,
 	}
 
 	h.logger.InfoContext(ctx, "Ingesting file", "filename", filename)
