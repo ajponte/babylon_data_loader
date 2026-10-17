@@ -25,6 +25,10 @@ func TestGenericExtractor_ExtractInfo_Success(t *testing.T) {
 		{"my_synthetic_statement.pdf", datasource.Synthetic, "0000"},
 		{"SYNTHETIC_transactions.xls", datasource.Synthetic, "0000"},
 		{"another_file_synthetic.txt", datasource.Synthetic, "0000"},
+		{"Portfolio_Positions_Sep-25-2026.csv", datasource.Fidelity, "portfolio"},
+		{"fidelity_positions_2026.csv", datasource.Fidelity, "portfolio"},
+		{"PORTFOLIO_POSITIONS_export.CSV", datasource.Fidelity, "portfolio"},
+		{"Portfolio_Positions_Synthetic.csv", datasource.Fidelity, "portfolio"},
 	}
 
 	for _, test := range tests {

@@ -30,6 +30,13 @@ func (e *GenericExtractor) ExtractInfo(filename string) (*SourceInfo, error) {
 		}
 	}
 
+	if strings.Contains(lowerFileName, "fidelity") || strings.HasPrefix(lowerFileName, "portfolio_positions") {
+		return &SourceInfo{
+			DataSource: string(Fidelity),
+			AccountID:  "portfolio",
+		}, nil
+	}
+
 	if strings.Contains(lowerFileName, "synthetic") {
 		return &SourceInfo{
 			DataSource: string(Synthetic),
