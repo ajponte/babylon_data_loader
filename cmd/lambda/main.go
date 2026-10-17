@@ -129,51 +129,74 @@ func (h *Handler) resolveS3Key(ctx context.Context, record events.S3EventRecord)
 	return unescaped
 }
 
-func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord) error {
-	bucket := record.S3.Bucket.Name
-	key := h.resolveS3Key(ctx, record)
+type stagingDirs struct {
+	rootDir        string
+	unprocessedDir string
+	processedDir   string
+}
 
-	lowerKey := strings.ToLower(key)
-	if !strings.HasPrefix(key, "unprocessed/") {
-		h.logger.InfoContext(ctx, "Skipping object: not in unprocessed/ prefix", "bucket", bucket, "key", key)
-		return nil
-	}
-	if !strings.HasSuffix(lowerKey, ".csv") {
-		h.logger.InfoContext(ctx, "Skipping object: not a .csv file", "bucket", bucket, "key", key)
-		return nil
-	}
-
-	filename := filepath.Base(key)
-	if filename == "." || filename == "/" || filename == "" {
-		h.logger.WarnContext(ctx, "Invalid filename extracted from key", "key", key)
-		return nil
-	}
-
+func (h *Handler) createStagingDirs() (*stagingDirs, func(), error) {
 	invDir, tmpErr := os.MkdirTemp(h.tmpDir, "ingest-*")
 	if tmpErr != nil {
-		return fmt.Errorf("failed to create temp directory: %w", tmpErr)
+		return nil, nil, fmt.Errorf("failed to create temp directory: %w", tmpErr)
 	}
-	defer func() {
+	cleanup := func() {
 		_ = os.RemoveAll(invDir)
-	}()
+	}
 
 	unprocessedDir := filepath.Join(invDir, "unprocessed")
 	processedDir := filepath.Join(invDir, "processed")
 
 	if dirErr := os.MkdirAll(unprocessedDir, dirPerms); dirErr != nil {
-		return fmt.Errorf("failed to create directory %s: %w", unprocessedDir, dirErr)
+		cleanup()
+		return nil, nil, fmt.Errorf("failed to create directory %s: %w", unprocessedDir, dirErr)
 	}
 	if dirErr := os.MkdirAll(processedDir, dirPerms); dirErr != nil {
-		return fmt.Errorf("failed to create directory %s: %w", processedDir, dirErr)
+		cleanup()
+		return nil, nil, fmt.Errorf("failed to create directory %s: %w", processedDir, dirErr)
 	}
 
-	localUnprocessed := filepath.Join(unprocessedDir, filename)
+	staging := &stagingDirs{
+		rootDir:        invDir,
+		unprocessedDir: unprocessedDir,
+		processedDir:   processedDir,
+	}
+	return staging, cleanup, nil
+}
 
-	h.logger.InfoContext(ctx, "Downloading S3 file", "bucket", bucket, "key", key, "dest", localUnprocessed)
-	if dlErr := h.s3Storage.Download(ctx, bucket, key, localUnprocessed); dlErr != nil {
+func (h *Handler) validateS3Key(ctx context.Context, bucket, key string) (string, bool) {
+	lowerKey := strings.ToLower(key)
+	if !strings.HasPrefix(key, "unprocessed/") {
+		h.logger.InfoContext(ctx, "Skipping object: not in unprocessed/ prefix", "bucket", bucket, "key", key)
+		return "", false
+	}
+	if !strings.HasSuffix(lowerKey, ".csv") {
+		h.logger.InfoContext(ctx, "Skipping object: not a .csv file", "bucket", bucket, "key", key)
+		return "", false
+	}
+
+	filename := filepath.Base(key)
+	if filename == "." || filename == "/" || filename == "" {
+		h.logger.WarnContext(ctx, "Invalid filename extracted from key", "key", key)
+		return "", false
+	}
+
+	return filename, true
+}
+
+func (h *Handler) downloadFile(ctx context.Context, bucket, key, destPath string) error {
+	h.logger.InfoContext(ctx, "Downloading S3 file", "bucket", bucket, "key", key, "dest", destPath)
+	if dlErr := h.s3Storage.Download(ctx, bucket, key, destPath); dlErr != nil {
 		return fmt.Errorf("failed to download s3://%s/%s: %w", bucket, key, dlErr)
 	}
+	return nil
+}
 
+func (h *Handler) executeIngestion(
+	ctx context.Context,
+	bucket, key, filename string,
+	staging *stagingDirs,
+) error {
 	mongoURI, secretErr := config.GetMongoURI(ctx, h.secretsClient, h.secretID)
 	if secretErr != nil {
 		return fmt.Errorf("failed to resolve MongoDB URI: %w", secretErr)
@@ -182,8 +205,8 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 	s3URI := fmt.Sprintf("s3://%s/%s", bucket, key)
 	cfg := &config.Config{
 		MongoURI:           mongoURI,
-		UnprocessedDir:     unprocessedDir,
-		ProcessedDir:       processedDir,
+		UnprocessedDir:     staging.unprocessedDir,
+		ProcessedDir:       staging.processedDir,
 		MoveProcessedFiles: true,
 		Timeout:            defaultIngestTimeout,
 		S3URI:              s3URI,
@@ -193,7 +216,10 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 	if ingestErr := h.ingestRunner(ctx, cfg); ingestErr != nil {
 		return fmt.Errorf("ingestion failed for %s: %w", filename, ingestErr)
 	}
+	return nil
+}
 
+func (h *Handler) archiveS3File(ctx context.Context, bucket, key string) error {
 	relPath := strings.TrimPrefix(key, "unprocessed/")
 	destKey := "processed/" + relPath
 	h.logger.InfoContext(ctx, "Copying S3 file to processed/", "src", key, "dest", destKey)
@@ -208,6 +234,33 @@ func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord
 
 	h.logger.InfoContext(ctx, "Successfully processed and archived file", "bucket", bucket, "key", key)
 	return nil
+}
+
+func (h *Handler) processRecord(ctx context.Context, record events.S3EventRecord) error {
+	bucket := record.S3.Bucket.Name
+	key := h.resolveS3Key(ctx, record)
+
+	filename, valid := h.validateS3Key(ctx, bucket, key)
+	if !valid {
+		return nil
+	}
+
+	staging, cleanup, stagingErr := h.createStagingDirs()
+	if stagingErr != nil {
+		return stagingErr
+	}
+	defer cleanup()
+
+	localUnprocessed := filepath.Join(staging.unprocessedDir, filename)
+	if dlErr := h.downloadFile(ctx, bucket, key, localUnprocessed); dlErr != nil {
+		return dlErr
+	}
+
+	if ingestErr := h.executeIngestion(ctx, bucket, key, filename, staging); ingestErr != nil {
+		return ingestErr
+	}
+
+	return h.archiveS3File(ctx, bucket, key)
 }
 
 // HandleS3Event handles S3 event notifications from AWS Lambda.
