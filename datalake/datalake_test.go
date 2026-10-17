@@ -28,6 +28,8 @@ type mockRepository struct {
 	chaseTransactions                 []model.ChaseTransaction
 	bulkUpsertFidelityPositionsCalled bool
 	fidelityPositions                 []model.FidelityPosition
+	recordSyncLogCalled               bool
+	recordedSyncLog                   model.SyncLog
 	err                               error
 }
 
@@ -53,6 +55,12 @@ func (m *mockRepository) BulkUpsertFidelityPositions(ctx context.Context, positi
 	return repository.UpsertStats{
 		UpsertedCount: int64(len(positions)),
 	}, m.err
+}
+
+func (m *mockRepository) RecordSyncLog(ctx context.Context, log model.SyncLog) error {
+	m.recordSyncLogCalled = true
+	m.recordedSyncLog = log
+	return m.err
 }
 
 func (m *mockRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {

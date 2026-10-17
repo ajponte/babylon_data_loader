@@ -48,6 +48,10 @@ func (m *mockRepo) BulkUpsertFidelityPositions(ctx context.Context, positions []
 	}, m.err
 }
 
+func (m *mockRepo) RecordSyncLog(ctx context.Context, log model.SyncLog) error {
+	return m.err
+}
+
 func (m *mockRepo) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
 	return nil, m.err
 }

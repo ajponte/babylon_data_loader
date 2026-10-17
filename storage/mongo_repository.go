@@ -23,6 +23,7 @@ const (
 	mongoSetOp       = "$set"
 	fieldAccountID   = "accountId"
 	fieldPostingDate = "postingDate"
+	fieldSyncedAt    = "syncedAt"
 )
 
 var _ repository.Repository = (*MongoRepository)(nil)
@@ -34,6 +35,8 @@ type MongoRepository struct {
 	indexErr            error
 	chaseIndexMu        sync.RWMutex
 	chaseIndexesCreated bool
+	syncIndexMu         sync.RWMutex
+	syncIndexesCreated  bool
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -82,13 +85,17 @@ func (r *MongoRepository) BulkUpsertTransactions(
 
 	// Update sync log
 	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.SyncLog{
-		CollectionName:  collectionName,
-		SyncTimestamp:   time.Now(),
-		RecordsUploaded: int64(len(transactions)), // Using len(transactions) for recordsUploaded
-	}
-	_, err = syncCollection.InsertOne(ctx, syncLog)
-	if err != nil {
+	syncLog := model.NewSuccessSyncLog(
+		"",
+		"",
+		collectionName,
+		int64(len(transactions)),
+		int64(len(transactions)),
+		0,
+		time.Now(),
+		0,
+	)
+	if _, err = syncCollection.InsertOne(ctx, syncLog); err != nil {
 		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
@@ -152,13 +159,17 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 
 	// Update sync log audit trail
 	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.SyncLog{
-		CollectionName:  FidelityPositionsCollection,
-		SyncTimestamp:   time.Now(),
-		RecordsUploaded: int64(len(positions)),
-	}
-	_, err = syncCollection.InsertOne(ctx, syncLog)
-	if err != nil {
+	syncLog := model.NewSuccessSyncLog(
+		"",
+		"",
+		FidelityPositionsCollection,
+		int64(len(positions)),
+		int64(len(positions)),
+		0,
+		time.Now(),
+		0,
+	)
+	if _, err = syncCollection.InsertOne(ctx, syncLog); err != nil {
 		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
@@ -282,28 +293,92 @@ func (r *MongoRepository) executeBulkWrite(
 	return res, nil
 }
 
+// ensureDataSyncIndexes ensures the compound indexes exist for dataSync logs.
+func (r *MongoRepository) ensureDataSyncIndexes(ctx context.Context) error {
+	r.syncIndexMu.RLock()
+	if r.syncIndexesCreated {
+		r.syncIndexMu.RUnlock()
+		return nil
+	}
+	r.syncIndexMu.RUnlock()
+
+	r.syncIndexMu.Lock()
+	defer r.syncIndexMu.Unlock()
+
+	if r.syncIndexesCreated {
+		return nil
+	}
+
+	collection := r.provider.Collection(syncTableName)
+
+	syncedAtIndex := mongo.IndexModel{
+		Keys:    bson.D{{Key: fieldSyncedAt, Value: -1}},
+		Options: options.Index().SetName("idx_datasync_synced_at"),
+	}
+
+	fileSyncedIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "fileName", Value: 1},
+			{Key: fieldSyncedAt, Value: -1},
+		},
+		Options: options.Index().SetName("idx_datasync_filename_synced_at"),
+	}
+
+	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{syncedAtIndex, fileSyncedIndex})
+	if err != nil {
+		return fmt.Errorf("failed to create indexes on %s: %w", syncTableName, err)
+	}
+
+	r.syncIndexesCreated = true
+	return nil
+}
+
+// RecordSyncLog inserts a complete audit record into the dataSync collection.
+func (r *MongoRepository) RecordSyncLog(ctx context.Context, log model.SyncLog) error {
+	if err := r.ensureDataSyncIndexes(ctx); err != nil {
+		return err
+	}
+
+	log.Normalize()
+	if log.SyncedAt.IsZero() {
+		log.SyncedAt = time.Now().UTC()
+		log.LegacySyncTimestamp = log.SyncedAt
+	}
+
+	syncCollection := r.provider.Collection(syncTableName)
+	if _, err := syncCollection.InsertOne(ctx, log); err != nil {
+		return fmt.Errorf("failed to insert audit log into %s: %w", syncTableName, err)
+	}
+
+	return nil
+}
+
 func (r *MongoRepository) recordSyncAuditLog(
 	ctx context.Context,
 	collectionName string,
 	recordCount int64,
 ) error {
 	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.SyncLog{
-		CollectionName:  collectionName,
-		SyncTimestamp:   time.Now(),
-		RecordsUploaded: recordCount,
-	}
+	syncLog := model.NewSuccessSyncLog("", "", collectionName, recordCount, recordCount, 0, time.Now(), 0)
 	if _, err := syncCollection.InsertOne(ctx, syncLog); err != nil {
 		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 	return nil
 }
 
-// GetSyncLogs retrieves all sync logs from the dataSync collection, sorted by sync_timestamp descending.
+// GetSyncLogs retrieves all sync logs from the dataSync collection, sorted by syncedAt descending.
 func (r *MongoRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
+	if err := r.ensureDataSyncIndexes(ctx); err != nil {
+		return nil, err
+	}
+
 	syncCollection := r.provider.Collection(syncTableName)
 
-	opts := options.Find().SetSort(bson.M{"sync_timestamp": -1})
+	opts := options.Find().SetSort(bson.D{
+		{Key: fieldSyncedAt, Value: -1},
+		{Key: "sync_timestamp", Value: -1},
+	})
+
 	cursor, err := syncCollection.Find(ctx, bson.M{}, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query sync logs: %w", err)
@@ -311,9 +386,12 @@ func (r *MongoRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, err
 	defer cursor.Close(ctx)
 
 	var syncLogs []model.SyncLog
-	err = cursor.All(ctx, &syncLogs)
-	if err != nil {
+	if err = cursor.All(ctx, &syncLogs); err != nil {
 		return nil, fmt.Errorf("failed to decode sync logs: %w", err)
+	}
+
+	for i := range syncLogs {
+		syncLogs[i].Normalize()
 	}
 
 	return syncLogs, nil

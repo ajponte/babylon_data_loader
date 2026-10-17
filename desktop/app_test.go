@@ -54,6 +54,10 @@ func (m *mockRepo) BulkUpsertFidelityPositions(ctx context.Context, positions []
 	return repository.UpsertStats{}, m.err
 }
 
+func (m *mockRepo) RecordSyncLog(ctx context.Context, log model.SyncLog) error {
+	return m.err
+}
+
 func (m *mockRepo) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
 	return m.syncLogs, m.err
 }
@@ -237,8 +241,10 @@ func TestApp_GetHistory_Success(t *testing.T) {
 
 	expectedLogs := []model.SyncLog{
 		{
-			CollectionName:  "transactions_synthetic",
-			RecordsUploaded: 5,
+			CollectionName:        "transactions_synthetic",
+			RecordCount:           5,
+			UpsertedCount:         5,
+			LegacyRecordsUploaded: 5,
 		},
 	}
 	app.repo = &mockRepo{

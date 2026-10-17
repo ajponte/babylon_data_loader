@@ -114,8 +114,8 @@ func TestBulkUpsertTransactions_Success(t *testing.T) {
 			if syncLog.CollectionName != "transactions_synthetic" {
 				t.Errorf("Expected CollectionName %s, got %s", "transactions_synthetic", syncLog.CollectionName)
 			}
-			if syncLog.RecordsUploaded != int64(len(transactions)) {
-				t.Errorf("Expected RecordsUploaded %d, got %d", len(transactions), syncLog.RecordsUploaded)
+			if syncLog.LegacyRecordsUploaded != int64(len(transactions)) {
+				t.Errorf("Expected RecordsUploaded %d, got %d", len(transactions), syncLog.LegacyRecordsUploaded)
 			}
 			return &mongo.InsertOneResult{}, nil
 		},
@@ -211,9 +211,9 @@ func TestGetSyncLogs_Success(t *testing.T) {
 	ctx := context.Background()
 	expectedLogs := []interface{}{
 		model.SyncLog{
-			CollectionName:  "transactions_synthetic",
-			SyncTimestamp:   time.Now(),
-			RecordsUploaded: 10,
+			CollectionName:        "transactions_synthetic",
+			LegacySyncTimestamp:   time.Now(),
+			LegacyRecordsUploaded: 10,
 		},
 	}
 
@@ -578,10 +578,10 @@ func TestBulkUpsertFidelity_DataSyncLog(t *testing.T) {
 	if log.CollectionName != storage.FidelityPositionsCollection {
 		t.Errorf("expected CollectionName %s, got %s", storage.FidelityPositionsCollection, log.CollectionName)
 	}
-	if log.RecordsUploaded != 5 {
-		t.Errorf("expected RecordsUploaded == 5, got %d", log.RecordsUploaded)
+	if log.LegacyRecordsUploaded != 5 {
+		t.Errorf("expected RecordsUploaded == 5, got %d", log.LegacyRecordsUploaded)
 	}
-	if log.SyncTimestamp.IsZero() {
+	if log.LegacySyncTimestamp.IsZero() {
 		t.Errorf("expected non-zero SyncTimestamp")
 	}
 }
@@ -735,8 +735,8 @@ func TestBulkUpsertChaseTransactions_Success(t *testing.T) {
 			if syncLog.CollectionName != storage.ChaseTransactionsCollection {
 				t.Errorf("Expected CollectionName %s, got %s", storage.ChaseTransactionsCollection, syncLog.CollectionName)
 			}
-			if syncLog.RecordsUploaded != int64(len(transactions)) {
-				t.Errorf("Expected RecordsUploaded %d, got %d", len(transactions), syncLog.RecordsUploaded)
+			if syncLog.LegacyRecordsUploaded != int64(len(transactions)) {
+				t.Errorf("Expected RecordsUploaded %d, got %d", len(transactions), syncLog.LegacyRecordsUploaded)
 			}
 			return &mongo.InsertOneResult{}, nil
 		},
@@ -1014,5 +1014,255 @@ func TestBulkUpsertChaseTransactions_SyncLogError(t *testing.T) {
 	_, err := repo.BulkUpsertChaseTransactions(ctx, transactions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("expected sync log error containing %q, got: %v", expectedErr.Error(), err)
+	}
+}
+
+// TC-SR-01: RecordSyncLog (Success) verifies index creation and document insertion into dataSync.
+func TestRecordSyncLog_Success(t *testing.T) {
+	ctx := context.Background()
+	var createdIndexes []mongo.IndexModel
+	var insertedDoc model.SyncLog
+
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createManyFunc: func(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+					createdIndexes = models
+					return []string{"idx_datasync_synced_at", "idx_datasync_filename_synced_at"}, nil
+				},
+			}
+		},
+		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
+			if log, ok := document.(model.SyncLog); ok {
+				insertedDoc = log
+			}
+			return &mongo.InsertOneResult{}, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			if name != "dataSync" {
+				t.Errorf("expected collection name 'dataSync', got %q", name)
+			}
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	now := time.Now().UTC()
+	log := model.NewSuccessSyncLog("chase.csv", "hash123", "transactions_chase", 10, 8, 2, now, 150)
+
+	err := repo.RecordSyncLog(ctx, log)
+	if err != nil {
+		t.Fatalf("RecordSyncLog failed: %v", err)
+	}
+
+	// Verify automated index creation
+	if len(createdIndexes) != 2 {
+		t.Fatalf("expected 2 indexes created, got %d", len(createdIndexes))
+	}
+	if *createdIndexes[0].Options.Name != "idx_datasync_synced_at" {
+		t.Errorf("expected index name 'idx_datasync_synced_at', got %q", *createdIndexes[0].Options.Name)
+	}
+	if *createdIndexes[1].Options.Name != "idx_datasync_filename_synced_at" {
+		t.Errorf("expected index name 'idx_datasync_filename_synced_at', got %q", *createdIndexes[1].Options.Name)
+	}
+
+	// Verify inserted document
+	if insertedDoc.FileName != "chase.csv" {
+		t.Errorf("expected FileName 'chase.csv', got %q", insertedDoc.FileName)
+	}
+	if insertedDoc.Status != string(model.SyncStatusSuccess) {
+		t.Errorf("expected Status 'SUCCESS', got %q", insertedDoc.Status)
+	}
+	if insertedDoc.RecordCount != 10 || insertedDoc.UpsertedCount != 8 || insertedDoc.MatchedCount != 2 {
+		t.Errorf("unexpected counts in insertedDoc: %+v", insertedDoc)
+	}
+}
+
+// TC-SR-02: RecordSyncLog (Failure Entry) verifies insertion of failed sync log with error message.
+func TestRecordSyncLog_FailedEntry(t *testing.T) {
+	ctx := context.Background()
+	var insertedDoc model.SyncLog
+
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createManyFunc: func(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+					return []string{"idx1", "idx2"}, nil
+				},
+			}
+		},
+		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
+			if log, ok := document.(model.SyncLog); ok {
+				insertedDoc = log
+			}
+			return &mongo.InsertOneResult{}, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	now := time.Now().UTC()
+	failedLog := model.NewFailedSyncLog("bad.csv", "hash456", "transactions_chase", "corrupted CSV header", 0, now, 25)
+
+	err := repo.RecordSyncLog(ctx, failedLog)
+	if err != nil {
+		t.Fatalf("RecordSyncLog failed: %v", err)
+	}
+
+	if insertedDoc.Status != string(model.SyncStatusFailed) {
+		t.Errorf("expected Status 'FAILED', got %q", insertedDoc.Status)
+	}
+	if insertedDoc.ErrorMessage != "corrupted CSV header" {
+		t.Errorf("expected ErrorMessage 'corrupted CSV header', got %q", insertedDoc.ErrorMessage)
+	}
+	if insertedDoc.UpsertedCount != 0 {
+		t.Errorf("expected UpsertedCount 0, got %d", insertedDoc.UpsertedCount)
+	}
+}
+
+// TC-SR-03: RecordSyncLog (Index Error) verifies proper error propagation if index creation fails.
+func TestRecordSyncLog_IndexError(t *testing.T) {
+	ctx := context.Background()
+	expectedErr := errors.New("index creation failed")
+	var insertCalled bool
+
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createManyFunc: func(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+					return nil, expectedErr
+				},
+			}
+		},
+		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
+			insertCalled = true
+			return &mongo.InsertOneResult{}, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	log := model.NewSuccessSyncLog("file.csv", "hash", "transactions", 5, 5, 0, time.Now(), 50)
+
+	err := repo.RecordSyncLog(ctx, log)
+	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected index error %v, got: %v", expectedErr, err)
+	}
+	if insertCalled {
+		t.Errorf("expected InsertOne NOT to be called when index creation fails")
+	}
+}
+
+// TC-SR-04: GetSyncLogs (Canonical & Legacy) tests querying mixed legacy and canonical sync logs, verifying descending order and normalization.
+func TestGetSyncLogs_MixedCanonicalAndLegacy(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	earlier := now.Add(-2 * time.Hour)
+
+	mixedDocs := []interface{}{
+		// Canonical doc (newer)
+		model.NewSuccessSyncLog("chase.csv", "hash1", "transactions_chase", 20, 18, 2, now, 100),
+		// Legacy BSON-like document (older)
+		bson.D{
+			{Key: "collection_name", Value: "transactions_synthetic"},
+			{Key: "sync_timestamp", Value: earlier},
+			{Key: "records_uploaded", Value: int64(15)},
+		},
+	}
+
+	cursor, err := mongo.NewCursorFromDocuments(mixedDocs, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create cursor: %v", err)
+	}
+
+	var capturedSort bson.D
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createManyFunc: func(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+					return []string{"idx1", "idx2"}, nil
+				},
+			}
+		},
+		findFunc: func(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error) {
+			if len(opts) > 0 && opts[0].Sort != nil {
+				if s, ok := opts[0].Sort.(bson.D); ok {
+					capturedSort = s
+				}
+			}
+			return cursor, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	logs, err := repo.GetSyncLogs(ctx)
+	if err != nil {
+		t.Fatalf("GetSyncLogs failed: %v", err)
+	}
+
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 logs returned, got %d", len(logs))
+	}
+
+	assertMixedSortOptions(t, capturedSort)
+	assertCanonicalLog(t, logs[0])
+	assertLegacyLog(t, logs[1], earlier)
+}
+
+func assertMixedSortOptions(t *testing.T, sort bson.D) {
+	t.Helper()
+	if len(sort) != 2 {
+		t.Fatalf("expected 2 sort keys, got %d", len(sort))
+	}
+	if sort[0].Key != "syncedAt" || sort[0].Value != -1 {
+		t.Errorf("expected sort syncedAt: -1, got %+v", sort[0])
+	}
+	if sort[1].Key != "sync_timestamp" || sort[1].Value != -1 {
+		t.Errorf("expected sort sync_timestamp: -1, got %+v", sort[1])
+	}
+}
+
+func assertCanonicalLog(t *testing.T, log model.SyncLog) {
+	t.Helper()
+	if log.FileName != "chase.csv" || log.CollectionName != "transactions_chase" {
+		t.Errorf("unexpected canonical log: %+v", log)
+	}
+	if log.RecordCount != 20 || log.UpsertedCount != 18 || log.MatchedCount != 2 {
+		t.Errorf("unexpected canonical counts: %+v", log)
+	}
+}
+
+func assertLegacyLog(t *testing.T, log model.SyncLog, earlier time.Time) {
+	t.Helper()
+	if log.CollectionName != "transactions_synthetic" {
+		t.Errorf("expected CollectionName 'transactions_synthetic', got %q", log.CollectionName)
+	}
+	if !log.SyncedAt.Equal(earlier) {
+		t.Errorf("expected SyncedAt normalized to %v, got %v", earlier, log.SyncedAt)
+	}
+	if log.RecordCount != 15 || log.UpsertedCount != 15 {
+		t.Errorf("expected RecordCount/UpsertedCount normalized to 15, got %d / %d", log.RecordCount, log.UpsertedCount)
+	}
+	if log.Status != string(model.SyncStatusSuccess) {
+		t.Errorf("expected Status normalized to 'SUCCESS', got %q", log.Status)
 	}
 }
