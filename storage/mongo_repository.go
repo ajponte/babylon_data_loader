@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"babylon/dataloader/datalake/model"
@@ -21,7 +22,9 @@ const (
 
 // MongoRepository implements the datalake.Repository interface for MongoDB.
 type MongoRepository struct {
-	provider CollectionProvider
+	provider  CollectionProvider
+	indexOnce sync.Once
+	indexErr  error
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -87,6 +90,26 @@ func (r *MongoRepository) BulkUpsertTransactions(
 	}, nil
 }
 
+// ensureFidelityIndexes ensures the compound unique index exists for Fidelity positions.
+func (r *MongoRepository) ensureFidelityIndexes(ctx context.Context) error {
+	r.indexOnce.Do(func() {
+		collection := r.provider.Collection(FidelityPositionsCollection)
+		indexModel := mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "accountNumber", Value: 1},
+				{Key: "symbol", Value: 1},
+				{Key: "asOfDate", Value: 1},
+			},
+			Options: options.Index().SetUnique(true).SetName("idx_account_symbol_asof"),
+		}
+		_, err := collection.Indexes().CreateOne(ctx, indexModel)
+		if err != nil {
+			r.indexErr = fmt.Errorf("failed to create index on %s: %w", FidelityPositionsCollection, err)
+		}
+	})
+	return r.indexErr
+}
+
 // BulkUpsertFidelityPositions bulk upserts portfolio positions into the "positions_fidelity" collection.
 func (r *MongoRepository) BulkUpsertFidelityPositions(
 	ctx context.Context,
@@ -96,18 +119,11 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 		return repository.UpsertStats{}, nil
 	}
 
-	collection := r.provider.Collection(FidelityPositionsCollection)
-
-	// Ensure compound unique index exists: (accountNumber: 1, symbol: 1, asOfDate: 1)
-	indexModel := mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "accountNumber", Value: 1},
-			{Key: "symbol", Value: 1},
-			{Key: "asOfDate", Value: 1},
-		},
-		Options: options.Index().SetUnique(true).SetName("idx_account_symbol_asof"),
+	if err := r.ensureFidelityIndexes(ctx); err != nil {
+		return repository.UpsertStats{}, err
 	}
-	_, _ = collection.Indexes().CreateOne(ctx, indexModel)
+
+	collection := r.provider.Collection(FidelityPositionsCollection)
 
 	var models []mongo.WriteModel
 	for _, doc := range positions {

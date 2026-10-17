@@ -18,6 +18,7 @@ type IngestFileOptions struct {
 	MoveProcessedFiles bool
 	ProcessedDir       string
 	Reporter           ProgressReporter
+	S3URI              string
 }
 
 type Client interface {
@@ -90,7 +91,6 @@ func (c *client) IngestCSVFiles(
 			file)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to ingest CSV file", "file", file.Name(), "error", err)
-			stats.AddFailure(file.Name(), err.Error())
 		}
 	}
 
@@ -136,6 +136,7 @@ func (c *client) IngestCSVFile(
 		stats,
 		*logger,
 	)
+	processor.S3URI = opts.S3URI
 
 	err := processor.processSingleFile(ctx, fileName, dataSource, accountID, opts.Reporter)
 	if err != nil {
@@ -161,7 +162,26 @@ func copyFileToUnprocessedDir(
 
 	destPath := filepath.Join(destDir, fileName)
 
-	srcFile, err := os.Open(srcPath)
+	cleanSrc := filepath.Clean(srcPath)
+	cleanDest := filepath.Clean(destPath)
+	if cleanSrc == cleanDest {
+		return nil
+	}
+
+	srcInfo, err := os.Stat(cleanSrc)
+	if err != nil {
+		errStr := fmt.Sprintf("failed to stat source file for copy: %v", err)
+		reportFailure(reporter, stats, fileName, errStr)
+		return fmt.Errorf("%s: %w", errStr, err)
+	}
+
+	if destInfo, statErr := os.Stat(cleanDest); statErr == nil {
+		if os.SameFile(srcInfo, destInfo) {
+			return nil
+		}
+	}
+
+	srcFile, err := os.Open(cleanSrc)
 	if err != nil {
 		errStr := fmt.Sprintf("failed to open source file for copy: %v", err)
 		reportFailure(reporter, stats, fileName, errStr)
@@ -169,7 +189,7 @@ func copyFileToUnprocessedDir(
 	}
 	defer srcFile.Close()
 
-	dstFile, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	dstFile, err := os.OpenFile(cleanDest, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		errStr := fmt.Sprintf("failed to create destination file: %v", err)
 		reportFailure(reporter, stats, fileName, errStr)

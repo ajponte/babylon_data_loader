@@ -2,10 +2,13 @@ package datalake
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	csvparser "babylon/dataloader/csv"
 	"babylon/dataloader/datalake/datasource"
@@ -452,14 +455,19 @@ SYNTH-401K-202,TRADITIONAL 401K,FXAIX,FIDELITY 500 INDEX,25.500,$180.20,-$0.80,$
 	if pos1.Source.RowNumber != 2 {
 		t.Errorf("expected Source.RowNumber 2, got %d", pos1.Source.RowNumber)
 	}
-	if pos1.Source.SHA256 == "" {
-		t.Errorf("expected non-empty Source.SHA256")
+	expectedHashBytes := sha256.Sum256([]byte(csvContent))
+	expectedSHA256 := hex.EncodeToString(expectedHashBytes[:])
+	if pos1.Source.SHA256 != expectedSHA256 {
+		t.Errorf("expected Source.SHA256 %s, got %s", expectedSHA256, pos1.Source.SHA256)
 	}
 	if pos1.Source.IngestedAt.IsZero() {
 		t.Errorf("expected non-zero Source.IngestedAt")
 	}
-	if pos1.AsOfDate.IsZero() {
-		t.Errorf("expected non-zero AsOfDate")
+
+	nyLoc, _ := time.LoadLocation("America/New_York")
+	expectedAsOfDate := time.Date(2026, time.September, 25, 21, 50, 0, 0, nyLoc).UTC()
+	if !pos1.AsOfDate.Equal(expectedAsOfDate) {
+		t.Errorf("expected AsOfDate %v, got %v", expectedAsOfDate, pos1.AsOfDate)
 	}
 
 	// Verify second position row number

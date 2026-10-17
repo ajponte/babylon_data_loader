@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -48,6 +49,7 @@ type CSVFileProcessor struct {
 	MoveProcessedFiles bool
 	Stats              *Stats
 	Logger             slog.Logger
+	S3URI              string
 }
 
 // NewCSVFileProcessor creates a new CSVFileProcessor instance.
@@ -139,6 +141,7 @@ func (p *CSVFileProcessor) processFile(
 			rawRecords,
 			unprocessedFilePath,
 			unprocessedFile.Name(),
+			p.S3URI,
 		)
 		if mapErr != nil {
 			return fmt.Errorf("failed to map Fidelity positions: %w", mapErr)
@@ -275,7 +278,13 @@ func (p *CSVFileProcessor) upsertFidelityPositions(
 	unprocessedFilePath string,
 	reporter ProgressReporter,
 ) (repository.UpsertStats, error) {
-	positions, mapErr := mapRawRecordsToFidelityPositions(ctx, rawRecords, unprocessedFilePath, fileName)
+	positions, mapErr := mapRawRecordsToFidelityPositions(
+		ctx,
+		rawRecords,
+		unprocessedFilePath,
+		fileName,
+		p.S3URI,
+	)
 	if mapErr != nil {
 		return repository.UpsertStats{}, p.handleFailure(
 			fileName,
@@ -397,6 +406,7 @@ func mapRawRecordsToFidelityPositions(
 	rawRecords []map[string]string,
 	filePath string,
 	fileName string,
+	s3URI string,
 ) ([]model.FidelityPosition, error) {
 	if len(rawRecords) == 0 {
 		return []model.FidelityPosition{}, nil
@@ -406,12 +416,15 @@ func mapRawRecordsToFidelityPositions(
 		return nil, ctxErr
 	}
 
-	fileHash, err := ComputeFileSHA256(filePath)
+	fileHash, err := ComputeFileSHA256(ctx, filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute sha256 for file %s: %w", filePath, err)
 	}
 
-	asOfDate := extractFidelityAsOfDate(filePath)
+	asOfDate, err := extractFidelityAsOfDate(ctx, filePath)
+	if err != nil {
+		return nil, err
+	}
 	ingestedAt := time.Now().UTC()
 
 	positions := make([]model.FidelityPosition, 0, len(rawRecords))
@@ -424,6 +437,7 @@ func mapRawRecordsToFidelityPositions(
 		}
 
 		source := model.SourceLineage{
+			S3URI:      s3URI,
 			FileName:   fileName,
 			RowNumber:  rowNumber,
 			IngestedAt: ingestedAt,
@@ -440,25 +454,54 @@ func mapRawRecordsToFidelityPositions(
 	return positions, nil
 }
 
-func extractFidelityAsOfDate(filePath string) time.Time {
+const (
+	fidelityScanInitialBufferSize = 64 * 1024
+	fidelityScanMaxBufferSize     = 10 * 1024 * 1024
+)
+
+func extractFidelityAsOfDate(ctx context.Context, filePath string) (time.Time, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return time.Time{}, ctxErr
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
-		return time.Now().UTC()
+		return time.Time{}, fmt.Errorf("failed to open file to extract Fidelity asOfDate: %w", err)
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, fidelityScanInitialBufferSize), fidelityScanMaxBufferSize)
+
+	var foundDate time.Time
+	var hasDate bool
+
 	for scanner.Scan() {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return time.Time{}, ctxErr
+		}
 		line := strings.TrimSpace(scanner.Text())
-		clean := strings.Trim(line, `" `)
+		clean := strings.Trim(line, "\", \t\r\n")
 		if strings.HasPrefix(clean, "Date downloaded ") {
-			if parsedDate, parseErr := model.ParseFidelityDateDownloaded(line); parseErr == nil {
-				return parsedDate.UTC()
+			parsedDate, parseErr := model.ParseFidelityDateDownloaded(line)
+			if parseErr != nil {
+				return time.Time{}, fmt.Errorf("failed to parse Fidelity date downloaded from %q: %w", line, parseErr)
 			}
+			foundDate = parsedDate.UTC()
+			hasDate = true
+			break
 		}
 	}
 
-	return time.Now().UTC()
+	if scanErr := scanner.Err(); scanErr != nil {
+		return time.Time{}, fmt.Errorf("failed to scan file for Fidelity asOfDate: %w", scanErr)
+	}
+
+	if !hasDate {
+		return time.Time{}, fmt.Errorf("no valid Fidelity date downloaded header/footer found in file %s", filePath)
+	}
+
+	return foundDate, nil
 }
 
 func mapRawRecordsToTransactions(
@@ -576,17 +619,49 @@ func (p *CSVFileProcessor) moveFile(
 	// Cleanup the processed file.
 	moveErr := moveProcessedFile(processedFilePath, newPath)
 	if moveErr != nil {
-		return MoveFileError(fileName, p.ProcessedDir)
+		return fmt.Errorf("failed to move file %s to %s: %w", fileName, p.ProcessedDir, moveErr)
 	}
 
 	return nil
 }
 
-// Attempt to permanently move the moveProcessedFile file by renaming it.
+// Attempt to move the processed file by renaming it, falling back to copy-and-remove on cross-device link errors.
 func moveProcessedFile(processedFilePath string, newPath string) error {
-	var err error
-	if err = os.Rename(processedFilePath, newPath); err != nil {
-		return CreateDirectoryError(err.Error())
+	if err := os.Rename(processedFilePath, newPath); err != nil {
+		if copyErr := copyAndRemoveFile(processedFilePath, newPath); copyErr != nil {
+			return fmt.Errorf("failed to move file from %s to %s: %w", processedFilePath, newPath, copyErr)
+		}
+	}
+
+	return nil
+}
+
+func copyAndRemoveFile(srcPath, dstPath string) error {
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed to open source for copy fallback: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to open destination for copy fallback: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, copyErr := io.Copy(dstFile, srcFile); copyErr != nil {
+		return fmt.Errorf("failed to copy file contents: %w", copyErr)
+	}
+
+	if closeErr := srcFile.Close(); closeErr != nil {
+		return fmt.Errorf("failed to close source file: %w", closeErr)
+	}
+	if closeErr := dstFile.Close(); closeErr != nil {
+		return fmt.Errorf("failed to close destination file: %w", closeErr)
+	}
+
+	if removeErr := os.Remove(srcPath); removeErr != nil {
+		return fmt.Errorf("failed to remove original file after copy: %w", removeErr)
 	}
 
 	return nil

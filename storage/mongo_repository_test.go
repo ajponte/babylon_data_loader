@@ -640,3 +640,39 @@ func TestBulkUpsertFidelity_SyncLogError(t *testing.T) {
 		t.Errorf("expected sync log error containing %q, got: %v", expectedErr.Error(), err)
 	}
 }
+
+func TestBulkUpsertFidelity_IndexError(t *testing.T) {
+	ctx := context.Background()
+	expectedErr := errors.New("simulated index creation failure")
+	var bulkWriteCalled bool
+
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createOneFunc: func(ctx context.Context, model mongo.IndexModel, opts ...*options.CreateIndexesOptions) (string, error) {
+					return "", expectedErr
+				},
+			}
+		},
+		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
+			bulkWriteCalled = true
+			return &mongo.BulkWriteResult{}, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	positions := []model.FidelityPosition{{AccountNumber: "TEST", Symbol: "SYM"}}
+	_, err := repo.BulkUpsertFidelityPositions(ctx, positions)
+	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected error containing %q, got: %v", expectedErr.Error(), err)
+	}
+	if bulkWriteCalled {
+		t.Errorf("expected BulkWrite NOT to be called when index creation fails")
+	}
+}

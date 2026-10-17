@@ -13,4 +13,5 @@ type Config struct {
 	SyntheticDataDir   string
 	SyntheticDataRows  int
 	Timeout            time.Duration
+	S3URI              string
 }
