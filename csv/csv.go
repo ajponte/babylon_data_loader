@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -54,12 +55,16 @@ func (p *DefaultParser) ParseStream(
 	_ string,
 	onProgress RowProgressCallback,
 ) ([]map[string]string, int64, error) {
-	totalRecords, err := countRecords(filePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file or directory") {
-			return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)
+	var totalRecords int64
+	if onProgress != nil {
+		var err error
+		totalRecords, err = countRecords(ctx, filePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "no such file or directory") {
+				return nil, 0, fmt.Errorf("failed to open file %s: %w", filePath, err)
+			}
+			return nil, 0, fmt.Errorf("failed to count CSV records from file %s: %w", filePath, err)
 		}
-		return nil, 0, fmt.Errorf("failed to count CSV records from file %s: %w", filePath, err)
 	}
 
 	file, err := os.Open(filePath)
@@ -108,14 +113,20 @@ func (p *DefaultParser) readRecords(
 			return nil, 0, fmt.Errorf("failed to read record from CSV in file %s: %w", filePath, readErr)
 		}
 
+		if isDisclaimerOrEmptyRow(record) {
+			continue
+		}
+
 		if len(record) < headerLen {
 			continue
 		}
 
+		line, _ := reader.FieldPos(0)
 		doc := make(map[string]string)
 		for key, idx := range colIndex {
 			doc[key] = safeGet(record, idx)
 		}
+		doc["__row_number"] = strconv.Itoa(line)
 
 		documents = append(documents, doc)
 		recordsProcessed++
@@ -142,12 +153,14 @@ func createHeaderIndex(reader *csv.Reader) (map[string]int, int, error) {
 	}
 	colIndex := make(map[string]int)
 	for i, col := range header {
-		colIndex[strings.ToLower(col)] = i
+		cleanCol := strings.TrimPrefix(col, "\xef\xbb\xbf")
+		cleanCol = strings.TrimSpace(cleanCol)
+		colIndex[strings.ToLower(cleanCol)] = i
 	}
 	return colIndex, len(header), nil
 }
 
-func countRecords(filePath string) (int64, error) {
+func countRecords(ctx context.Context, filePath string) (int64, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, err
@@ -168,6 +181,10 @@ func countRecords(filePath string) (int64, error) {
 
 	var count int64
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, ctxErr
+		}
+
 		record, readErr := reader.Read()
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
@@ -175,12 +192,38 @@ func countRecords(filePath string) (int64, error) {
 			}
 			return 0, readErr
 		}
+		if isDisclaimerOrEmptyRow(record) {
+			continue
+		}
 		if len(record) < len(header) {
 			continue
 		}
 		count++
 	}
 	return count, nil
+}
+
+func isDisclaimerOrEmptyRow(record []string) bool {
+	if len(record) == 0 {
+		return true
+	}
+	first := strings.TrimSpace(record[0])
+	if first == "" {
+		allEmpty := true
+		for _, f := range record {
+			if strings.TrimSpace(f) != "" {
+				allEmpty = false
+				break
+			}
+		}
+		if allEmpty {
+			return true
+		}
+	}
+	lower := strings.ToLower(first)
+	return strings.HasPrefix(lower, "the data and information") ||
+		strings.HasPrefix(lower, "brokerage services") ||
+		strings.HasPrefix(lower, "date downloaded")
 }
 
 // safeGet retrieves slice[index] safely.

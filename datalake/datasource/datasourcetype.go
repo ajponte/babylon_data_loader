@@ -10,4 +10,6 @@ const (
 	Chase DataSource = "chase"
 	// Synthetic represents a synthetic data source.
 	Synthetic DataSource = "synthetic"
+	// Fidelity represents the Fidelity data source.
+	Fidelity DataSource = "fidelity"
 )

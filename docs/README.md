@@ -7,6 +7,7 @@ This directory contains the developer and AI agent documentation harness for `ba
 - **[Agent Personas](agent_personas.md)**: System prompts and instructions for specialized agent roles (Software Engineering, DevOps).
 - **[Architecture & Data Flow](architecture.md)**: Technical breakdown of the ingest engine, CSV parser, dual-mode storage layer (Local MongoDB & Cloud MongoDB Atlas), and synthetic data generator.
 - **[MongoDB Atlas Datalake Specification](specs/mongodb-atlas-datalake.md)**: Cloud MongoDB Atlas architecture, collection partitioning (`transactions_<datasource>`, `dataSync`), serverless egress security (`0.0.0.0/0`), and AWS Secrets Manager integration.
+- **[Fidelity Portfolio Positions Ingestion Spec](specs/fidelity-portfolio-ingestion.md)**: Ingestion specification for Fidelity portfolio position exports, resilient CSV parsing, and point-in-time snapshot models.
 - **[AWS Lambda Serverless Adapter Spec](specs/lambda/phase1-specification.md)**: Technical specification for event-driven S3 ingestion executed on AWS Lambda (ARM64 Graviton).
 - **[Continuous Delivery Pipeline Spec](specs/continuous-delivery-pipeline.md)**: CI/CD architecture, ECR container packaging, automated deployment upon merges to `main`, and release automation.
 - **[PII & Security Guidelines](pii_handling.md)**: Deep dive into the PII policies, synthetic data usage, and security parameters of the `babylon` data lake.

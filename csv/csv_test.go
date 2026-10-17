@@ -277,3 +277,99 @@ DEBIT,01/01/2024,"WHOLEFDS HAR 102 230 B OAKLAND CA    211023  01/31",Shopping,-
 		t.Errorf("Expected error to be context.Canceled, got %v", err)
 	}
 }
+
+func TestCSVParser_UTF8BOM(t *testing.T) {
+	ctx := context.Background()
+	bomContent := "\xef\xbb\xbfAccount number,Account name,Symbol\nSYNTH-101,ROTH IRA,FSKAX\n"
+	filePath := createTempCSV(t, "bom_test.csv", bomContent)
+
+	parser := NewDefaultParser()
+	data, count, err := parser.Parse(ctx, filePath, "fidelity", "portfolio")
+	if err != nil {
+		t.Fatalf("Parse failed for BOM file: %v", err)
+	}
+
+	if count != 1 || len(data) != 1 {
+		t.Fatalf("expected 1 record, got count=%d, len=%d", count, len(data))
+	}
+
+	if _, ok := data[0]["account number"]; !ok {
+		t.Errorf("expected 'account number' header key without BOM, but not found. Keys: %+v", data[0])
+	}
+	if data[0]["account number"] != "SYNTH-101" {
+		t.Errorf("expected SYNTH-101, got %s", data[0]["account number"])
+	}
+}
+
+func TestCSVParser_TrailingComma(t *testing.T) {
+	ctx := context.Background()
+	// 3 headers, 4 values in data line (trailing comma)
+	content := "HeaderA,HeaderB,HeaderC\nVal1,Val2,Val3,\n"
+	filePath := createTempCSV(t, "trailing_comma.csv", content)
+
+	parser := NewDefaultParser()
+	data, count, err := parser.Parse(ctx, filePath, "generic", "0000")
+	if err != nil {
+		t.Fatalf("Parse failed for trailing comma file: %v", err)
+	}
+
+	if count != 1 || len(data) != 1 {
+		t.Fatalf("expected 1 record, got count=%d, len=%d", count, len(data))
+	}
+
+	if data[0]["headera"] != "Val1" || data[0]["headerb"] != "Val2" || data[0]["headerc"] != "Val3" {
+		t.Errorf("unexpected record contents: %+v", data[0])
+	}
+}
+
+func TestCSVParser_FooterDisclaimers(t *testing.T) {
+	ctx := context.Background()
+	content := `Account number,Account name,Symbol
+SYNTH-101,ROTH IRA,FSKAX
+SYNTH-202,TRADITIONAL 401K,FXAIX
+
+"The data and information in this spreadsheet is provided to you solely for your use."
+
+"Brokerage services are provided by Fidelity Brokerage Services LLC."
+
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+`
+	filePath := createTempCSV(t, "disclaimer_test.csv", content)
+
+	parser := NewDefaultParser()
+	data, count, err := parser.Parse(ctx, filePath, "fidelity", "portfolio")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if count != 2 || len(data) != 2 {
+		t.Fatalf("expected exactly 2 data records, got count=%d, len=%d", count, len(data))
+	}
+
+	if data[0]["symbol"] != "FSKAX" || data[1]["symbol"] != "FXAIX" {
+		t.Errorf("unexpected data records: %+v", data)
+	}
+}
+
+func TestCSVParser_RowNumberLineage(t *testing.T) {
+	ctx := context.Background()
+	content := "ColA,ColB\nRow2A,Row2B\n\nRow4A,Row4B\n"
+	filePath := createTempCSV(t, "lineage_test.csv", content)
+
+	parser := NewDefaultParser()
+	data, count, err := parser.Parse(ctx, filePath, "generic", "0000")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if count != 2 || len(data) != 2 {
+		t.Fatalf("expected 2 records, got %d", count)
+	}
+
+	if data[0]["__row_number"] != "2" {
+		t.Errorf("expected first record rowNumber 2, got %s", data[0]["__row_number"])
+	}
+	if data[1]["__row_number"] != "4" {
+		t.Errorf("expected second record rowNumber 4, got %s", data[1]["__row_number"])
+	}
+}

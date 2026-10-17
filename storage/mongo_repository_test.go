@@ -10,6 +10,7 @@ import (
 	"babylon/dataloader/datalake/model"
 	"babylon/dataloader/storage"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -241,5 +242,42 @@ func TestGetSyncLogs_FindError(t *testing.T) {
 	_, err := repo.GetSyncLogs(ctx)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("Expected find error, got: %v", err)
+	}
+}
+
+func TestGetSyncLogs_DecodeError(t *testing.T) {
+	ctx := context.Background()
+	corruptedDocs := []interface{}{
+		bson.D{
+			{Key: "collection_name", Value: "transactions_synthetic"},
+			{Key: "sync_timestamp", Value: "invalid-timestamp-type"},
+			{Key: "records_uploaded", Value: 10},
+		},
+	}
+
+	cursor, err := mongo.NewCursorFromDocuments(corruptedDocs, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create cursor: %v", err)
+	}
+
+	mockDS := &mockDataStore{
+		findFunc: func(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error) {
+			return cursor, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	_, err = repo.GetSyncLogs(ctx)
+	if err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to decode sync logs") {
+		t.Errorf("expected error to contain 'failed to decode sync logs', got: %v", err)
 	}
 }
