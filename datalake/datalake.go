@@ -220,61 +220,89 @@ func (p *CSVFileProcessor) routeAndUpsertRecordsWithStats(
 ) (repository.UpsertStats, string, string, error) {
 	switch datasource.DataSource(sourceInfo.DataSource) {
 	case datasource.Fidelity:
-		mapper, err := NewFidelityMapper(ctx, unprocessedFilePath, fileName, p.S3URI)
-		if err != nil {
-			return repository.UpsertStats{}, FidelityPositionsCollection, "", fmt.Errorf(
-				"failed to initialize Fidelity mapper: %w",
-				err,
-			)
-		}
-		positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
-		if mapErr != nil {
-			return repository.UpsertStats{}, FidelityPositionsCollection, mapper.FileHash(), fmt.Errorf(
-				"failed to map Fidelity positions: %w",
-				mapErr,
-			)
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return repository.UpsertStats{}, FidelityPositionsCollection, mapper.FileHash(), ctxErr
-		}
-		stats, upsertErr := p.Repo.BulkUpsertFidelityPositions(ctx, positions)
-		return stats, FidelityPositionsCollection, mapper.FileHash(), upsertErr
-
+		return p.routeFidelityRecords(ctx, unprocessedFilePath, fileName, rawRecords)
 	case datasource.Chase:
-		mapper, err := NewChaseMapper(ctx, unprocessedFilePath, fileName, p.S3URI, sourceInfo.AccountID)
-		if err != nil {
-			return repository.UpsertStats{}, ChaseTransactionsCollection, "", fmt.Errorf(
-				"failed to initialize Chase mapper: %w",
-				err,
-			)
-		}
-		transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
-		if mapErr != nil {
-			return repository.UpsertStats{}, ChaseTransactionsCollection, mapper.FileHash(), fmt.Errorf(
-				"failed to map Chase transactions: %w",
-				mapErr,
-			)
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return repository.UpsertStats{}, ChaseTransactionsCollection, mapper.FileHash(), ctxErr
-		}
-		stats, upsertErr := p.Repo.BulkUpsertChaseTransactions(ctx, transactions)
-		return stats, ChaseTransactionsCollection, mapper.FileHash(), upsertErr
-
+		return p.routeChaseRecords(ctx, unprocessedFilePath, fileName, sourceInfo.AccountID, rawRecords)
 	case datasource.Generic, datasource.Synthetic:
 		fallthrough
 	default:
-		collectionName := fmt.Sprintf("%s_%s", TransactionsCollection, sourceInfo.DataSource)
-		transactions, mapErr := mapGenericTransactions(ctx, rawRecords, sourceInfo.DataSource, sourceInfo.AccountID)
-		if mapErr != nil {
-			return repository.UpsertStats{}, collectionName, "", mapErr
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return repository.UpsertStats{}, collectionName, "", ctxErr
-		}
-		stats, upsertErr := p.Repo.BulkUpsertTransactions(ctx, transactions)
-		return stats, collectionName, "", upsertErr
+		return p.routeGenericRecords(ctx, sourceInfo.DataSource, sourceInfo.AccountID, rawRecords)
 	}
+}
+
+// routeFidelityRecords initializes the Fidelity mapper, transforms raw records into positions,
+// and performs a bulk upsert into the Fidelity positions repository.
+func (p *CSVFileProcessor) routeFidelityRecords(
+	ctx context.Context,
+	unprocessedFilePath, fileName string,
+	rawRecords []map[string]string,
+) (repository.UpsertStats, string, string, error) {
+	mapper, err := NewFidelityMapper(ctx, unprocessedFilePath, fileName, p.S3URI)
+	if err != nil {
+		return repository.UpsertStats{}, FidelityPositionsCollection, "", fmt.Errorf(
+			"failed to initialize Fidelity mapper: %w",
+			err,
+		)
+	}
+	positions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if mapErr != nil {
+		return repository.UpsertStats{}, FidelityPositionsCollection, mapper.FileHash(), fmt.Errorf(
+			"failed to map Fidelity positions: %w",
+			mapErr,
+		)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, FidelityPositionsCollection, mapper.FileHash(), ctxErr
+	}
+	stats, upsertErr := p.Repo.BulkUpsertFidelityPositions(ctx, positions)
+	return stats, FidelityPositionsCollection, mapper.FileHash(), upsertErr
+}
+
+// routeChaseRecords initializes the Chase mapper, transforms raw records into transactions,
+// and performs a bulk upsert into the Chase transactions repository.
+func (p *CSVFileProcessor) routeChaseRecords(
+	ctx context.Context,
+	unprocessedFilePath, fileName, accountID string,
+	rawRecords []map[string]string,
+) (repository.UpsertStats, string, string, error) {
+	mapper, err := NewChaseMapper(ctx, unprocessedFilePath, fileName, p.S3URI, accountID)
+	if err != nil {
+		return repository.UpsertStats{}, ChaseTransactionsCollection, "", fmt.Errorf(
+			"failed to initialize Chase mapper: %w",
+			err,
+		)
+	}
+	transactions, mapErr := mapper.MapRecordsWithContext(ctx, rawRecords)
+	if mapErr != nil {
+		return repository.UpsertStats{}, ChaseTransactionsCollection, mapper.FileHash(), fmt.Errorf(
+			"failed to map Chase transactions: %w",
+			mapErr,
+		)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, ChaseTransactionsCollection, mapper.FileHash(), ctxErr
+	}
+	stats, upsertErr := p.Repo.BulkUpsertChaseTransactions(ctx, transactions)
+	return stats, ChaseTransactionsCollection, mapper.FileHash(), upsertErr
+}
+
+// routeGenericRecords transforms raw records into generic transactions
+// and performs a bulk upsert into the generic transactions repository.
+func (p *CSVFileProcessor) routeGenericRecords(
+	ctx context.Context,
+	dataSource, accountID string,
+	rawRecords []map[string]string,
+) (repository.UpsertStats, string, string, error) {
+	collectionName := fmt.Sprintf("%s_%s", TransactionsCollection, dataSource)
+	transactions, mapErr := mapGenericTransactions(ctx, rawRecords, dataSource, accountID)
+	if mapErr != nil {
+		return repository.UpsertStats{}, collectionName, "", mapErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, collectionName, "", ctxErr
+	}
+	stats, upsertErr := p.Repo.BulkUpsertTransactions(ctx, transactions)
+	return stats, collectionName, "", upsertErr
 }
 
 // upsertSingleFileRecords delegates record mapping and database upserting by data source.
