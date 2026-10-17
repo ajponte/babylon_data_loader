@@ -848,6 +848,9 @@ func TestEnsureChaseIndexes_ModelDefinitions(t *testing.T) {
 	if uIdx.Options.Unique == nil || !*uIdx.Options.Unique {
 		t.Errorf("Expected unique=true for idx_chase_account_post_desc_amount_row")
 	}
+	if uIdx.Options.Sparse == nil || !*uIdx.Options.Sparse {
+		t.Errorf("Expected sparse=true for idx_chase_account_post_desc_amount_row")
+	}
 }
 
 // TC-ST-03: Verifies zero-length transaction slice returns immediately with zero count.
@@ -901,6 +904,59 @@ func TestBulkUpsertChaseTransactions_IndexError(t *testing.T) {
 	}
 }
 
+func TestEnsureChaseIndexes_RetryAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	expectedErr := errors.New("transient index creation error")
+	var callCount int
+
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createManyFunc: func(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+					callCount++
+					if callCount == 1 {
+						return nil, expectedErr
+					}
+					return []string{"idx1", "idx2"}, nil
+				},
+			}
+		},
+		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
+			return &mongo.BulkWriteResult{UpsertedCount: 1}, nil
+		},
+		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
+			return &mongo.InsertOneResult{}, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	txs := []model.ChaseTransaction{{AccountID: "TEST", Description: "DESC"}}
+
+	// First attempt fails transiently
+	_, err := repo.BulkUpsertChaseTransactions(ctx, txs)
+	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected transient index error on first call, got: %v", err)
+	}
+
+	// Second attempt retries index creation and succeeds
+	stats, err := repo.BulkUpsertChaseTransactions(ctx, txs)
+	if err != nil {
+		t.Fatalf("expected second call to succeed on retry, got error: %v", err)
+	}
+	if stats.UpsertedCount != 1 {
+		t.Errorf("expected UpsertedCount == 1, got %d", stats.UpsertedCount)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 calls to createManyFunc, got %d", callCount)
+	}
+}
+
 func TestBulkUpsertChaseTransactions_BulkWriteError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("simulated bulk write failure")
@@ -910,7 +966,7 @@ func TestBulkUpsertChaseTransactions_BulkWriteError(t *testing.T) {
 			return &mockIndexView{}
 		},
 		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
-			return nil, expectedErr
+			return &mongo.BulkWriteResult{UpsertedCount: 2, MatchedCount: 1}, expectedErr
 		},
 	}
 
@@ -922,9 +978,12 @@ func TestBulkUpsertChaseTransactions_BulkWriteError(t *testing.T) {
 
 	repo := storage.NewMongoRepository(provider)
 	transactions := []model.ChaseTransaction{{AccountID: "TEST", Description: "DESC"}}
-	_, err := repo.BulkUpsertChaseTransactions(ctx, transactions)
+	stats, err := repo.BulkUpsertChaseTransactions(ctx, transactions)
 	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
 		t.Errorf("expected bulk write error containing %q, got: %v", expectedErr.Error(), err)
+	}
+	if stats.UpsertedCount != 2 || stats.MatchedCount != 1 {
+		t.Errorf("expected partial stats (upserted: 2, matched: 1), got %+v", stats)
 	}
 }
 

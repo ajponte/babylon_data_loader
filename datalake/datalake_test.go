@@ -1116,3 +1116,257 @@ DEBIT,01/31/2026,"WHOLE FOODS GROCERY",-75.77,DEBIT_CARD,11190.76,`
 		t.Errorf("expected file to remain in unprocessedDir on canceled context")
 	}
 }
+
+func TestDatalake_ProcessChaseFile_MappingError(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Chase6896_Activity_20260131.CSV"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	// CSV content with an invalid posting date
+	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,invalid-date,"WHOLE FOODS GROCERY",-75.77,DEBIT_CARD,11190.76,`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test Chase CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		true, // moveProcessedFiles
+		stats,
+		logger,
+	)
+
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("failed to stat file: %v", err)
+	}
+	dirEntry := newMockDirEntry(fileInfo)
+
+	ingestErr := processor.ingestCSVFile(ctx, dirEntry)
+	if ingestErr == nil {
+		t.Fatalf("expected ingestCSVFile to return error for mapping failure, got nil")
+	}
+
+	if stats.FailedFiles != 1 {
+		t.Errorf("expected FailedFiles to be 1, got %d", stats.FailedFiles)
+	}
+	if stats.ProcessedFiles != 0 {
+		t.Errorf("expected ProcessedFiles to be 0, got %d", stats.ProcessedFiles)
+	}
+
+	// Verify file is left in unprocessed directory and NOT moved to processed directory
+	if _, statErr := os.Stat(filePath); os.IsNotExist(statErr) {
+		t.Errorf("expected file to remain in unprocessedDir, but it was removed")
+	}
+	destPath := filepath.Join(processedDir, fileName)
+	if _, statErr := os.Stat(destPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected file NOT to exist in processedDir, but it was found")
+	}
+
+	if mockRepo.bulkUpsertChaseTransactionsCalled {
+		t.Errorf("expected BulkUpsertChaseTransactions NOT to be called")
+	}
+}
+
+func TestDatalake_ProcessSingleFile_Chase_MappingError(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Chase6896_Activity_20260131.CSV"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	// CSV content with an invalid amount
+	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,01/31/2026,"WHOLE FOODS GROCERY",not-a-number,DEBIT_CARD,11190.76,`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test Chase CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		false,
+		stats,
+		logger,
+	)
+
+	reporter := &mockProgressReporter{}
+	err := processor.processSingleFile(ctx, fileName, string(datasource.Chase), "6896", reporter)
+	if err == nil {
+		t.Fatalf("expected processSingleFile to return error for invalid amount, got nil")
+	}
+
+	if mockRepo.bulkUpsertChaseTransactionsCalled {
+		t.Errorf("expected BulkUpsertChaseTransactions NOT to be called on mapping error")
+	}
+
+	if stats.FailedFiles != 1 {
+		t.Errorf("expected FailedFiles to be 1, got %d", stats.FailedFiles)
+	}
+
+	hasFailedPhase := false
+	for _, ev := range reporter.events {
+		if ev.Phase == PhaseFailed {
+			hasFailedPhase = true
+			if !strings.Contains(ev.Message, "failed to map Chase transactions") {
+				t.Errorf("expected PhaseFailed message to describe mapping error, got %q", ev.Message)
+			}
+			break
+		}
+	}
+	if !hasFailedPhase {
+		t.Errorf("expected reporter to record PhaseFailed event")
+	}
+}
+
+func TestDatalake_ProcessSingleFile_Chase_MapperInitError(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	processedDir := filepath.Join(tmpDir, "processed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Chase6896_Activity_20260131.CSV"
+	filePath := filepath.Join(unprocessedDir, fileName)
+
+	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,01/31/2026,"WHOLE FOODS GROCERY",-75.77,DEBIT_CARD,11190.76,`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test Chase CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		processedDir,
+		false,
+		stats,
+		logger,
+	)
+
+	reporter := &mockProgressReporter{}
+	// Pass empty accountID to trigger mapper init failure
+	err := processor.processSingleFile(ctx, fileName, string(datasource.Chase), "", reporter)
+	if err == nil {
+		t.Fatalf("expected processSingleFile to return error for empty accountID, got nil")
+	}
+	if !strings.Contains(err.Error(), "accountID is required") {
+		t.Errorf("expected error to mention accountID is required, got %v", err)
+	}
+
+	if mockRepo.bulkUpsertChaseTransactionsCalled {
+		t.Errorf("expected BulkUpsertChaseTransactions NOT to be called on mapper init error")
+	}
+
+	if stats.FailedFiles != 1 {
+		t.Errorf("expected FailedFiles to be 1, got %d", stats.FailedFiles)
+	}
+
+	hasFailedPhase := false
+	for _, ev := range reporter.events {
+		if ev.Phase == PhaseFailed {
+			hasFailedPhase = true
+			if !strings.Contains(ev.Message, "accountID is required") {
+				t.Errorf("expected PhaseFailed message to mention accountID is required, got %q", ev.Message)
+			}
+			break
+		}
+	}
+	if !hasFailedPhase {
+		t.Errorf("expected reporter to record PhaseFailed event")
+	}
+}
+
+func TestDatalake_ExecuteChaseUpsert_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		"",
+		"",
+		false,
+		stats,
+		logger,
+	)
+
+	reporter := &mockProgressReporter{}
+	txs := []model.ChaseTransaction{{AccountID: "TEST", Description: "DESC"}}
+	_, err := processor.executeChaseUpsert(ctx, "test.csv", txs, reporter)
+	if err == nil {
+		t.Fatalf("expected executeChaseUpsert to return error for canceled context, got nil")
+	}
+
+	if mockRepo.bulkUpsertChaseTransactionsCalled {
+		t.Errorf("expected BulkUpsertChaseTransactions NOT to be called on canceled context")
+	}
+
+	hasUpsertingPhase := false
+	hasFailedPhase := false
+	for _, ev := range reporter.events {
+		if ev.Phase == PhaseUpserting {
+			hasUpsertingPhase = true
+		}
+		if ev.Phase == PhaseFailed {
+			hasFailedPhase = true
+		}
+	}
+	if hasUpsertingPhase {
+		t.Errorf("expected PhaseUpserting NOT to be emitted when context is canceled")
+	}
+	if !hasFailedPhase {
+		t.Errorf("expected PhaseFailed to be emitted when context is canceled")
+	}
+}

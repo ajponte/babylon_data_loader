@@ -430,6 +430,10 @@ func (p *CSVFileProcessor) executeChaseUpsert(
 	transactions []model.ChaseTransaction,
 	reporter ProgressReporter,
 ) (repository.UpsertStats, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return repository.UpsertStats{}, p.handleFailure(fileName, ctxErr, reporter)
+	}
+
 	p.reportProgress(reporter, ProgressEvent{
 		Phase:        PhaseUpserting,
 		FileName:     fileName,

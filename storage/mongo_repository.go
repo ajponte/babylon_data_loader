@@ -29,11 +29,11 @@ var _ repository.Repository = (*MongoRepository)(nil)
 
 // MongoRepository implements the datalake.Repository interface for MongoDB.
 type MongoRepository struct {
-	provider       CollectionProvider
-	indexOnce      sync.Once
-	indexErr       error
-	chaseIndexOnce sync.Once
-	chaseIndexErr  error
+	provider            CollectionProvider
+	indexOnce           sync.Once
+	indexErr            error
+	chaseIndexMu        sync.RWMutex
+	chaseIndexesCreated bool
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -175,34 +175,48 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 
 // ensureChaseIndexes ensures the compound indexes exist for Chase transactions.
 func (r *MongoRepository) ensureChaseIndexes(ctx context.Context) error {
-	r.chaseIndexOnce.Do(func() {
-		collection := r.provider.Collection(ChaseTransactionsCollection)
+	r.chaseIndexMu.RLock()
+	if r.chaseIndexesCreated {
+		r.chaseIndexMu.RUnlock()
+		return nil
+	}
+	r.chaseIndexMu.RUnlock()
 
-		queryIndex := mongo.IndexModel{
-			Keys: bson.D{
-				{Key: fieldAccountID, Value: 1},
-				{Key: fieldPostingDate, Value: -1},
-			},
-			Options: options.Index().SetName("idx_chase_account_posting_date"),
-		}
+	r.chaseIndexMu.Lock()
+	defer r.chaseIndexMu.Unlock()
 
-		uniqueIndex := mongo.IndexModel{
-			Keys: bson.D{
-				{Key: fieldAccountID, Value: 1},
-				{Key: fieldPostingDate, Value: 1},
-				{Key: "description", Value: 1},
-				{Key: "amount", Value: 1},
-				{Key: "source.rowNumber", Value: 1},
-			},
-			Options: options.Index().SetUnique(true).SetName("idx_chase_account_post_desc_amount_row"),
-		}
+	if r.chaseIndexesCreated {
+		return nil
+	}
 
-		_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{queryIndex, uniqueIndex})
-		if err != nil {
-			r.chaseIndexErr = fmt.Errorf("failed to create indexes on %s: %w", ChaseTransactionsCollection, err)
-		}
-	})
-	return r.chaseIndexErr
+	collection := r.provider.Collection(ChaseTransactionsCollection)
+
+	queryIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: fieldAccountID, Value: 1},
+			{Key: fieldPostingDate, Value: -1},
+		},
+		Options: options.Index().SetName("idx_chase_account_posting_date"),
+	}
+
+	uniqueIndex := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: fieldAccountID, Value: 1},
+			{Key: fieldPostingDate, Value: 1},
+			{Key: "description", Value: 1},
+			{Key: "amount", Value: 1},
+			{Key: "source.rowNumber", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetSparse(true).SetName("idx_chase_account_post_desc_amount_row"),
+	}
+
+	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{queryIndex, uniqueIndex})
+	if err != nil {
+		return fmt.Errorf("failed to create indexes on %s: %w", ChaseTransactionsCollection, err)
+	}
+
+	r.chaseIndexesCreated = true
+	return nil
 }
 
 // BulkUpsertChaseTransactions bulk upserts Chase transactions into the "transactions_chase" collection.
@@ -221,11 +235,27 @@ func (r *MongoRepository) BulkUpsertChaseTransactions(
 	models := buildChaseWriteModels(transactions)
 	res, err := r.executeBulkWrite(ctx, ChaseTransactionsCollection, models)
 	if err != nil {
-		return repository.UpsertStats{}, err
+		var stats repository.UpsertStats
+		if res != nil {
+			stats = repository.UpsertStats{
+				UpsertedCount: res.UpsertedCount,
+				MatchedCount:  res.MatchedCount,
+				ModifiedCount: res.ModifiedCount,
+			}
+		}
+		return stats, err
 	}
 
 	if auditErr := r.recordSyncAuditLog(ctx, ChaseTransactionsCollection, int64(len(transactions))); auditErr != nil {
-		return repository.UpsertStats{}, auditErr
+		var stats repository.UpsertStats
+		if res != nil {
+			stats = repository.UpsertStats{
+				UpsertedCount: res.UpsertedCount,
+				MatchedCount:  res.MatchedCount,
+				ModifiedCount: res.ModifiedCount,
+			}
+		}
+		return stats, auditErr
 	}
 
 	return repository.UpsertStats{
@@ -259,7 +289,7 @@ func (r *MongoRepository) executeBulkWrite(
 	collection := r.provider.Collection(collectionName)
 	res, err := collection.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		return nil, fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
+		return res, fmt.Errorf("failed to perform bulk write for collection %s: %w", collectionName, err)
 	}
 	return res, nil
 }
