@@ -20,7 +20,11 @@ const (
 	fidelityScanMaxBufferSize     = 10 * 1024 * 1024
 	fidelityTailSeekSize          = 64 * 1024
 	fidelityDatePrefix            = "Date downloaded "
+	fidelityDateTrimCutset        = "\", \t\r\n"
 )
+
+//nolint:gochecknoglobals // Pre-converted byte slice to avoid slice allocations during line scanning.
+var fidelityDatePrefixBytes = []byte(fidelityDatePrefix)
 
 // ErrMissingDateFooter is returned when a Fidelity CSV file does not contain a recognizable
 // "Date downloaded" metadata header or footer.
@@ -342,46 +346,64 @@ func scanFileAtOffset(
 	return scanForFidelityDate(ctx, file)
 }
 
-func scanForFidelityDate(ctx context.Context, r io.Reader) (time.Time, bool, error) {
+func newFidelityScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, fidelityScanInitialBufferSize), fidelityScanMaxBufferSize)
+	return scanner
+}
+
+func isFidelityDateLine(rawBytes []byte) bool {
+	clean := bytes.Trim(rawBytes, fidelityDateTrimCutset)
+	return bytes.HasPrefix(clean, fidelityDatePrefixBytes)
+}
+
+func parseFidelityDate(rawBytes []byte) (time.Time, error) {
+	clean := string(bytes.Trim(rawBytes, fidelityDateTrimCutset))
+	parsedDate, err := model.ParseFidelityDateDownloaded(clean)
+	if err != nil {
+		return time.Time{}, fmt.Errorf(
+			"failed to parse Fidelity date downloaded from %q: %w",
+			clean,
+			err,
+		)
+	}
+	return parsedDate.UTC(), nil
+}
+
+func scanForFidelityDate(ctx context.Context, r io.Reader) (time.Time, bool, error) {
+	scanner := newFidelityScanner(r)
 
 	for scanner.Scan() {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return time.Time{}, false, ctxErr
+		if err := ctx.Err(); err != nil {
+			return time.Time{}, false, err
 		}
 
-		date, found, err := parseDateFromLine(scanner.Bytes())
+		line := scanner.Bytes()
+		if !isFidelityDateLine(line) {
+			continue
+		}
+
+		date, err := parseFidelityDate(line)
 		if err != nil {
 			return time.Time{}, false, err
 		}
-		if found {
-			return date, true, nil
-		}
+		return date, true, nil
 	}
 
-	if scanErr := scanner.Err(); scanErr != nil {
-		return time.Time{}, false, fmt.Errorf("failed to scan file for Fidelity asOfDate: %w", scanErr)
+	if err := scanner.Err(); err != nil {
+		return time.Time{}, false, fmt.Errorf("failed to scan file for Fidelity asOfDate: %w", err)
 	}
 
 	return time.Time{}, false, nil
 }
 
 func parseDateFromLine(rawBytes []byte) (time.Time, bool, error) {
-	cleanBytes := bytes.Trim(rawBytes, "\", \t\r\n")
-	if !bytes.HasPrefix(cleanBytes, []byte(fidelityDatePrefix)) {
+	if !isFidelityDateLine(rawBytes) {
 		return time.Time{}, false, nil
 	}
-
-	clean := string(cleanBytes)
-	parsedDate, err := model.ParseFidelityDateDownloaded(clean)
+	date, err := parseFidelityDate(rawBytes)
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf(
-			"failed to parse Fidelity date downloaded from %q: %w",
-			clean,
-			err,
-		)
+		return time.Time{}, false, err
 	}
-
-	return parsedDate.UTC(), true, nil
+	return date, true, nil
 }

@@ -1128,3 +1128,169 @@ func TestFidelityMapper_ResolveContextCancellation(t *testing.T) {
 		}
 	})
 }
+
+// TC-FM-26: Unit isFidelityDateLine (Zero disk I/O): Asserts date prefix line predicate.
+func TestFidelityMapper_IsFidelityDateLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		rawBytes []byte
+		expected bool
+	}{
+		{
+			name:     "standard line with quotes",
+			rawBytes: []byte(`"Date downloaded Sep-25-2026 9:50 p.m ET"`),
+			expected: true,
+		},
+		{
+			name:     "line without quotes",
+			rawBytes: []byte(`Date downloaded Sep-25-2026 9:50 p.m ET`),
+			expected: true,
+		},
+		{
+			name:     "line with trailing commas and whitespace",
+			rawBytes: []byte("  \"Date downloaded Sep-25-2026 9:50 p.m ET\",,, \r\n"),
+			expected: true,
+		},
+		{
+			name:     "line with different text",
+			rawBytes: []byte("Account Number,Account Name,Symbol"),
+			expected: false,
+		},
+		{
+			name:     "empty line",
+			rawBytes: []byte(""),
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isFidelityDateLine(tc.rawBytes); got != tc.expected {
+				t.Errorf("isFidelityDateLine(%q) = %v; expected %v", string(tc.rawBytes), got, tc.expected)
+			}
+		})
+	}
+}
+
+// TC-FM-27: Unit parseFidelityDate (Zero disk I/O): Asserts date parsing and error wrapping.
+func TestFidelityMapper_ParseFidelityDate(t *testing.T) {
+	t.Run("valid date line returns UTC time", func(t *testing.T) {
+		raw := []byte(`"Date downloaded Sep-25-2026 9:50 p.m ET",,,`)
+		got, err := parseFidelityDate(raw)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.IsZero() {
+			t.Fatal("expected non-zero parsed date")
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("expected UTC location, got %v", got.Location())
+		}
+	})
+
+	t.Run("malformed date line returns wrapped error", func(t *testing.T) {
+		raw := []byte(`"Date downloaded NotADate"`)
+		_, err := parseFidelityDate(raw)
+		if err == nil {
+			t.Fatal("expected error parsing invalid date, got nil")
+		}
+		if !strings.Contains(err.Error(), "failed to parse Fidelity date downloaded from") {
+			t.Errorf("expected error message to contain context, got: %v", err)
+		}
+	})
+}
+
+// TC-FM-28: Unit scanForFidelityDate (Zero disk I/O): Asserts successful scan and date-not-found handling.
+func TestFidelityMapper_ScanForFidelityDate_Matches(t *testing.T) {
+	t.Run("scans date successfully", func(t *testing.T) {
+		content := "Header\nData\n\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n"
+		date, found, err := scanForFidelityDate(context.Background(), strings.NewReader(content))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !found {
+			t.Fatal("expected found=true")
+		}
+		if date.IsZero() {
+			t.Fatal("expected non-zero date")
+		}
+	})
+
+	t.Run("returns not found when date missing", func(t *testing.T) {
+		content := "Header\nData\nFooter without date\n"
+		_, found, err := scanForFidelityDate(context.Background(), strings.NewReader(content))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if found {
+			t.Fatal("expected found=false")
+		}
+	})
+}
+
+// TC-FM-29: Unit scanForFidelityDate errors (Zero disk I/O): Asserts malformed dates, canceled context, and scanner errors.
+func TestFidelityMapper_ScanForFidelityDate_Errors(t *testing.T) {
+	t.Run("returns error when date malformed", func(t *testing.T) {
+		content := "Header\n\"Date downloaded NotADate\"\n"
+		_, found, err := scanForFidelityDate(context.Background(), strings.NewReader(content))
+		if err == nil {
+			t.Fatal("expected error for malformed date, got nil")
+		}
+		if found {
+			t.Fatal("expected found=false on error")
+		}
+	})
+
+	t.Run("respects context cancellation during scan", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		content := "Header\n\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n"
+		_, found, err := scanForFidelityDate(ctx, strings.NewReader(content))
+		if err == nil {
+			t.Fatal("expected error on cancelled context, got nil")
+		}
+		if found {
+			t.Fatal("expected found=false on context cancellation")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	t.Run("returns error on scanner error", func(t *testing.T) {
+		r := &errTestReader{err: errors.New("simulated I/O failure")}
+		_, found, err := scanForFidelityDate(context.Background(), r)
+		if err == nil {
+			t.Fatal("expected error on scanner failure, got nil")
+		}
+		if found {
+			t.Fatal("expected found=false on scanner failure")
+		}
+		if !strings.Contains(err.Error(), "failed to scan file for Fidelity asOfDate") {
+			t.Errorf("expected error message to contain scan context, got: %v", err)
+		}
+	})
+}
+
+// TC-FM-30: Unit newFidelityScanner (Zero disk I/O): Asserts scanner creation with custom buffer sizes.
+func TestFidelityMapper_NewFidelityScanner(t *testing.T) {
+	scanner := newFidelityScanner(strings.NewReader("line1\nline2\n"))
+	if scanner == nil {
+		t.Fatal("expected non-nil scanner")
+	}
+	if !scanner.Scan() {
+		t.Fatal("expected scan to succeed")
+	}
+	if scanner.Text() != "line1" {
+		t.Errorf("expected line1, got %q", scanner.Text())
+	}
+}
+
+type errTestReader struct {
+	err error
+}
+
+func (e *errTestReader) Read(_ []byte) (int, error) {
+	return 0, e.err
+}
