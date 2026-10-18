@@ -3,6 +3,7 @@ package chase
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,10 +22,12 @@ const (
 	DialectUnknown DialectType = "UNKNOWN"
 )
 
+const peekBufferSize = 4096
+
 // Classifier inspects an unconsumed reader stream to determine the Chase statement dialect.
 type Classifier interface {
-	// Classify inspects the stream header and returns the detected dialect alongside a reconstructed stream.
-	Classify(r io.Reader) (DialectType, io.Reader, error)
+	// Classify inspects the stream header and returns the detected dialect alongside an unconsumed reader.
+	Classify(ctx context.Context, r io.Reader) (DialectType, io.Reader, error)
 }
 
 // DefaultClassifier implements Classifier via non-destructive header peeking.
@@ -35,50 +38,58 @@ func NewDefaultClassifier() Classifier {
 	return &DefaultClassifier{}
 }
 
-// Classify inspects the stream header and returns the detected dialect alongside a reconstructed stream.
-func (c *DefaultClassifier) Classify(r io.Reader) (DialectType, io.Reader, error) {
+// Classify inspects the stream header and returns the detected dialect alongside an unconsumed reader.
+func (c *DefaultClassifier) Classify(ctx context.Context, r io.Reader) (DialectType, io.Reader, error) {
 	if r == nil {
 		return DialectUnknown, nil, errors.New("reader cannot be nil")
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return DialectUnknown, nil, ctxErr
+	}
 
-	var buf bytes.Buffer
 	br := bufio.NewReader(r)
-
-	var firstNonEmpty string
-	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			buf.Write(line)
-			trimmed := strings.TrimSpace(string(line))
-			if trimmed != "" && firstNonEmpty == "" {
-				firstNonEmpty = trimmed
-				break
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return DialectUnknown, io.MultiReader(&buf, br), fmt.Errorf("failed to read stream header: %w", err)
-		}
+	peekBytes, err := br.Peek(peekBufferSize)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return DialectUnknown, br, fmt.Errorf("failed to peek stream header: %w", err)
 	}
 
-	fullReader := io.MultiReader(&buf, br)
-	if firstNonEmpty == "" {
-		return DialectUnknown, fullReader, nil
+	if len(peekBytes) == 0 {
+		return DialectUnknown, br, nil
 	}
 
-	cleanHeader := strings.TrimPrefix(firstNonEmpty, "\xef\xbb\xbf")
-	lower := strings.ToLower(cleanHeader)
-
-	if strings.Contains(lower, "check or slip") || strings.Contains(lower, "balance") {
-		return DialectChecking, fullReader, nil
+	header := findFirstNonEmptyLine(peekBytes)
+	if header == "" {
+		return DialectUnknown, br, nil
 	}
+
+	lower := strings.ToLower(header)
+
+	// Credit card markers take precedence over checking indicators
 	if strings.Contains(lower, "category") ||
 		strings.Contains(lower, "memo") ||
 		strings.Contains(lower, "transaction date") {
-		return DialectCreditCard, fullReader, nil
+		return DialectCreditCard, br, nil
 	}
 
-	return DialectUnknown, fullReader, nil
+	// Checking markers
+	if strings.Contains(lower, "check or slip") ||
+		(strings.Contains(lower, "details") && strings.Contains(lower, "balance")) ||
+		(strings.Contains(lower, "posting date") && strings.Contains(lower, "balance")) ||
+		strings.Contains(lower, "balance") {
+		return DialectChecking, br, nil
+	}
+
+	return DialectUnknown, br, nil
+}
+
+func findFirstNonEmptyLine(b []byte) string {
+	clean := bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
+	scanner := bufio.NewScanner(bytes.NewReader(clean))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			return line
+		}
+	}
+	return ""
 }

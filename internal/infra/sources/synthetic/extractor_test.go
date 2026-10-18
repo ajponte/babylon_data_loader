@@ -2,6 +2,7 @@ package synthetic_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,4 +180,72 @@ func TestSyntheticExtractor_Errors(t *testing.T) {
 			t.Error("expected error with cancelled context")
 		}
 	})
+}
+
+func TestSyntheticExtractor_RNGContinuity(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "synthetic_continuity.csv",
+		FileHash:   "hash_cont",
+		AccountID:  "synth-cont-1",
+		IngestedAt: now,
+	}
+
+	extractor := synthetic.NewExtractor(synthetic.GeneratorOptions{RowCount: 10, Seed: 42})
+
+	batch1, err := extractor.Extract(ctx, nil, meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract batch 1 error: %v", err)
+	}
+
+	batch2, err := extractor.Extract(ctx, nil, meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract batch 2 error: %v", err)
+	}
+
+	txs1, err := batch1.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("failed to cast batch 1: %v", err)
+	}
+	txs2, err := batch2.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("failed to cast batch 2: %v", err)
+	}
+
+	// Batches generated sequentially by the same extractor must NOT be identical
+	identical := true
+	for i := range txs1 {
+		if txs1[i].Amount != txs2[i].Amount {
+			identical = false
+			break
+		}
+	}
+	if identical {
+		t.Error("expected consecutive Extract() calls to yield non-identical transaction sequences")
+	}
+}
+
+func TestSyntheticExtractor_RowCountExceeded(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "synthetic_limit.csv",
+		FileHash:   "hash_limit",
+		AccountID:  "synth-limit-1",
+		IngestedAt: now,
+	}
+
+	extractor := synthetic.NewExtractor(synthetic.GeneratorOptions{
+		RowCount: synthetic.MaxSyntheticRowCount + 1,
+		Seed:     42,
+	})
+
+	_, err := extractor.Extract(ctx, nil, meta)
+	if err == nil {
+		t.Fatalf("expected error when RowCount exceeds %d, got nil", synthetic.MaxSyntheticRowCount)
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum allowable limit") {
+		t.Errorf("expected error to mention maximum allowable limit, got: %v", err)
+	}
 }

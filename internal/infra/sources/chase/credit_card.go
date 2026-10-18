@@ -16,7 +16,7 @@ func parseCreditCard(
 	meta model.FileMetadata,
 ) ([]model.ChaseTransaction, error) {
 	required := [][]string{
-		{"post date", "posting date"},
+		{"post date", "posting date", "transaction date", "trans date"},
 		{"description"},
 		{"amount"},
 	}
@@ -26,27 +26,33 @@ func parseCreditCard(
 func parseCreditCardRow(
 	row []string,
 	colIndex map[string]int,
-	rowIdx int,
+	lineNum int,
 	meta model.FileMetadata,
 ) (model.ChaseTransaction, error) {
 	postDateStr := getFieldValue(row, colIndex, "post date", "posting date")
+	if postDateStr == "" {
+		postDateStr = getFieldValue(row, colIndex, "transaction date", "trans date")
+	}
+	if postDateStr == "" {
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: missing both post date and transaction date", lineNum)
+	}
 	postingDate, err := parseDate(postDateStr)
 	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", rowIdx, err)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
 	desc := getFieldValue(row, colIndex, "description")
 	if strings.TrimSpace(desc) == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction description is required", rowIdx)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction description is required", lineNum)
 	}
 
 	amtStr := cleanNumeric(getFieldValue(row, colIndex, "amount"))
 	if amtStr == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction amount is required", rowIdx)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction amount is required", lineNum)
 	}
 	amount, err := strconv.ParseFloat(amtStr, 64)
 	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid amount %q: %w", rowIdx, amtStr, err)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid amount %q: %w", lineNum, amtStr, err)
 	}
 
 	category := getFieldValue(row, colIndex, "category")
@@ -60,7 +66,7 @@ func parseCreditCardRow(
 		Lineage: model.SourceLineage{
 			FileName:   meta.FileName,
 			FileHash:   meta.FileHash,
-			RowNumber:  rowIdx,
+			RowNumber:  lineNum,
 			IngestedAt: meta.IngestedAt,
 		},
 		AccountID:      meta.AccountID,
@@ -76,7 +82,7 @@ func parseCreditCardRow(
 	}
 
 	if valErr := tx.Validate(); valErr != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d validation error: %w", rowIdx, valErr)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d validation error: %w", lineNum, valErr)
 	}
 
 	return tx, nil

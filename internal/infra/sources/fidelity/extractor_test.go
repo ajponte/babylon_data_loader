@@ -164,3 +164,70 @@ func TestFidelityExtractor_Errors(t *testing.T) {
 		}
 	})
 }
+
+func TestFidelityExtractor_RejectArbitraryCSV(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "arbitrary.csv",
+		FileHash:   "hash_arb",
+		AccountID:  "acc-arb",
+		IngestedAt: now,
+	}
+
+	// Arbitrary Chase CSV lacking Fidelity signature columns
+	chaseCSV := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,10/15/2026,"GROCERY STORE",-85.50,DEBIT,2414.50,
+`
+	extractor := fidelity.NewExtractor()
+	_, err := extractor.Extract(ctx, strings.NewReader(chaseCSV), meta)
+	if err == nil {
+		t.Fatal("expected Extract error for arbitrary CSV missing Fidelity columns, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "fidelity CSV missing required header column") {
+		t.Errorf("expected error to mention missing required header column, got: %v", err)
+	}
+}
+
+func TestFidelityExtractor_FilterSummaryTotals(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "positions_with_totals.csv",
+		FileHash:   "hash_totals",
+		AccountID:  "FID-123",
+		IngestedAt: now,
+	}
+
+	csvData := `Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
+FID-123,Individual,AAPL,APPLE INC,10,150.00,$1500.00,$1200.00
+FID-123,Individual,,HELD IN MONEY MARKET,,,$500.00,$500.00
+FID-123,Individual,Total,Account Total,,, $2000.00, $1700.00
+Total Market Value,,,,,,$2000.00,
+Account Total,,,,,,$2000.00,
+"The data and information is proprietary",,,,,,,
+`
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast payload: %v", err)
+	}
+
+	// Only AAPL and the CASH row should be extracted; summary totals and disclaimers excluded
+	if len(positions) != 2 {
+		t.Fatalf("expected exactly 2 positions (excluding totals and disclaimer), got %d", len(positions))
+	}
+
+	if positions[0].Symbol != "AAPL" {
+		t.Errorf("expected first position symbol 'AAPL', got %q", positions[0].Symbol)
+	}
+	if positions[1].Symbol != "CASH" {
+		t.Errorf("expected second position symbol 'CASH', got %q", positions[1].Symbol)
+	}
+}

@@ -45,7 +45,7 @@ func (e *Extractor) Extract(
 		return nil, errors.New("reader cannot be nil")
 	}
 
-	dialect, stream, err := e.classifier.Classify(r)
+	dialect, stream, err := e.classifier.Classify(ctx, r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to classify chase statement dialect: %w", err)
 	}

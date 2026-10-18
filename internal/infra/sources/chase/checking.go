@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 type rowParser func(
 	row []string,
 	colIndex map[string]int,
-	rowIdx int,
+	lineNum int,
 	meta model.FileMetadata,
 ) (model.ChaseTransaction, error)
 
@@ -33,12 +34,68 @@ func parseChaseRecords(
 	reader.Comma = ','
 	reader.TrimLeadingSpace = true
 
-	header, err := reader.Read()
+	colIndex, err := readChaseHeader(reader, dialectName, requiredCols)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return []model.ChaseTransaction{}, nil
 		}
-		return nil, fmt.Errorf("failed to read Chase %s CSV header: %w", dialectName, err)
+		return nil, err
+	}
+
+	var transactions []model.ChaseTransaction
+
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+
+		row, readErr := reader.Read()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("failed to read Chase %s CSV row: %w", dialectName, readErr)
+		}
+
+		lineNum, _ := reader.FieldPos(0)
+
+		if isRowEmpty(row) {
+			continue
+		}
+
+		tx, parseErr := parseRow(row, colIndex, lineNum, meta)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+
+		transactions = append(transactions, tx)
+	}
+
+	if transactions == nil {
+		transactions = []model.ChaseTransaction{}
+	}
+
+	return transactions, nil
+}
+
+func readChaseHeader(
+	reader *csv.Reader,
+	dialectName string,
+	requiredCols [][]string,
+) (map[string]int, error) {
+	var header []string
+	for {
+		record, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, io.EOF
+			}
+			return nil, fmt.Errorf("failed to read Chase %s CSV header: %w", dialectName, err)
+		}
+		if !isRowEmpty(record) {
+			header = record
+			break
+		}
 	}
 
 	colIndex := make(map[string]int)
@@ -53,40 +110,7 @@ func parseChaseRecords(
 		}
 	}
 
-	var transactions []model.ChaseTransaction
-	rowIdx := 1
-
-	for {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-
-		row, readErr := reader.Read()
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			return nil, fmt.Errorf("failed to read Chase %s CSV row %d: %w", dialectName, rowIdx+1, readErr)
-		}
-		rowIdx++
-
-		if isRowEmpty(row) {
-			continue
-		}
-
-		tx, parseErr := parseRow(row, colIndex, rowIdx, meta)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-
-		transactions = append(transactions, tx)
-	}
-
-	if transactions == nil {
-		transactions = []model.ChaseTransaction{}
-	}
-
-	return transactions, nil
+	return colIndex, nil
 }
 
 func parseChecking(
@@ -105,27 +129,27 @@ func parseChecking(
 func parseCheckingRow(
 	row []string,
 	colIndex map[string]int,
-	rowIdx int,
+	lineNum int,
 	meta model.FileMetadata,
 ) (model.ChaseTransaction, error) {
 	postDateStr := getFieldValue(row, colIndex, "posting date", "post date")
 	postingDate, err := parseDate(postDateStr)
 	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", rowIdx, err)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
 	desc := getFieldValue(row, colIndex, "description")
 	if strings.TrimSpace(desc) == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction description is required", rowIdx)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction description is required", lineNum)
 	}
 
 	amtStr := cleanNumeric(getFieldValue(row, colIndex, "amount"))
 	if amtStr == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction amount is required", rowIdx)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction amount is required", lineNum)
 	}
 	amount, err := strconv.ParseFloat(amtStr, 64)
 	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid amount %q: %w", rowIdx, amtStr, err)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid amount %q: %w", lineNum, amtStr, err)
 	}
 
 	details := getFieldValue(row, colIndex, "details")
@@ -138,12 +162,21 @@ func parseCheckingRow(
 	}
 
 	var balance *float64
-	balStr := cleanNumeric(getFieldValue(row, colIndex, "balance"))
-	if balStr != "" {
+	balRaw := getFieldValue(row, colIndex, "balance")
+	if balRaw != "" && balRaw != "-" && balRaw != "--" && !strings.EqualFold(balRaw, "n/a") {
+		balStr := cleanNumeric(balRaw)
 		bal, balErr := strconv.ParseFloat(balStr, 64)
-		if balErr == nil {
-			balance = &bal
+		if balErr != nil {
+			return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid balance %q: %w", lineNum, balStr, balErr)
 		}
+		if math.IsNaN(bal) || math.IsInf(bal, 0) {
+			return model.ChaseTransaction{}, fmt.Errorf(
+				"row %d: invalid balance %q: non-finite number",
+				lineNum,
+				balStr,
+			)
+		}
+		balance = &bal
 	}
 
 	checkNum := getFieldValue(row, colIndex, "check or slip #", "check or slip num")
@@ -152,7 +185,7 @@ func parseCheckingRow(
 		Lineage: model.SourceLineage{
 			FileName:   meta.FileName,
 			FileHash:   meta.FileHash,
-			RowNumber:  rowIdx,
+			RowNumber:  lineNum,
 			IngestedAt: meta.IngestedAt,
 		},
 		AccountID:      meta.AccountID,
@@ -168,7 +201,7 @@ func parseCheckingRow(
 	}
 
 	if valErr := tx.Validate(); valErr != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d validation error: %w", rowIdx, valErr)
+		return model.ChaseTransaction{}, fmt.Errorf("row %d validation error: %w", lineNum, valErr)
 	}
 
 	return tx, nil
@@ -180,19 +213,30 @@ func parseDate(val string) (time.Time, error) {
 		return time.Time{}, errors.New("date value is empty")
 	}
 
-	parsed, err := time.Parse("01/02/2006", trimmed)
-	if err != nil {
-		parsed, err = time.Parse("1/2/2006", trimmed)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid date format %q: expected MM/DD/YYYY", val)
+	dateLayouts := []string{
+		"01/02/2006",
+		"1/2/2006",
+		"2006-01-02",
+		"2006/01/02",
+	}
+
+	for _, layout := range dateLayouts {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC), nil
 		}
 	}
 
-	return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC), nil
+	return time.Time{}, fmt.Errorf("invalid date format %q: expected MM/DD/YYYY or YYYY-MM-DD", val)
 }
 
 func cleanNumeric(val string) string {
 	clean := strings.TrimSpace(val)
+	if clean == "-" || clean == "--" || strings.EqualFold(clean, "n/a") {
+		return "0"
+	}
+	if strings.HasPrefix(clean, "(") && strings.HasSuffix(clean, ")") {
+		clean = "-" + clean[1:len(clean)-1]
+	}
 	clean = strings.ReplaceAll(clean, "$", "")
 	clean = strings.ReplaceAll(clean, ",", "")
 	clean = strings.ReplaceAll(clean, "+", "")

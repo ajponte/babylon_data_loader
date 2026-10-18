@@ -52,18 +52,37 @@ func (e *Extractor) Extract(
 	reader.Comma = ','
 	reader.TrimLeadingSpace = true
 
-	header, err := reader.Read()
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return makeBatch(meta, []model.FidelityPosition{})
+	var header []string
+	for {
+		record, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return makeBatch(meta, []model.FidelityPosition{})
+			}
+			return nil, fmt.Errorf("failed to read Fidelity CSV header: %w", err)
 		}
-		return nil, fmt.Errorf("failed to read Fidelity CSV header: %w", err)
+		if !isRowEmpty(record) {
+			header = record
+			break
+		}
 	}
 
 	colIndex := make(map[string]int)
 	for i, col := range header {
 		cleanCol := strings.TrimSpace(strings.TrimPrefix(col, "\xef\xbb\xbf"))
 		colIndex[strings.ToLower(cleanCol)] = i
+	}
+
+	// Enforce required column signatures for Fidelity portfolio positions
+	requiredSignatures := [][]string{
+		{"symbol", "description"},
+		{"current value", "last price", "quantity"},
+	}
+
+	for _, sig := range requiredSignatures {
+		if _, ok := findColumn(colIndex, sig...); !ok {
+			return nil, fmt.Errorf("fidelity CSV missing required header column (expected one of %v)", sig)
+		}
 	}
 
 	positions, err := parsePositions(ctx, reader, colIndex, meta)
@@ -81,7 +100,6 @@ func parsePositions(
 	meta model.FileMetadata,
 ) ([]model.FidelityPosition, error) {
 	var positions []model.FidelityPosition
-	rowIdx := 1 // header is row 1
 
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -93,17 +111,21 @@ func parsePositions(
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return nil, fmt.Errorf("failed to read Fidelity CSV row %d: %w", rowIdx+1, readErr)
+			return nil, fmt.Errorf("failed to read Fidelity CSV row: %w", readErr)
 		}
-		rowIdx++
+
+		lineNum, _ := reader.FieldPos(0)
 
 		if isFidelityDisclaimerOrEmpty(row) {
 			continue
 		}
 
-		pos, parseErr := parseFidelityRow(row, colIndex, rowIdx, meta)
+		pos, ok, parseErr := parseFidelityRow(row, colIndex, lineNum, meta)
 		if parseErr != nil {
 			return nil, parseErr
+		}
+		if !ok {
+			continue
 		}
 
 		positions = append(positions, pos)
@@ -119,9 +141,9 @@ func parsePositions(
 func parseFidelityRow(
 	row []string,
 	colIndex map[string]int,
-	rowIdx int,
+	lineNum int,
 	meta model.FileMetadata,
-) (model.FidelityPosition, error) {
+) (model.FidelityPosition, bool, error) {
 	accountID := getFieldValue(row, colIndex, "account number", "account id")
 	if accountID == "" {
 		accountID = meta.AccountID
@@ -129,36 +151,50 @@ func parseFidelityRow(
 
 	accountName := getFieldValue(row, colIndex, "account name")
 	symbol := getFieldValue(row, colIndex, "symbol")
-	if symbol == "" {
-		symbol = "CASH"
-	}
 	description := getFieldValue(row, colIndex, "description")
+
+	// Filter summary total rows that appear in data sections
+	symLower := strings.ToLower(symbol)
+	descLower := strings.ToLower(description)
+	if isSummaryKeyword(symLower) || isSummaryKeyword(descLower) {
+		return model.FidelityPosition{}, false, nil
+	}
+
+	if symbol == "" {
+		descUpper := strings.ToUpper(description)
+		if isCashDescription(descUpper) {
+			symbol = "CASH"
+		} else {
+			// Skip metadata / non-position row
+			return model.FidelityPosition{}, false, nil
+		}
+	}
 
 	qty, err := parseQuantity(getFieldValue(row, colIndex, "quantity"))
 	if err != nil {
-		return model.FidelityPosition{}, fmt.Errorf("row %d: %w", rowIdx, err)
+		return model.FidelityPosition{}, false, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
 	lastPrice, err := parseCurrency(getFieldValue(row, colIndex, "last price"))
 	if err != nil {
-		return model.FidelityPosition{}, fmt.Errorf("row %d: %w", rowIdx, err)
+		return model.FidelityPosition{}, false, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
 	currentVal, err := parseCurrency(getFieldValue(row, colIndex, "current value"))
 	if err != nil {
-		return model.FidelityPosition{}, fmt.Errorf("row %d: %w", rowIdx, err)
+		return model.FidelityPosition{}, false, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
 	costBasis, err := parseCurrency(getFieldValue(row, colIndex, "cost basis total", "cost basis"))
 	if err != nil {
-		return model.FidelityPosition{}, fmt.Errorf("row %d: %w", rowIdx, err)
+		return model.FidelityPosition{}, false, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
 	pos := model.FidelityPosition{
 		Lineage: model.SourceLineage{
 			FileName:   meta.FileName,
 			FileHash:   meta.FileHash,
-			RowNumber:  rowIdx,
+			RowNumber:  lineNum,
 			IngestedAt: meta.IngestedAt,
 		},
 		AccountID:    accountID,
@@ -172,10 +208,25 @@ func parseFidelityRow(
 	}
 
 	if valErr := pos.Validate(); valErr != nil {
-		return model.FidelityPosition{}, fmt.Errorf("row %d validation error: %w", rowIdx, valErr)
+		return model.FidelityPosition{}, false, fmt.Errorf("row %d validation error: %w", lineNum, valErr)
 	}
 
-	return pos, nil
+	return pos, true, nil
+}
+
+func isSummaryKeyword(val string) bool {
+	return val == "total" ||
+		val == "account total" ||
+		val == "portfolio total" ||
+		strings.HasPrefix(val, "total ") ||
+		strings.HasPrefix(val, "account total ")
+}
+
+func isCashDescription(descUpper string) bool {
+	return strings.Contains(descUpper, "HELD IN") ||
+		strings.Contains(descUpper, "CASH") ||
+		strings.Contains(descUpper, "FCASH") ||
+		strings.Contains(descUpper, "CORE")
 }
 
 func makeBatch(meta model.FileMetadata, positions []model.FidelityPosition) (*model.IngestionBatch, error) {
@@ -204,32 +255,51 @@ func stripUTF8BOM(br *bufio.Reader) {
 	}
 }
 
+func isRowEmpty(record []string) bool {
+	if len(record) == 0 {
+		return true
+	}
+	for _, field := range record {
+		if strings.TrimSpace(field) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 func isFidelityDisclaimerOrEmpty(record []string) bool {
 	if len(record) == 0 {
 		return true
 	}
-	first := strings.TrimSpace(record[0])
-	if first == "" {
-		allEmpty := true
-		for _, f := range record {
-			if strings.TrimSpace(f) != "" {
-				allEmpty = false
-				break
-			}
+	first := ""
+	for _, f := range record {
+		trimmed := strings.ToLower(strings.TrimSpace(f))
+		if trimmed != "" {
+			first = trimmed
+			break
 		}
-		return allEmpty
+	}
+	if first == "" {
+		return true
 	}
 
-	lower := strings.ToLower(first)
-	return strings.HasPrefix(lower, "the data and information") ||
-		strings.HasPrefix(lower, "brokerage services") ||
-		strings.HasPrefix(lower, "date downloaded")
+	return strings.HasPrefix(first, "the data and information") ||
+		strings.HasPrefix(first, "brokerage services") ||
+		strings.HasPrefix(first, "date downloaded") ||
+		strings.HasPrefix(first, "total") ||
+		strings.HasPrefix(first, "account total") ||
+		strings.HasPrefix(first, "portfolio total") ||
+		strings.HasPrefix(first, "ending value") ||
+		strings.HasPrefix(first, "disclaimer")
 }
 
 func parseCurrency(val string) (float64, error) {
 	trimmed := strings.TrimSpace(val)
-	if trimmed == "" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") {
+	if trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") {
 		return 0.0, nil
+	}
+	if strings.HasPrefix(trimmed, "(") && strings.HasSuffix(trimmed, ")") {
+		trimmed = "-" + trimmed[1:len(trimmed)-1]
 	}
 	clean := strings.ReplaceAll(trimmed, "$", "")
 	clean = strings.ReplaceAll(clean, ",", "")
@@ -244,8 +314,11 @@ func parseCurrency(val string) (float64, error) {
 
 func parseQuantity(val string) (float64, error) {
 	trimmed := strings.TrimSpace(val)
-	if trimmed == "" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") {
+	if trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") {
 		return 0.0, nil
+	}
+	if strings.HasPrefix(trimmed, "(") && strings.HasSuffix(trimmed, ")") {
+		trimmed = "-" + trimmed[1:len(trimmed)-1]
 	}
 	clean := strings.ReplaceAll(trimmed, ",", "")
 	clean = strings.ReplaceAll(clean, "+", "")

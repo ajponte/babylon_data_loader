@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"time"
 
 	"babylon/dataloader/internal/domain/model"
@@ -17,6 +18,12 @@ const (
 	maxAmount   = 500.0
 	baseBalance = 5000.0
 	centsFactor = 100.0
+
+	// MaxSyntheticRowCount defines the upper safety bound on synthetic generation.
+	MaxSyntheticRowCount = 100_000
+
+	// maxInitialBatchCapacity bounds the upfront slice pre-allocation to prevent large memory spikes.
+	maxInitialBatchCapacity = 10_000
 )
 
 // GeneratorOptions configures the generation of synthetic transactions.
@@ -28,11 +35,23 @@ type GeneratorOptions struct {
 // Extractor implements port.Extractor by generating mock ChaseTransaction batches.
 type Extractor struct {
 	opts GeneratorOptions
+	mu   sync.Mutex
+	rng  *rand.Rand
 }
 
 // NewExtractor constructs a new synthetic Extractor with the provided generation options.
 func NewExtractor(opts GeneratorOptions) port.Extractor {
-	return &Extractor{opts: opts}
+	seed := opts.Seed
+	if seed == 0 {
+		seed = defaultSeed
+	}
+
+	//nolint:gosec // G404: Use of math/rand/v2 is acceptable for non-cryptographic synthetic test data.
+	rng := rand.New(rand.NewPCG(uint64(seed), 1))
+	return &Extractor{
+		opts: opts,
+		rng:  rng,
+	}
 }
 
 // SourceType returns the unique source identifier for synthetic data.
@@ -53,20 +72,18 @@ func (e *Extractor) Extract(
 		return nil, ctxErr
 	}
 
-	seed := e.opts.Seed
-	if seed == 0 {
-		seed = defaultSeed
-	}
-
-	//nolint:gosec // G404: Use of math/rand/v2 is acceptable for non-cryptographic synthetic test data.
-	rng := rand.New(rand.NewPCG(uint64(seed), 1))
-
 	count := e.opts.RowCount
 	if count < 0 {
 		count = 0
 	}
+	if count > MaxSyntheticRowCount {
+		return nil, fmt.Errorf("row count %d exceeds maximum allowable limit of %d", count, MaxSyntheticRowCount)
+	}
 
-	records := make([]model.ChaseTransaction, 0, count)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	records := make([]model.ChaseTransaction, 0, min(count, maxInitialBatchCapacity))
 	currentBalance := baseBalance
 
 	for i := range count {
@@ -75,7 +92,7 @@ func (e *Extractor) Extract(
 		}
 
 		rowNumber := i + 1
-		amt := math.Round((rng.Float64()*maxAmount-maxAmount/2.0)*centsFactor) / centsFactor
+		amt := math.Round((e.rng.Float64()*maxAmount-maxAmount/2.0)*centsFactor) / centsFactor
 		if amt == 0 {
 			amt = 10.00
 		}
