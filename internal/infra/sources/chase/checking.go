@@ -14,6 +14,8 @@ import (
 	"babylon/dataloader/internal/domain/model"
 )
 
+const defaultTransactionsCapacity = 64
+
 type rowParser func(
 	row []string,
 	colIndex map[string]int,
@@ -34,7 +36,7 @@ func parseChaseRecords(
 	reader.Comma = ','
 	reader.TrimLeadingSpace = true
 
-	colIndex, err := readChaseHeader(reader, dialectName, requiredCols)
+	colIndex, err := readChaseHeader(ctx, reader, dialectName, requiredCols)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return []model.ChaseTransaction{}, nil
@@ -42,7 +44,7 @@ func parseChaseRecords(
 		return nil, err
 	}
 
-	var transactions []model.ChaseTransaction
+	transactions := make([]model.ChaseTransaction, 0, defaultTransactionsCapacity)
 
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -71,20 +73,20 @@ func parseChaseRecords(
 		transactions = append(transactions, tx)
 	}
 
-	if transactions == nil {
-		transactions = []model.ChaseTransaction{}
-	}
-
 	return transactions, nil
 }
 
 func readChaseHeader(
+	ctx context.Context,
 	reader *csv.Reader,
 	dialectName string,
 	requiredCols [][]string,
 ) (map[string]int, error) {
 	var header []string
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		record, err := reader.Read()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -98,7 +100,7 @@ func readChaseHeader(
 		}
 	}
 
-	colIndex := make(map[string]int)
+	colIndex := make(map[string]int, len(header))
 	for i, col := range header {
 		cleanCol := strings.TrimPrefix(col, "\xef\xbb\xbf")
 		colIndex[strings.ToLower(strings.TrimSpace(cleanCol))] = i
@@ -106,7 +108,7 @@ func readChaseHeader(
 
 	for _, req := range requiredCols {
 		if _, ok := findColumn(colIndex, req...); !ok {
-			return nil, fmt.Errorf("chase %s CSV missing required header column %q", dialectName, req[0])
+			return nil, fmt.Errorf("%w: dialect %s missing column %q", ErrMissingRequiredColumns, dialectName, req[0])
 		}
 	}
 
@@ -138,18 +140,14 @@ func parseCheckingRow(
 		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
-	desc := getFieldValue(row, colIndex, "description")
-	if strings.TrimSpace(desc) == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction description is required", lineNum)
+	desc, err := parseDescription(getFieldValue(row, colIndex, "description"), lineNum)
+	if err != nil {
+		return model.ChaseTransaction{}, err
 	}
 
-	amtStr := cleanNumeric(getFieldValue(row, colIndex, "amount"))
-	if amtStr == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction amount is required", lineNum)
-	}
-	amount, err := strconv.ParseFloat(amtStr, 64)
+	amount, err := parseAmount(getFieldValue(row, colIndex, "amount"), lineNum)
 	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid amount %q: %w", lineNum, amtStr, err)
+		return model.ChaseTransaction{}, err
 	}
 
 	details := getFieldValue(row, colIndex, "details")
@@ -161,33 +159,15 @@ func parseCheckingRow(
 		txType = "TRANSACTION"
 	}
 
-	var balance *float64
-	balRaw := getFieldValue(row, colIndex, "balance")
-	if balRaw != "" && balRaw != "-" && balRaw != "--" && !strings.EqualFold(balRaw, "n/a") {
-		balStr := cleanNumeric(balRaw)
-		bal, balErr := strconv.ParseFloat(balStr, 64)
-		if balErr != nil {
-			return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid balance %q: %w", lineNum, balStr, balErr)
-		}
-		if math.IsNaN(bal) || math.IsInf(bal, 0) {
-			return model.ChaseTransaction{}, fmt.Errorf(
-				"row %d: invalid balance %q: non-finite number",
-				lineNum,
-				balStr,
-			)
-		}
-		balance = &bal
+	balance, err := parseBalance(getFieldValue(row, colIndex, "balance"), lineNum)
+	if err != nil {
+		return model.ChaseTransaction{}, err
 	}
 
 	checkNum := getFieldValue(row, colIndex, "check or slip #", "check or slip num")
 
 	tx := model.ChaseTransaction{
-		Lineage: model.SourceLineage{
-			FileName:   meta.FileName,
-			FileHash:   meta.FileHash,
-			RowNumber:  lineNum,
-			IngestedAt: meta.IngestedAt,
-		},
+		Lineage:        buildLineage(meta, lineNum),
 		AccountID:      meta.AccountID,
 		PostingDate:    postingDate,
 		Description:    desc,
@@ -207,20 +187,75 @@ func parseCheckingRow(
 	return tx, nil
 }
 
+func parseAmount(amtRaw string, lineNum int) (float64, error) {
+	if strings.TrimSpace(amtRaw) == "" {
+		return 0, fmt.Errorf("row %d: transaction amount is required", lineNum)
+	}
+	amtStr := cleanNumeric(amtRaw)
+	if amtStr == "" {
+		return 0, fmt.Errorf("row %d: transaction amount is required", lineNum)
+	}
+	amount, err := strconv.ParseFloat(amtStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("row %d: invalid amount %q: %w", lineNum, amtStr, err)
+	}
+	if math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return 0, fmt.Errorf("row %d: invalid amount %q: non-finite number", lineNum, amtStr)
+	}
+	return amount, nil
+}
+
+func parseDescription(descRaw string, lineNum int) (string, error) {
+	desc := strings.TrimSpace(descRaw)
+	if desc == "" {
+		return "", fmt.Errorf("row %d: transaction description is required", lineNum)
+	}
+	return desc, nil
+}
+
+//nolint:nilnil // nil balance represents an intentionally absent optional value
+func parseBalance(balRaw string, lineNum int) (*float64, error) {
+	clean := strings.TrimSpace(balRaw)
+	if clean == "" || clean == "-" || clean == "--" || strings.EqualFold(clean, "n/a") {
+		return nil, nil
+	}
+	balStr := cleanNumeric(clean)
+	bal, balErr := strconv.ParseFloat(balStr, 64)
+	if balErr != nil {
+		return nil, fmt.Errorf("row %d: invalid balance %q: %w", lineNum, balStr, balErr)
+	}
+	if math.IsNaN(bal) || math.IsInf(bal, 0) {
+		return nil, fmt.Errorf("row %d: invalid balance %q: non-finite number", lineNum, balStr)
+	}
+	return &bal, nil
+}
+
+func buildLineage(meta model.FileMetadata, lineNum int) model.SourceLineage {
+	return model.SourceLineage{
+		FileName:   meta.FileName,
+		FileHash:   meta.FileHash,
+		RowNumber:  lineNum,
+		IngestedAt: meta.IngestedAt,
+	}
+}
+
+// supportedDateLayouts defines the date layouts supported across Chase CSV exports.
+//
+//nolint:gochecknoglobals // immutable format string slice reused across row parsers
+var supportedDateLayouts = []string{
+	"01/02/2006",
+	"1/2/2006",
+	"2006-01-02",
+	"2006/01/02",
+}
+
 func parseDate(val string) (time.Time, error) {
 	trimmed := strings.TrimSpace(val)
 	if trimmed == "" {
 		return time.Time{}, errors.New("date value is empty")
 	}
 
-	dateLayouts := []string{
-		"01/02/2006",
-		"1/2/2006",
-		"2006-01-02",
-		"2006/01/02",
-	}
-
-	for _, layout := range dateLayouts {
+	for _, layout := range supportedDateLayouts {
 		if parsed, err := time.Parse(layout, trimmed); err == nil {
 			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC), nil
 		}
@@ -231,16 +266,29 @@ func parseDate(val string) (time.Time, error) {
 
 func cleanNumeric(val string) string {
 	clean := strings.TrimSpace(val)
+	if clean == "" {
+		return ""
+	}
 	if clean == "-" || clean == "--" || strings.EqualFold(clean, "n/a") {
 		return "0"
 	}
-	if strings.HasPrefix(clean, "(") && strings.HasSuffix(clean, ")") {
-		clean = "-" + clean[1:len(clean)-1]
-	}
+
+	clean = strings.Map(func(r rune) rune {
+		if r == 0x00a0 || r == 0x202f || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, clean)
+
 	clean = strings.ReplaceAll(clean, "$", "")
 	clean = strings.ReplaceAll(clean, ",", "")
 	clean = strings.ReplaceAll(clean, "+", "")
-	return strings.TrimSpace(clean)
+
+	if strings.HasPrefix(clean, "(") && strings.HasSuffix(clean, ")") {
+		clean = "-" + clean[1:len(clean)-1]
+	}
+
+	return clean
 }
 
 func findColumn(colIndex map[string]int, aliases ...string) (int, bool) {

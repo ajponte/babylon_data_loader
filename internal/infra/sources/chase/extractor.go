@@ -10,6 +10,17 @@ import (
 	"babylon/dataloader/internal/domain/port"
 )
 
+var (
+	// ErrNilReader indicates that a nil io.Reader was supplied.
+	ErrNilReader = errors.New("reader cannot be nil")
+
+	// ErrUnknownDialect indicates that the Chase statement header did not match a known dialect.
+	ErrUnknownDialect = errors.New("unsupported or unknown Chase statement dialect")
+
+	// ErrMissingRequiredColumns indicates that required header columns are missing from the statement.
+	ErrMissingRequiredColumns = errors.New("chase CSV missing required header columns")
+)
+
 // Extractor implements port.Extractor for Chase checking and credit card statements.
 type Extractor struct {
 	classifier Classifier
@@ -35,6 +46,9 @@ func (e *Extractor) Extract(
 	r io.Reader,
 	meta model.FileMetadata,
 ) (*model.IngestionBatch, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := meta.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid file metadata: %w", err)
 	}
@@ -42,7 +56,7 @@ func (e *Extractor) Extract(
 		return nil, ctxErr
 	}
 	if r == nil {
-		return nil, errors.New("reader cannot be nil")
+		return nil, ErrNilReader
 	}
 
 	dialect, stream, err := e.classifier.Classify(ctx, r)
@@ -63,7 +77,7 @@ func (e *Extractor) Extract(
 		dest = model.DestChaseCreditCard
 		records, err = parseCreditCard(ctx, stream, meta)
 	case DialectUnknown:
-		return nil, fmt.Errorf("unsupported or unknown Chase statement dialect: %s", dialect)
+		return nil, fmt.Errorf("%w: %s", ErrUnknownDialect, dialect)
 	}
 
 	if err != nil {

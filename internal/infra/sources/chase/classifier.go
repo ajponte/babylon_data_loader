@@ -40,8 +40,11 @@ func NewDefaultClassifier() Classifier {
 
 // Classify inspects the stream header and returns the detected dialect alongside an unconsumed reader.
 func (c *DefaultClassifier) Classify(ctx context.Context, r io.Reader) (DialectType, io.Reader, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if r == nil {
-		return DialectUnknown, nil, errors.New("reader cannot be nil")
+		return DialectUnknown, nil, ErrNilReader
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return DialectUnknown, nil, ctxErr

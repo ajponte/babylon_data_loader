@@ -2,6 +2,7 @@ package chase_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -103,11 +104,30 @@ func TestDefaultClassifier_Classify(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultClassifier_Classify_Errors(t *testing.T) {
+	classifier := chase.NewDefaultClassifier()
+	ctx := context.Background()
 
 	t.Run("nil reader returns error", func(t *testing.T) {
 		_, _, err := classifier.Classify(ctx, nil)
 		if err == nil {
 			t.Error("expected error when reader is nil")
+		}
+		if !errors.Is(err, chase.ErrNilReader) {
+			t.Errorf("expected ErrNilReader, got %v", err)
+		}
+	})
+
+	t.Run("nil context is safely handled", func(t *testing.T) {
+		var nilCtx context.Context
+		dialect, _, err := classifier.Classify(nilCtx, strings.NewReader("Details,Posting Date,Balance\n"))
+		if err != nil {
+			t.Fatalf("unexpected error with nil context: %v", err)
+		}
+		if dialect != chase.DialectChecking {
+			t.Errorf("expected dialect %q, got %q", chase.DialectChecking, dialect)
 		}
 	})
 

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strconv"
-	"strings"
 
 	"babylon/dataloader/internal/domain/model"
 )
@@ -41,18 +39,14 @@ func parseCreditCardRow(
 		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", lineNum, err)
 	}
 
-	desc := getFieldValue(row, colIndex, "description")
-	if strings.TrimSpace(desc) == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction description is required", lineNum)
+	desc, err := parseDescription(getFieldValue(row, colIndex, "description"), lineNum)
+	if err != nil {
+		return model.ChaseTransaction{}, err
 	}
 
-	amtStr := cleanNumeric(getFieldValue(row, colIndex, "amount"))
-	if amtStr == "" {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: transaction amount is required", lineNum)
-	}
-	amount, err := strconv.ParseFloat(amtStr, 64)
+	amount, err := parseAmount(getFieldValue(row, colIndex, "amount"), lineNum)
 	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: invalid amount %q: %w", lineNum, amtStr, err)
+		return model.ChaseTransaction{}, err
 	}
 
 	category := getFieldValue(row, colIndex, "category")
@@ -63,12 +57,7 @@ func parseCreditCardRow(
 	memo := getFieldValue(row, colIndex, "memo")
 
 	tx := model.ChaseTransaction{
-		Lineage: model.SourceLineage{
-			FileName:   meta.FileName,
-			FileHash:   meta.FileHash,
-			RowNumber:  lineNum,
-			IngestedAt: meta.IngestedAt,
-		},
+		Lineage:        buildLineage(meta, lineNum),
 		AccountID:      meta.AccountID,
 		PostingDate:    postingDate,
 		Description:    desc,

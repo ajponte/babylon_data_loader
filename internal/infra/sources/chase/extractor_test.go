@@ -2,8 +2,8 @@ package chase_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -125,20 +125,22 @@ func TestChaseExtractor_Extract_CreditCardInline(t *testing.T) {
 	}
 }
 
+const mockCheckingCSVFixture = `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+CREDIT,01/31/2026,"INTEREST PAYMENT",0.03,MISC,1708.32,
+DEBIT,01/30/2026,"GROCERY STORE",-85.50,DEBIT,1708.29,
+CHECK,01/29/2026,"CHECK PAID",-120.00,CHECK,1793.79,1042
+`
+
+const mockCreditCardCSVFixture = `Transaction Date,Post Date,Description,Category,Type,Amount,Memo
+12/31/2025,01/01/2026,LEETCODE.COM,Shopping,Sale,-35.00,Annual Subscription
+01/02/2026,01/03/2026,COFFEE SHOP,Food & Drink,Sale,-4.50,Morning latte
+01/04/2026,,PENDING BOOKSTORE,Shopping,Sale,-22.15,Technical book
+`
+
 func TestChaseExtractor_Fixtures_Checking(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	extractor := chase.NewExtractor(nil)
-
-	fixturePath := filepath.Join("..", "..", "..", "..", "data", "unprocessed", "Chase6921_Activity_20260131.CSV")
-	file, err := os.Open(fixturePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			t.Skipf("skipping fixture test: fixture not found at %s", fixturePath)
-		}
-		t.Fatalf("failed to open fixture %s: %v", fixturePath, err)
-	}
-	defer file.Close()
 
 	meta := model.FileMetadata{
 		FileName:   "Chase6921_Activity_20260131.CSV",
@@ -147,24 +149,24 @@ func TestChaseExtractor_Fixtures_Checking(t *testing.T) {
 		IngestedAt: now,
 	}
 
-	batch, err := extractor.Extract(ctx, file, meta)
+	batch, err := extractor.Extract(ctx, strings.NewReader(mockCheckingCSVFixture), meta)
 	if err != nil {
-		t.Fatalf("failed to extract Chase6921: %v", err)
+		t.Fatalf("failed to extract Chase6921 fixture: %v", err)
 	}
 
 	if batch.Destination != model.DestChaseChecking {
 		t.Errorf("expected destination %q, got %q", model.DestChaseChecking, batch.Destination)
 	}
-	if batch.RecordCount != 89 {
-		t.Errorf("expected 89 records from Chase6921, got %d", batch.RecordCount)
+	if batch.RecordCount != 3 {
+		t.Errorf("expected 3 records from Chase6921 fixture, got %d", batch.RecordCount)
 	}
 
 	txs, err := batch.AsChaseTransactions()
 	if err != nil {
 		t.Fatalf("failed to type-assert payload: %v", err)
 	}
-	if len(txs) != 89 {
-		t.Fatalf("expected 89 transactions, got %d", len(txs))
+	if len(txs) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(txs))
 	}
 
 	first := txs[0]
@@ -177,22 +179,17 @@ func TestChaseExtractor_Fixtures_Checking(t *testing.T) {
 	if first.Balance == nil || *first.Balance != 1708.32 {
 		t.Errorf("expected first Balance 1708.32, got %v", first.Balance)
 	}
+
+	last := txs[2]
+	if last.CheckOrSlipNum != "1042" {
+		t.Errorf("expected check num '1042', got %q", last.CheckOrSlipNum)
+	}
 }
 
 func TestChaseExtractor_Fixtures_CreditCard(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	extractor := chase.NewExtractor(nil)
-
-	fixturePath := filepath.Join("..", "..", "..", "..", "data", "unprocessed", "Chase2472_Activity20250101_20251231_20260201.CSV")
-	file, err := os.Open(fixturePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			t.Skipf("skipping fixture test: fixture not found at %s", fixturePath)
-		}
-		t.Fatalf("failed to open fixture %s: %v", fixturePath, err)
-	}
-	defer file.Close()
 
 	meta := model.FileMetadata{
 		FileName:   "Chase2472_Activity20250101_20251231_20260201.CSV",
@@ -201,24 +198,24 @@ func TestChaseExtractor_Fixtures_CreditCard(t *testing.T) {
 		IngestedAt: now,
 	}
 
-	batch, err := extractor.Extract(ctx, file, meta)
+	batch, err := extractor.Extract(ctx, strings.NewReader(mockCreditCardCSVFixture), meta)
 	if err != nil {
-		t.Fatalf("failed to extract Chase2472: %v", err)
+		t.Fatalf("failed to extract Chase2472 fixture: %v", err)
 	}
 
 	if batch.Destination != model.DestChaseCreditCard {
 		t.Errorf("expected destination %q, got %q", model.DestChaseCreditCard, batch.Destination)
 	}
-	if batch.RecordCount != 97 {
-		t.Errorf("expected 97 records from Chase2472, got %d", batch.RecordCount)
+	if batch.RecordCount != 3 {
+		t.Errorf("expected 3 records from Chase2472 fixture, got %d", batch.RecordCount)
 	}
 
 	txs, err := batch.AsChaseTransactions()
 	if err != nil {
 		t.Fatalf("failed to type-assert payload: %v", err)
 	}
-	if len(txs) != 97 {
-		t.Fatalf("expected 97 transactions, got %d", len(txs))
+	if len(txs) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(txs))
 	}
 
 	first := txs[0]
@@ -262,6 +259,9 @@ func TestChaseExtractor_Errors(t *testing.T) {
 		if err == nil {
 			t.Error("expected error with nil reader")
 		}
+		if !errors.Is(err, chase.ErrNilReader) {
+			t.Errorf("expected ErrNilReader, got %v", err)
+		}
 	})
 
 	t.Run("context cancelled", func(t *testing.T) {
@@ -288,6 +288,9 @@ func TestChaseExtractor_Errors(t *testing.T) {
 		_, err := extractor.Extract(ctx, strings.NewReader("colA,colB,colC\n1,2,3\n"), meta)
 		if err == nil {
 			t.Error("expected error with unknown dialect")
+		}
+		if !errors.Is(err, chase.ErrUnknownDialect) {
+			t.Errorf("expected ErrUnknownDialect, got %v", err)
 		}
 	})
 }
@@ -483,5 +486,331 @@ func TestChaseExtractor_MultilinePhysicalLineage(t *testing.T) {
 	// Second record starts at physical line 5
 	if txs[1].Lineage.RowNumber != 5 {
 		t.Errorf("expected record 1 Lineage.RowNumber to be 5, got %d", txs[1].Lineage.RowNumber)
+	}
+}
+
+func testFileMetadata(accountID, fileName string) model.FileMetadata {
+	return model.FileMetadata{
+		FileName:   fileName,
+		FileHash:   "hash-" + accountID,
+		AccountID:  accountID,
+		IngestedAt: time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC),
+	}
+}
+
+type cancelingReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+}
+
+func (cr *cancelingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if n > 0 {
+		cr.cancel()
+	}
+	return n, err
+}
+
+func TestChaseExtractor_SentinelErrors(t *testing.T) {
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	meta := testFileMetadata("acc-sentinel", "test.csv")
+
+	tests := []struct {
+		name        string
+		csvData     string
+		passNilR    bool
+		expectedErr error
+	}{
+		{
+			name:        "nil reader returns ErrNilReader",
+			passNilR:    true,
+			expectedErr: chase.ErrNilReader,
+		},
+		{
+			name:        "unrecognized header returns ErrUnknownDialect",
+			csvData:     "Alpha,Beta,Gamma\n1,2,3\n",
+			expectedErr: chase.ErrUnknownDialect,
+		},
+		{
+			name:        "checking header missing amount returns ErrMissingRequiredColumns",
+			csvData:     "Details,Posting Date,Description,Balance\nDEBIT,10/15/2026,Store,100.00\n",
+			expectedErr: chase.ErrMissingRequiredColumns,
+		},
+		{
+			name:        "credit card header missing amount returns ErrMissingRequiredColumns",
+			csvData:     "Transaction Date,Post Date,Description,Category\n10/14/2026,10/15/2026,Shop,Retail\n",
+			expectedErr: chase.ErrMissingRequiredColumns,
+		},
+		{
+			name:        "checking header missing description returns ErrMissingRequiredColumns",
+			csvData:     "Details,Posting Date,Amount,Balance\nDEBIT,10/15/2026,-10.00,100.00\n",
+			expectedErr: chase.ErrMissingRequiredColumns,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r io.Reader
+			if !tt.passNilR {
+				r = strings.NewReader(tt.csvData)
+			}
+			_, err := extractor.Extract(ctx, r, meta)
+			if err == nil {
+				t.Fatalf("expected error matching %v, got nil", tt.expectedErr)
+			}
+			if !errors.Is(err, tt.expectedErr) {
+				t.Errorf("expected errors.Is(err, %v), got %v", tt.expectedErr, err)
+			}
+		})
+	}
+}
+
+func TestChaseExtractor_NonFiniteAmounts(t *testing.T) {
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+
+	tests := []struct {
+		name    string
+		csvData string
+	}{
+		{
+			name: "checking amount NaN",
+			csvData: "Details,Posting Date,Description,Amount,Type,Balance\n" +
+				"DEBIT,10/15/2026,STORE,NaN,DEBIT,100.00\n",
+		},
+		{
+			name: "checking amount positive Inf",
+			csvData: "Details,Posting Date,Description,Amount,Type,Balance\n" +
+				"DEBIT,10/15/2026,STORE,Inf,DEBIT,100.00\n",
+		},
+		{
+			name: "checking amount negative Inf",
+			csvData: "Details,Posting Date,Description,Amount,Type,Balance\n" +
+				"DEBIT,10/15/2026,STORE,-Inf,DEBIT,100.00\n",
+		},
+		{
+			name: "credit card amount NaN",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"10/14/2026,10/15/2026,STORE,Shopping,Sale,NaN,memo\n",
+		},
+		{
+			name: "credit card amount positive Inf",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"10/14/2026,10/15/2026,STORE,Shopping,Sale,Inf,memo\n",
+		},
+		{
+			name: "credit card amount negative Inf",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"10/14/2026,10/15/2026,STORE,Shopping,Sale,-Inf,memo\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := testFileMetadata("acc-nonfinite", "nonfinite.csv")
+			_, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
+			if err == nil {
+				t.Fatal("expected error for non-finite amount, got nil")
+			}
+			if !strings.Contains(err.Error(), "non-finite number") {
+				t.Errorf("expected error mentioning 'non-finite number', got: %v", err)
+			}
+		})
+	}
+}
+
+func TestChaseExtractor_HeaderOnlyCSV(t *testing.T) {
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+
+	tests := []struct {
+		name        string
+		csvData     string
+		expectedDst model.Destination
+	}{
+		{
+			name:        "checking header only",
+			csvData:     "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n",
+			expectedDst: model.DestChaseChecking,
+		},
+		{
+			name:        "credit card header only",
+			csvData:     "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n",
+			expectedDst: model.DestChaseCreditCard,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := testFileMetadata("acc-empty", "empty.csv")
+			batch, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
+			if err != nil {
+				t.Fatalf("unexpected error for header-only CSV: %v", err)
+			}
+			if batch.Destination != tt.expectedDst {
+				t.Errorf("expected destination %s, got %s", tt.expectedDst, batch.Destination)
+			}
+			if batch.RecordCount != 0 {
+				t.Errorf("expected 0 RecordCount, got %d", batch.RecordCount)
+			}
+			txs, err := batch.AsChaseTransactions()
+			if err != nil {
+				t.Fatalf("unexpected error casting transactions: %v", err)
+			}
+			if len(txs) != 0 {
+				t.Errorf("expected 0 transactions, got %d", len(txs))
+			}
+		})
+	}
+}
+
+func TestChaseExtractor_MalformedCSVSyntax(t *testing.T) {
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	meta := testFileMetadata("acc-malformed", "malformed.csv")
+
+	csvData := "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n" +
+		"DEBIT,10/15/2026,\"UNCLOSED QUOTE DESCRIPTION,-25.00,DEBIT,100.00,\n"
+
+	_, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err == nil {
+		t.Fatal("expected error on malformed CSV with unclosed quote, got nil")
+	}
+}
+
+func TestChaseExtractor_CorruptedDates(t *testing.T) {
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	meta := testFileMetadata("acc-corrupt-date", "corrupt_date.csv")
+
+	tests := []struct {
+		name    string
+		csvData string
+	}{
+		{
+			name: "checking invalid calendar date",
+			csvData: "Details,Posting Date,Description,Amount,Type,Balance\n" +
+				"DEBIT,99/99/9999,STORE,-25.00,DEBIT,100.00\n",
+		},
+		{
+			name: "credit card missing both dates",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				",,STORE,Shopping,Sale,-25.00,\n",
+		},
+		{
+			name: "credit card invalid date format",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"invalid-date,invalid-date,STORE,Shopping,Sale,-25.00,\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
+			if err == nil {
+				t.Fatalf("expected error for corrupted date in %s, got nil", tt.name)
+			}
+		})
+	}
+}
+
+func TestChaseExtractor_ContextCancellation_HeaderAndBody(t *testing.T) {
+	extractor := chase.NewExtractor(nil)
+	meta := testFileMetadata("acc-cancel", "cancel.csv")
+
+	t.Run("pre-canceled context during extract", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		csvData := "Details,Posting Date,Description,Amount\nDEBIT,10/15/2026,Store,-10.00\n"
+		_, err := extractor.Extract(canceledCtx, strings.NewReader(csvData), meta)
+		if err == nil {
+			t.Fatal("expected error with pre-canceled context, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("cancellation during stream processing", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		csvData := "Details,Posting Date,Description,Amount,Type,Balance\n" +
+			"DEBIT,10/15/2026,Row 1,-10.00,DEBIT,100.00\n" +
+			"DEBIT,10/16/2026,Row 2,-20.00,DEBIT,80.00\n"
+
+		cr := &cancelingReader{
+			r:      strings.NewReader(csvData),
+			cancel: cancel,
+		}
+
+		_, err := extractor.Extract(ctx, cr, meta)
+		if err == nil {
+			t.Fatal("expected error when context canceled mid-stream, got nil")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	})
+}
+
+func TestChaseExtractor_AccountingNegativesAndUnicodeSpaces(t *testing.T) {
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	meta := testFileMetadata("acc-unicode", "unicode.csv")
+
+	csvData := "Details,Posting Date,Description,Amount,Type,Balance\n" +
+		"DEBIT,10/15/2026,\"OUTER DOLLAR PARENS\",\"$(45.00)\",DEBIT,\"$\u00a01,250.75\"\n" +
+		"DEBIT,10/16/2026,\"SPACED PARENS\",\"$( 99.50 )\",DEBIT,\"($200.00)\"\n" +
+		"CREDIT,10/17/2026,\"NARROW NBSP\",\"+\u202f$50.25\",CREDIT,\"100.00\"\n"
+
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected error on accounting/unicode formats: %v", err)
+	}
+
+	txs, err := batch.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("unexpected error extracting transactions: %v", err)
+	}
+	if len(txs) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(txs))
+	}
+
+	if txs[0].Amount != -45.00 {
+		t.Errorf("row 0 expected Amount -45.00, got %f", txs[0].Amount)
+	}
+	if txs[0].Balance == nil || *txs[0].Balance != 1250.75 {
+		t.Errorf("row 0 expected Balance 1250.75, got %v", txs[0].Balance)
+	}
+
+	if txs[1].Amount != -99.50 {
+		t.Errorf("row 1 expected Amount -99.50, got %f", txs[1].Amount)
+	}
+	if txs[1].Balance == nil || *txs[1].Balance != -200.00 {
+		t.Errorf("row 1 expected Balance -200.00, got %v", txs[1].Balance)
+	}
+
+	if txs[2].Amount != 50.25 {
+		t.Errorf("row 2 expected Amount 50.25, got %f", txs[2].Amount)
+	}
+}
+
+func TestChaseExtractor_NilContext(t *testing.T) {
+	extractor := chase.NewExtractor(nil)
+	meta := testFileMetadata("acc-nil-ctx", "nil_ctx.csv")
+
+	csvData := "Details,Posting Date,Description,Amount,Type,Balance\n" +
+		"DEBIT,10/15/2026,Store,-10.00,DEBIT,100.00\n"
+
+	var nilCtx context.Context
+	batch, err := extractor.Extract(nilCtx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected error with nil context: %v", err)
+	}
+	if batch.RecordCount != 1 {
+		t.Errorf("expected 1 record, got %d", batch.RecordCount)
 	}
 }
