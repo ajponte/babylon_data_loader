@@ -24,10 +24,21 @@ export namespace datalake {
 export namespace model {
 	
 	export class SyncLog {
+	    id?: string;
+	    fileName?: string;
+	    fileHash?: string;
 	    collectionName: string;
+	    recordCount?: number;
+	    upsertedCount?: number;
+	    matchedCount?: number;
+	    status?: string;
+	    errorMessage?: string;
 	    // Go type: time
-	    syncTimestamp: any;
-	    recordsUploaded: number;
+	    syncedAt?: any;
+	    durationMs?: number;
+	    // Go type: time
+	    syncTimestamp?: any;
+	    recordsUploaded?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SyncLog(source);
@@ -35,7 +46,17 @@ export namespace model {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.fileName = source["fileName"];
+	        this.fileHash = source["fileHash"];
 	        this.collectionName = source["collectionName"];
+	        this.recordCount = source["recordCount"];
+	        this.upsertedCount = source["upsertedCount"];
+	        this.matchedCount = source["matchedCount"];
+	        this.status = source["status"];
+	        this.errorMessage = source["errorMessage"];
+	        this.syncedAt = this.convertValues(source["syncedAt"], null);
+	        this.durationMs = source["durationMs"];
 	        this.syncTimestamp = this.convertValues(source["syncTimestamp"], null);
 	        this.recordsUploaded = source["recordsUploaded"];
 	    }

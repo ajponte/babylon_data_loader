@@ -633,6 +633,40 @@ label {
   color: var(--text-secondary);
 }
 
+.history-table .file-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-table .duplicates-count,
+.history-table .duration {
+  color: var(--text-secondary);
+}
+
+.history-table .status-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.2rem 0.5rem;
+  border-radius: 9999px;
+  letter-spacing: 0.05em;
+  display: inline-block;
+  text-align: center;
+}
+
+.history-table .status-badge.badge-success {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #6ee7b7;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.history-table .status-badge.badge-failed {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
 .history-loading,
 .history-empty {
   display: flex;

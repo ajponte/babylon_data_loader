@@ -35,7 +35,35 @@ describe('HistoryPanel Component', () => {
     expect(screen.getByText(/No historical runs found/i)).toBeInTheDocument();
   });
 
-  it('renders log records correctly', async () => {
+  it('renders table headers correctly', async () => {
+    vi.mocked(wailsApp.GetHistory).mockResolvedValue([
+      model.SyncLog.createFrom({
+        fileName: 'chase.csv',
+        collectionName: 'transactions_chase',
+        status: 'SUCCESS',
+        upsertedCount: 10,
+        matchedCount: 2,
+        durationMs: 45,
+        syncedAt: '2026-06-06T15:00:00Z',
+      }),
+    ]);
+
+    render(<HistoryPanel />);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'File Name' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Collection' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Records / Upserted' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Duplicates' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Duration' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Timestamp' })).toBeInTheDocument();
+  });
+
+  it('renders legacy log records correctly', async () => {
     const mockLogs = [
       model.SyncLog.createFrom({
         collectionName: 'transactions_chase',
@@ -61,6 +89,53 @@ describe('HistoryPanel Component', () => {
     expect(screen.getByText('25')).toBeInTheDocument();
     expect(screen.getByText('transactions_synthetic')).toBeInTheDocument();
     expect(screen.getByText('142')).toBeInTheDocument();
+    const badges = screen.getAllByText('SUCCESS');
+    expect(badges.length).toBe(2);
+  });
+
+  it('renders canonical success and failed log records with badges and accurate stats', async () => {
+    const mockLogs = [
+      model.SyncLog.createFrom({
+        fileName: 'chase_jan.csv',
+        collectionName: 'transactions_chase',
+        status: 'SUCCESS',
+        upsertedCount: 18,
+        matchedCount: 2,
+        durationMs: 120,
+        syncedAt: '2026-06-06T15:00:00Z',
+      }),
+      model.SyncLog.createFrom({
+        fileName: 'corrupt.csv',
+        collectionName: 'transactions_chase',
+        status: 'FAILED',
+        upsertedCount: 0,
+        matchedCount: 0,
+        durationMs: 15,
+        syncedAt: '2026-06-06T15:05:00Z',
+      }),
+    ];
+
+    vi.mocked(wailsApp.GetHistory).mockResolvedValue(mockLogs);
+
+    render(<HistoryPanel />);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText('chase_jan.csv')).toBeInTheDocument();
+    expect(screen.getByText('corrupt.csv')).toBeInTheDocument();
+
+    const successBadge = screen.getByText('SUCCESS');
+    expect(successBadge).toHaveClass('badge-success');
+
+    const failedBadge = screen.getByText('FAILED');
+    expect(failedBadge).toHaveClass('badge-failed');
+
+    expect(screen.getByText('18')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
+    expect(screen.getByText('120ms')).toBeInTheDocument();
+    expect(screen.getByText('15ms')).toBeInTheDocument();
   });
 
   it('handles error while fetching history', async () => {
@@ -73,5 +148,40 @@ describe('HistoryPanel Component', () => {
     });
 
     expect(screen.getByText(/Connection timed out/i)).toBeInTheDocument();
+  });
+
+  it('renders fallback values for legacy records with durationMs=0 and empty collection names', async () => {
+    const mockLogs = [
+      model.SyncLog.createFrom({
+        collectionName: '',
+        syncTimestamp: '2026-06-06T15:00:00Z',
+        recordsUploaded: 25,
+        durationMs: 0,
+      }),
+      model.SyncLog.createFrom({
+        collectionName: '   ',
+        syncTimestamp: '2026-06-05T12:30:00Z',
+        recordsUploaded: 10,
+        durationMs: 0,
+      }),
+    ];
+
+    vi.mocked(wailsApp.GetHistory).mockResolvedValue(mockLogs);
+
+    render(<HistoryPanel />);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument();
+    });
+
+    const colCells = document.querySelectorAll('.col-name');
+    expect(colCells.length).toBe(2);
+    expect(colCells[0]?.textContent).toBe('N/A');
+    expect(colCells[1]?.textContent).toBe('N/A');
+
+    const durationCells = document.querySelectorAll('.duration');
+    expect(durationCells.length).toBe(2);
+    expect(durationCells[0]?.textContent).toBe('N/A');
+    expect(durationCells[1]?.textContent).toBe('N/A');
   });
 });

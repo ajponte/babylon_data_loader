@@ -1,7 +1,7 @@
 # Phase 3 & 4 Specification: React Frontend & Vitest Suites
 
 > [!NOTE]
-> **The Lead**: This specification outlines the Phase 3 (Frontend Integration) and Phase 4 (History View & Vitest Testing) implementation in the Wails desktop app. The frontend has been converted from a placeholder to a premium, dark-themed React + TypeScript dashboard with validation, streaming progress updates, live logging, and historical run tracking. All components are verified via a suite of 15 Vitest unit and integration tests.
+> **The Lead**: This specification outlines the Phase 3 (Frontend Integration) and Phase 4 (History View & Vitest Testing) implementation in the Wails desktop app. The frontend has been converted from a placeholder to a premium, dark-themed React + TypeScript dashboard with validation, streaming progress updates, live logging, and historical run tracking. All components are verified via a suite of 17 Vitest unit and integration tests.
 
 ---
 
@@ -56,9 +56,20 @@ To ensure strict type-safety, all events are modeled in [events.ts](../../../des
 * **`SyncLog`**:
   ```typescript
   export interface SyncLog {
+    id?: string;
+    fileName?: string;
+    fileHash?: string;
     collectionName: string;
-    syncTimestamp: string;
-    recordsUploaded: number;
+    recordCount?: number;
+    upsertedCount?: number;
+    matchedCount?: number;
+    status?: string;
+    errorMessage?: string;
+    syncedAt?: string;
+    durationMs?: number;
+    // Backward compatibility legacy fields
+    syncTimestamp?: string;
+    recordsUploaded?: number;
   }
   ```
 * **`FrontendLog`**:
@@ -91,7 +102,14 @@ Displays real-time feedback during ingestion:
 ### 2.3 [HistoryPanel.tsx](../../../desktop/frontend/src/components/HistoryPanel.tsx)
 Retrieves and displays historical synchronizations:
 - Loads previously processed statements from the MongoDB `dataSync` table using the backend `GetHistory` binding.
-- Formats date strings to the user's local timezone.
+- Renders an aligned operational table with 7 columns:
+  * **Status**: Semantic status badges (`SUCCESS` in `.badge-success` or `FAILED` in `.badge-failed`).
+  * **File Name**: Name of the ingested file (`fileName` with fallback to `N/A`).
+  * **Collection**: Target collection (`collectionName`).
+  * **Records / Upserted**: Ingested records count (`upsertedCount ?? recordsUploaded ?? 0`).
+  * **Duplicates**: Existing records matched/deduplicated (`matchedCount ?? 0`).
+  * **Duration**: Execution wall-clock time in milliseconds (`${durationMs}ms` or `N/A`).
+  * **Timestamp**: Ingestion time (`syncedAt || syncTimestamp`) formatted to the user's local timezone.
 - Features manual refresh buttons for live polling of runs.
 
 ---
@@ -112,18 +130,20 @@ Frontend unit tests are set up inside `desktop/frontend/` using **Vitest** and *
   * Simulates progress events and asserts that labels and percentages update dynamically.
   * Validates color-coded log parsing inside the live console.
   * Asserts the "Done" callback behaves properly on compilation.
-- **[HistoryPanel.test.tsx](../../../desktop/frontend/src/components/HistoryPanel.test.tsx)** (4 tests):
+- **[HistoryPanel.test.tsx](../../../desktop/frontend/src/components/HistoryPanel.test.tsx)** (6 tests):
   * Verifies spinner loading indicator.
-  * Asserts empty folder icons render when sync history is clean.
-  * Verifies record rendering matching fetched array collections.
-  * Asserts grace-handling on API failure.
+  * Asserts empty historical run state when sync history is clean.
+  * Asserts table headers render correctly (Status, File Name, Collection, Records / Upserted, Duplicates, Duration, Timestamp).
+  * Verifies legacy log records render correctly with fallback values and default SUCCESS badge.
+  * Verifies canonical success and failed log records with badges (`badge-success`, `badge-failed`) and accurate stats (`upsertedCount`, `matchedCount`, `durationMs`).
+  * Asserts error alert display when fetching history fails.
 
 ---
 
 ## 4. Verification & Linting Status
 
 - **Go Backend Coverage**: **86.3%** of statements in `desktop/`.
-- **Frontend Test Suite**: **15 tests passed** successfully.
+- **Frontend Test Suite**: **17 tests passed** successfully.
 - **Linter Status**: All linter rules check out with **0 issues**.
 
 ---

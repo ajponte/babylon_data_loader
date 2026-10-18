@@ -30,13 +30,13 @@ var _ repository.Repository = (*MongoRepository)(nil)
 
 // MongoRepository implements the datalake.Repository interface for MongoDB.
 type MongoRepository struct {
-	provider            CollectionProvider
-	indexOnce           sync.Once
-	indexErr            error
-	chaseIndexMu        sync.RWMutex
-	chaseIndexesCreated bool
-	syncIndexMu         sync.RWMutex
-	syncIndexesCreated  bool
+	provider               CollectionProvider
+	fidelityIndexMu        sync.RWMutex
+	fidelityIndexesCreated bool
+	chaseIndexMu           sync.RWMutex
+	chaseIndexesCreated    bool
+	syncIndexMu            sync.RWMutex
+	syncIndexesCreated     bool
 }
 
 // NewMongoRepository creates a new MongoRepository.
@@ -83,43 +83,41 @@ func (r *MongoRepository) BulkUpsertTransactions(
 		)
 	}
 
-	// Update sync log
-	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.NewSuccessSyncLog(
-		"",
-		"",
-		collectionName,
-		int64(len(transactions)),
-		int64(len(transactions)),
-		0,
-		time.Now(),
-		0,
-	)
-	if _, err = syncCollection.InsertOne(ctx, syncLog); err != nil {
-		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
-	}
-
 	return toUpsertStats(res), nil
 }
 
 // ensureFidelityIndexes ensures the compound unique index exists for Fidelity positions.
 func (r *MongoRepository) ensureFidelityIndexes(ctx context.Context) error {
-	r.indexOnce.Do(func() {
-		collection := r.provider.Collection(FidelityPositionsCollection)
-		indexModel := mongo.IndexModel{
-			Keys: bson.D{
-				{Key: "accountNumber", Value: 1},
-				{Key: "symbol", Value: 1},
-				{Key: "asOfDate", Value: 1},
-			},
-			Options: options.Index().SetUnique(true).SetName("idx_account_symbol_asof"),
-		}
-		_, err := collection.Indexes().CreateOne(ctx, indexModel)
-		if err != nil {
-			r.indexErr = fmt.Errorf("failed to create index on %s: %w", FidelityPositionsCollection, err)
-		}
-	})
-	return r.indexErr
+	r.fidelityIndexMu.RLock()
+	if r.fidelityIndexesCreated {
+		r.fidelityIndexMu.RUnlock()
+		return nil
+	}
+	r.fidelityIndexMu.RUnlock()
+
+	r.fidelityIndexMu.Lock()
+	defer r.fidelityIndexMu.Unlock()
+
+	if r.fidelityIndexesCreated {
+		return nil
+	}
+
+	collection := r.provider.Collection(FidelityPositionsCollection)
+	indexModel := mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "accountNumber", Value: 1},
+			{Key: "symbol", Value: 1},
+			{Key: "asOfDate", Value: 1},
+		},
+		Options: options.Index().SetUnique(true).SetName("idx_account_symbol_asof"),
+	}
+	_, err := collection.Indexes().CreateOne(ctx, indexModel)
+	if err != nil {
+		return fmt.Errorf("failed to create index on %s: %w", FidelityPositionsCollection, err)
+	}
+
+	r.fidelityIndexesCreated = true
+	return nil
 }
 
 // BulkUpsertFidelityPositions bulk upserts portfolio positions into the "positions_fidelity" collection.
@@ -155,22 +153,6 @@ func (r *MongoRepository) BulkUpsertFidelityPositions(
 			FidelityPositionsCollection,
 			err,
 		)
-	}
-
-	// Update sync log audit trail
-	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.NewSuccessSyncLog(
-		"",
-		"",
-		FidelityPositionsCollection,
-		int64(len(positions)),
-		int64(len(positions)),
-		0,
-		time.Now(),
-		0,
-	)
-	if _, err = syncCollection.InsertOne(ctx, syncLog); err != nil {
-		return repository.UpsertStats{}, fmt.Errorf("failed to insert into dataSync collection: %w", err)
 	}
 
 	return toUpsertStats(res), nil
@@ -237,16 +219,7 @@ func (r *MongoRepository) BulkUpsertChaseTransactions(
 
 	models := buildChaseWriteModels(transactions)
 	res, err := r.executeBulkWrite(ctx, ChaseTransactionsCollection, models)
-	stats := toUpsertStats(res)
-	if err != nil {
-		return stats, err
-	}
-
-	if auditErr := r.recordSyncAuditLog(ctx, ChaseTransactionsCollection, int64(len(transactions))); auditErr != nil {
-		return stats, auditErr
-	}
-
-	return stats, nil
+	return toUpsertStats(res), err
 }
 
 func buildChaseWriteModels(transactions []model.ChaseTransaction) []mongo.WriteModel {
@@ -353,21 +326,20 @@ func (r *MongoRepository) RecordSyncLog(ctx context.Context, log model.SyncLog) 
 	return nil
 }
 
-func (r *MongoRepository) recordSyncAuditLog(
-	ctx context.Context,
-	collectionName string,
-	recordCount int64,
-) error {
-	syncCollection := r.provider.Collection(syncTableName)
-	syncLog := model.NewSuccessSyncLog("", "", collectionName, recordCount, recordCount, 0, time.Now(), 0)
-	if _, err := syncCollection.InsertOne(ctx, syncLog); err != nil {
-		return fmt.Errorf("failed to insert into dataSync collection: %w", err)
-	}
-	return nil
+const defaultSyncLogLimit int64 = 100
+
+// DefaultSyncLogLimit exposes the default query limit for sync logs.
+const DefaultSyncLogLimit = defaultSyncLogLimit
+
+// GetSyncLogs retrieves sync logs from the dataSync collection up to the default limit (100),
+// sorted by syncedAt descending.
+func (r *MongoRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
+	return r.GetSyncLogsWithLimit(ctx, defaultSyncLogLimit)
 }
 
-// GetSyncLogs retrieves all sync logs from the dataSync collection, sorted by syncedAt descending.
-func (r *MongoRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
+// GetSyncLogsWithLimit retrieves up to limit sync logs from the dataSync collection,
+// sorted by syncedAt descending. If limit <= 0, no limit is applied.
+func (r *MongoRepository) GetSyncLogsWithLimit(ctx context.Context, limit int64) ([]model.SyncLog, error) {
 	if err := r.ensureDataSyncIndexes(ctx); err != nil {
 		return nil, err
 	}
@@ -376,8 +348,10 @@ func (r *MongoRepository) GetSyncLogs(ctx context.Context) ([]model.SyncLog, err
 
 	opts := options.Find().SetSort(bson.D{
 		{Key: fieldSyncedAt, Value: -1},
-		{Key: "sync_timestamp", Value: -1},
 	})
+	if limit > 0 {
+		opts.SetLimit(limit)
+	}
 
 	cursor, err := syncCollection.Find(ctx, bson.M{}, opts)
 	if err != nil {
