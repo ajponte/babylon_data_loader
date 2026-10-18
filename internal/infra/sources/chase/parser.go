@@ -57,7 +57,7 @@ func parseChaseRecords(
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
-			return nil, fmt.Errorf("failed to read Chase %s CSV row: %w", dialectName, readErr)
+			return nil, handleReadError(ctx, dialectName, "row", readErr)
 		}
 
 		lineNum, _ := reader.FieldPos(0)
@@ -93,7 +93,7 @@ func readChaseHeader(
 			if errors.Is(err, io.EOF) {
 				return nil, io.EOF
 			}
-			return nil, fmt.Errorf("failed to read Chase %s CSV header: %w", dialectName, err)
+			return nil, handleReadError(ctx, dialectName, "header", err)
 		}
 		if !isRowEmpty(record) {
 			header = record
@@ -114,6 +114,19 @@ func readChaseHeader(
 	}
 
 	return colIndex, nil
+}
+
+func handleReadError(ctx context.Context, dialectName, target string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return fmt.Errorf("failed to read Chase %s CSV %s: %w", dialectName, target, err)
 }
 
 func parseAmount(amtRaw string, lineNum int) (float64, error) {

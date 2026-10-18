@@ -247,17 +247,40 @@ func TestChaseExtractor_Errors(t *testing.T) {
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	extractor := chase.NewExtractor(nil)
 
-	t.Run("invalid metadata missing account ID", func(t *testing.T) {
-		t.Parallel()
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(ctx, strings.NewReader(""), meta)
-		if err == nil {
-			t.Error("expected error with invalid metadata")
-		}
-	})
+	metadataTests := []struct {
+		name        string
+		meta        model.FileMetadata
+		expectedErr error
+	}{
+		{
+			name:        "invalid metadata missing account ID returns ErrMissingAccountID",
+			meta:        model.FileMetadata{FileName: "test.csv", IngestedAt: now},
+			expectedErr: model.ErrMissingAccountID,
+		},
+		{
+			name:        "invalid metadata missing file name returns ErrMissingFileName",
+			meta:        model.FileMetadata{AccountID: "acc-test", IngestedAt: now},
+			expectedErr: model.ErrMissingFileName,
+		},
+		{
+			name:        "invalid metadata zero ingested at returns ErrMissingIngestedAt",
+			meta:        model.FileMetadata{FileName: "test.csv", AccountID: "acc-test"},
+			expectedErr: model.ErrMissingIngestedAt,
+		},
+	}
+
+	for _, tt := range metadataTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := extractor.Extract(ctx, strings.NewReader(""), tt.meta)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tt.name)
+			}
+			if !errors.Is(err, tt.expectedErr) {
+				t.Errorf("expected %v, got %v", tt.expectedErr, err)
+			}
+		})
+	}
 
 	t.Run("nil reader", func(t *testing.T) {
 		t.Parallel()
@@ -286,9 +309,7 @@ func TestChaseExtractor_Errors(t *testing.T) {
 			IngestedAt: now,
 		}
 		_, err := extractor.Extract(canceledCtx, strings.NewReader("Details,Posting Date,Description,Amount\n"), meta)
-		if err == nil {
-			t.Error("expected error with canceled context")
-		}
+		assertStrictUnwrappedError(t, err, context.Canceled)
 	})
 
 	t.Run("unknown dialect", func(t *testing.T) {
@@ -493,15 +514,18 @@ func TestChaseExtractor_MissingAmountRejection(t *testing.T) {
 func runConcurrentExtract(t *testing.T, ctx context.Context, extractor port.Extractor, id int) {
 	t.Helper()
 	var (
-		csvData string
-		meta    model.FileMetadata
+		csvData  string
+		meta     model.FileMetadata
+		wantDest model.Destination
 	)
 	if id%2 == 0 {
 		csvData = "Details,Posting Date,Description,Amount,Type,Balance\nDEBIT,10/15/2026,STORE,-10.00,DEBIT,100.00\n"
 		meta = testFileMetadata(fmt.Sprintf("chk-%d", id), fmt.Sprintf("chk_%d.csv", id))
+		wantDest = model.DestChaseChecking
 	} else {
 		csvData = "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n10/14/2026,10/15/2026,STORE,Shopping,Sale,-20.00,memo\n"
 		meta = testFileMetadata(fmt.Sprintf("card-%d", id), fmt.Sprintf("card_%d.csv", id))
+		wantDest = model.DestChaseCreditCard
 	}
 	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 	if err != nil {
@@ -510,6 +534,29 @@ func runConcurrentExtract(t *testing.T, ctx context.Context, extractor port.Extr
 	}
 	if batch.RecordCount != 1 {
 		t.Errorf("worker %d: expected 1 record, got %d", id, batch.RecordCount)
+	}
+	txs, err := batch.AsChaseTransactions()
+	if err != nil {
+		t.Errorf("worker %d: failed to cast payload: %v", id, err)
+		return
+	}
+	if len(txs) != 1 {
+		t.Errorf("worker %d: expected 1 transaction, got %d", id, len(txs))
+	}
+	if batch.Destination != wantDest {
+		t.Errorf("worker %d: expected Destination %s, got %s", id, wantDest, batch.Destination)
+	}
+	if batch.AccountID != meta.AccountID {
+		t.Errorf("worker %d: expected AccountID %q, got %q", id, meta.AccountID, batch.AccountID)
+	}
+	if batch.SourceFile != meta.FileName {
+		t.Errorf("worker %d: expected SourceFile %q, got %q", id, meta.FileName, batch.SourceFile)
+	}
+	if batch.FileHash != meta.FileHash {
+		t.Errorf("worker %d: expected FileHash %q, got %q", id, meta.FileHash, batch.FileHash)
+	}
+	if !batch.IngestedAt.Equal(meta.IngestedAt) {
+		t.Errorf("worker %d: expected IngestedAt %v, got %v", id, meta.IngestedAt, batch.IngestedAt)
 	}
 }
 
@@ -655,6 +702,17 @@ func testFileMetadata(accountID, fileName string) model.FileMetadata {
 		FileHash:   "hash-" + accountID,
 		AccountID:  accountID,
 		IngestedAt: time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC),
+	}
+}
+
+func assertStrictUnwrappedError(t *testing.T, got, want error) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("expected error %v, got nil", want)
+	}
+	//nolint:errorlint // intentional direct equality check to ensure error is strictly unwrapped root sentinel
+	if got != want {
+		t.Errorf("expected strictly unwrapped error %v, got: %v (unwrapped: %v)", want, got, errors.Unwrap(got))
 	}
 }
 
@@ -991,12 +1049,19 @@ func TestChaseExtractor_NilContext(t *testing.T) {
 
 type mockClassifier struct {
 	dialect chase.DialectType
+	stream  io.Reader
 	err     error
 }
 
 func (m *mockClassifier) Classify(_ context.Context, r io.Reader) (chase.DialectType, io.Reader, error) {
 	if m.err != nil {
 		return chase.DialectUnknown, nil, m.err
+	}
+	if m.stream != nil {
+		return m.dialect, m.stream, nil
+	}
+	if m.dialect == chase.DialectChecking {
+		return m.dialect, nil, nil
 	}
 	return m.dialect, r, nil
 }
@@ -1036,17 +1101,35 @@ func TestChaseExtractor_ClassifierAndRoutingEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("classifier deadline exceeded returns unwrapped error", func(t *testing.T) {
+	t.Run("classifier deadline exceeded returns strictly unwrapped error", func(t *testing.T) {
 		t.Parallel()
 		customClassifier := &mockClassifier{err: context.DeadlineExceeded}
 		extractor := chase.NewExtractor(customClassifier)
 
 		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
+		assertStrictUnwrappedError(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("classifier context canceled returns strictly unwrapped error", func(t *testing.T) {
+		t.Parallel()
+		customClassifier := &mockClassifier{err: context.Canceled}
+		extractor := chase.NewExtractor(customClassifier)
+
+		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
+		assertStrictUnwrappedError(t, err, context.Canceled)
+	})
+
+	t.Run("classifier nil stream returns error", func(t *testing.T) {
+		t.Parallel()
+		customClassifier := &mockClassifier{dialect: chase.DialectChecking}
+		extractor := chase.NewExtractor(customClassifier)
+
+		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
 		if err == nil {
-			t.Fatal("expected deadline exceeded error, got nil")
+			t.Fatal("expected error for nil stream from classifier, got nil")
 		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("expected unwrapped context.DeadlineExceeded, got %v", err)
+		if !strings.Contains(err.Error(), "classifier returned nil reader stream for dialect CHASE_CHECKING") {
+			t.Errorf("expected nil stream error message, got: %v", err)
 		}
 	})
 }

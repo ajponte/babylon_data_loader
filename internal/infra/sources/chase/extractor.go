@@ -68,26 +68,41 @@ func validateExtractParams(ctx context.Context, r io.Reader, meta model.FileMeta
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := meta.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid file metadata: %w", err)
-	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
 	if r == nil {
 		return nil, ErrNilReader
 	}
+	if err := meta.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid file metadata: %w", err)
+	}
 	return ctx, nil
 }
 
 func (e *Extractor) classifyStream(ctx context.Context, r io.Reader) (DialectType, io.Reader, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return DialectUnknown, nil, ctxErr
+	}
+
 	dialect, stream, err := e.classifier.Classify(ctx, r)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return DialectUnknown, nil, err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return DialectUnknown, nil, ctxErr
+		}
+		if errors.Is(err, context.Canceled) {
+			return DialectUnknown, nil, context.Canceled
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return DialectUnknown, nil, context.DeadlineExceeded
 		}
 		return DialectUnknown, nil, fmt.Errorf("failed to classify chase statement dialect: %w", err)
 	}
+
+	if stream == nil {
+		return DialectUnknown, nil, fmt.Errorf("classifier returned nil reader stream for dialect %s", dialect)
+	}
+
 	return dialect, stream, nil
 }
 
@@ -98,16 +113,23 @@ type dialectRoute struct {
 	parser      dialectParser
 }
 
-//nolint:gochecknoglobals,exhaustive // immutable strategy route table initialized at package load; DialectUnknown handled dynamically in parseDialect
-var dialectRoutes = map[DialectType]dialectRoute{
-	DialectChecking: {
-		destination: model.DestChaseChecking,
-		parser:      parseChecking,
-	},
-	DialectCreditCard: {
-		destination: model.DestChaseCreditCard,
-		parser:      parseCreditCard,
-	},
+func resolveDialectRoute(dialect DialectType) (dialectRoute, bool) {
+	switch dialect {
+	case DialectChecking:
+		return dialectRoute{
+			destination: model.DestChaseChecking,
+			parser:      parseChecking,
+		}, true
+	case DialectCreditCard:
+		return dialectRoute{
+			destination: model.DestChaseCreditCard,
+			parser:      parseCreditCard,
+		}, true
+	case DialectUnknown:
+		return dialectRoute{}, false
+	default:
+		return dialectRoute{}, false
+	}
 }
 
 func parseDialect(
@@ -116,7 +138,7 @@ func parseDialect(
 	stream io.Reader,
 	meta model.FileMetadata,
 ) (model.Destination, []model.ChaseTransaction, error) {
-	route, ok := dialectRoutes[dialect]
+	route, ok := resolveDialectRoute(dialect)
 	if !ok {
 		if dialect == DialectUnknown {
 			return "", nil, fmt.Errorf("%w: %s", ErrUnknownDialect, dialect)
