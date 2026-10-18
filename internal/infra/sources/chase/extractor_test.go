@@ -133,6 +133,9 @@ func TestChaseExtractor_Fixtures_Checking(t *testing.T) {
 	fixturePath := filepath.Join("..", "..", "..", "..", "data", "unprocessed", "Chase6921_Activity_20260131.CSV")
 	file, err := os.Open(fixturePath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skipf("skipping fixture test: fixture not found at %s", fixturePath)
+		}
 		t.Fatalf("failed to open fixture %s: %v", fixturePath, err)
 	}
 	defer file.Close()
@@ -184,6 +187,9 @@ func TestChaseExtractor_Fixtures_CreditCard(t *testing.T) {
 	fixturePath := filepath.Join("..", "..", "..", "..", "data", "unprocessed", "Chase2472_Activity20250101_20251231_20260201.CSV")
 	file, err := os.Open(fixturePath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skipf("skipping fixture test: fixture not found at %s", fixturePath)
+		}
 		t.Fatalf("failed to open fixture %s: %v", fixturePath, err)
 	}
 	defer file.Close()
