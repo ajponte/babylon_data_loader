@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -141,6 +142,14 @@ func TestFidelityPosition_ZeroValue(t *testing.T) {
 }
 
 func TestFidelityPosition_Validate(t *testing.T) {
+	validLineage := model.SourceLineage{
+		FileName:  "positions.csv",
+		RowNumber: 2,
+	}
+	nanVal := math.NaN()
+	posInf := math.Inf(1)
+	negInf := math.Inf(-1)
+
 	tests := []struct {
 		name        string
 		pos         *model.FidelityPosition
@@ -154,17 +163,156 @@ func TestFidelityPosition_Validate(t *testing.T) {
 		{
 			name: "valid position",
 			pos: &model.FidelityPosition{
-				Symbol:   "FXAIX",
-				Quantity: 10.0,
+				Lineage:      validLineage,
+				AccountID:    "FID-123",
+				Symbol:       "FXAIX",
+				Quantity:     10.0,
+				LastPrice:    180.50,
+				CurrentValue: 1805.00,
+				CostBasis:    1500.00,
 			},
 			expectedErr: nil,
 		},
 		{
-			name: "missing symbol",
+			name: "invalid lineage missing filename",
 			pos: &model.FidelityPosition{
+				Lineage: model.SourceLineage{
+					FileName:  "",
+					RowNumber: 1,
+				},
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+			},
+			expectedErr: model.ErrMissingFileName,
+		},
+		{
+			name: "invalid lineage negative row number",
+			pos: &model.FidelityPosition{
+				Lineage: model.SourceLineage{
+					FileName:  "positions.csv",
+					RowNumber: -2,
+				},
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+			},
+			expectedErr: model.ErrNegativeRowNumber,
+		},
+		{
+			name: "missing account ID",
+			pos: &model.FidelityPosition{
+				Lineage:  validLineage,
+				Symbol:   "FXAIX",
 				Quantity: 10.0,
 			},
+			expectedErr: model.ErrMissingAccountID,
+		},
+		{
+			name: "missing symbol",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Quantity:  10.0,
+			},
 			expectedErr: model.ErrMissingSymbol,
+		},
+		{
+			name: "NaN quantity",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  nanVal,
+			},
+			expectedErr: model.ErrInvalidQuantity,
+		},
+		{
+			name: "infinity quantity",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  posInf,
+			},
+			expectedErr: model.ErrInvalidQuantity,
+		},
+		{
+			name: "NaN last price",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+				LastPrice: nanVal,
+			},
+			expectedErr: model.ErrInvalidLastPrice,
+		},
+		{
+			name: "infinity last price",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+				LastPrice: posInf,
+			},
+			expectedErr: model.ErrInvalidLastPrice,
+		},
+		{
+			name: "negative last price",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+				LastPrice: -1.50,
+			},
+			expectedErr: model.ErrNegativeLastPrice,
+		},
+		{
+			name: "NaN current value",
+			pos: &model.FidelityPosition{
+				Lineage:      validLineage,
+				AccountID:    "FID-123",
+				Symbol:       "FXAIX",
+				Quantity:     10.0,
+				CurrentValue: nanVal,
+			},
+			expectedErr: model.ErrInvalidCurrentValue,
+		},
+		{
+			name: "infinity current value",
+			pos: &model.FidelityPosition{
+				Lineage:      validLineage,
+				AccountID:    "FID-123",
+				Symbol:       "FXAIX",
+				Quantity:     10.0,
+				CurrentValue: negInf,
+			},
+			expectedErr: model.ErrInvalidCurrentValue,
+		},
+		{
+			name: "NaN cost basis",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+				CostBasis: nanVal,
+			},
+			expectedErr: model.ErrInvalidCostBasis,
+		},
+		{
+			name: "infinity cost basis",
+			pos: &model.FidelityPosition{
+				Lineage:   validLineage,
+				AccountID: "FID-123",
+				Symbol:    "FXAIX",
+				Quantity:  10.0,
+				CostBasis: posInf,
+			},
+			expectedErr: model.ErrInvalidCostBasis,
 		},
 	}
 

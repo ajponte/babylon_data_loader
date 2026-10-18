@@ -200,6 +200,10 @@ func TestSyncLog_NewSuccessSyncLog(t *testing.T) {
 	if log.IsFailed() {
 		t.Error("expected IsFailed() to be false")
 	}
+
+	if err := log.Validate(); err != nil {
+		t.Errorf("expected valid SyncLog from NewSuccessSyncLog, got %v", err)
+	}
 }
 
 func TestSyncLog_NewFailedSyncLog(t *testing.T) {
@@ -253,6 +257,10 @@ func TestSyncLog_NewFailedSyncLog(t *testing.T) {
 	if !log.IsFailed() {
 		t.Error("expected IsFailed() to be true")
 	}
+
+	if err := log.Validate(); err != nil {
+		t.Errorf("expected valid SyncLog from NewFailedSyncLog, got %v", err)
+	}
 }
 
 func TestSyncLog_NilReceiver(t *testing.T) {
@@ -270,6 +278,8 @@ func TestSyncLog_NilReceiver(t *testing.T) {
 }
 
 func TestSyncLog_Validate(t *testing.T) {
+	validTime := time.Date(2026, 10, 18, 2, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name        string
 		log         *model.SyncLog
@@ -283,35 +293,135 @@ func TestSyncLog_Validate(t *testing.T) {
 		{
 			name: "valid success log",
 			log: &model.SyncLog{
-				Status:     model.SyncStatusSuccess,
-				DurationMs: 120,
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				RecordCount:    10,
+				UpsertedCount:  10,
+				MatchedCount:   0,
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     120,
 			},
 			expectedErr: nil,
 		},
 		{
 			name: "valid failed log",
 			log: &model.SyncLog{
-				Status:       model.SyncStatusFailed,
-				ErrorMessage: "persistence timed out",
-				DurationMs:   500,
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				RecordCount:    0,
+				UpsertedCount:  0,
+				MatchedCount:   0,
+				Status:         model.SyncStatusFailed,
+				ErrorMessage:   "persistence timed out",
+				SyncedAt:       validTime,
+				DurationMs:     500,
 			},
 			expectedErr: nil,
 		},
 		{
 			name: "invalid sync status",
 			log: &model.SyncLog{
-				Status:     model.SyncStatus("INVALID"),
-				DurationMs: 100,
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				Status:         model.SyncStatus("INVALID"),
+				SyncedAt:       validTime,
+				DurationMs:     100,
 			},
 			expectedErr: model.ErrInvalidSyncStatus,
 		},
 		{
+			name: "negative record count",
+			log: &model.SyncLog{
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				RecordCount:    -5,
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     10,
+			},
+			expectedErr: model.ErrNegativeRecordCount,
+		},
+		{
+			name: "negative upserted count",
+			log: &model.SyncLog{
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				RecordCount:    10,
+				UpsertedCount:  -1,
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     10,
+			},
+			expectedErr: model.ErrNegativeUpsertedCount,
+		},
+		{
+			name: "negative matched count",
+			log: &model.SyncLog{
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				RecordCount:    10,
+				MatchedCount:   -1,
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     10,
+			},
+			expectedErr: model.ErrNegativeMatchedCount,
+		},
+		{
 			name: "negative duration",
 			log: &model.SyncLog{
-				Status:     model.SyncStatusSuccess,
-				DurationMs: -10,
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     -10,
 			},
 			expectedErr: model.ErrNegativeDuration,
+		},
+		{
+			name: "missing file name",
+			log: &model.SyncLog{
+				FileName:       "",
+				CollectionName: "transactions_chase",
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     100,
+			},
+			expectedErr: model.ErrMissingFileName,
+		},
+		{
+			name: "missing collection name",
+			log: &model.SyncLog{
+				FileName:       "test.csv",
+				CollectionName: "",
+				Status:         model.SyncStatusSuccess,
+				SyncedAt:       validTime,
+				DurationMs:     100,
+			},
+			expectedErr: model.ErrMissingCollectionName,
+		},
+		{
+			name: "missing synced at",
+			log: &model.SyncLog{
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				Status:         model.SyncStatusSuccess,
+				DurationMs:     100,
+			},
+			expectedErr: model.ErrMissingSyncTime,
+		},
+		{
+			name: "failed status with missing error message",
+			log: &model.SyncLog{
+				FileName:       "test.csv",
+				CollectionName: "transactions_chase",
+				Status:         model.SyncStatusFailed,
+				ErrorMessage:   "",
+				SyncedAt:       validTime,
+				DurationMs:     100,
+			},
+			expectedErr: model.ErrMissingErrorMessage,
 		},
 	}
 

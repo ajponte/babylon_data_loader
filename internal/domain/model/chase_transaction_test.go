@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -142,6 +143,14 @@ func TestChaseTransaction_ZeroValue(t *testing.T) {
 
 func TestChaseTransaction_Validate(t *testing.T) {
 	validDate := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	validLineage := model.SourceLineage{
+		FileName:  "statement.csv",
+		RowNumber: 1,
+	}
+	validBalance := 100.50
+	nanVal := math.NaN()
+	posInf := math.Inf(1)
+	negInf := math.Inf(-1)
 
 	tests := []struct {
 		name        string
@@ -154,17 +163,73 @@ func TestChaseTransaction_Validate(t *testing.T) {
 			expectedErr: model.ErrNilChaseTransaction,
 		},
 		{
-			name: "valid transaction",
+			name: "valid checking transaction with balance",
 			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
 				PostingDate: validDate,
 				Description: "STARBUCKS",
 				Amount:      -6.25,
+				Balance:     &validBalance,
 			},
 			expectedErr: nil,
 		},
 		{
+			name: "valid card transaction without balance",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "cc-456",
+				PostingDate: validDate,
+				Description: "TARGET",
+				Amount:      -42.50,
+				Balance:     nil,
+			},
+			expectedErr: nil,
+		},
+		{
+			name: "invalid lineage missing filename",
+			tx: &model.ChaseTransaction{
+				Lineage: model.SourceLineage{
+					FileName:  "",
+					RowNumber: 1,
+				},
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      -6.25,
+			},
+			expectedErr: model.ErrMissingFileName,
+		},
+		{
+			name: "invalid lineage negative row number",
+			tx: &model.ChaseTransaction{
+				Lineage: model.SourceLineage{
+					FileName:  "statement.csv",
+					RowNumber: -1,
+				},
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      -6.25,
+			},
+			expectedErr: model.ErrNegativeRowNumber,
+		},
+		{
+			name: "missing account ID",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      -6.25,
+			},
+			expectedErr: model.ErrMissingAccountID,
+		},
+		{
 			name: "missing posting date",
 			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
 				Description: "STARBUCKS",
 				Amount:      -6.25,
 			},
@@ -173,10 +238,82 @@ func TestChaseTransaction_Validate(t *testing.T) {
 		{
 			name: "missing description",
 			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
 				PostingDate: validDate,
+				Description: "",
 				Amount:      -6.25,
 			},
 			expectedErr: model.ErrMissingDescription,
+		},
+		{
+			name: "NaN amount",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      nanVal,
+			},
+			expectedErr: model.ErrInvalidAmount,
+		},
+		{
+			name: "positive infinity amount",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      posInf,
+			},
+			expectedErr: model.ErrInvalidAmount,
+		},
+		{
+			name: "negative infinity amount",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      negInf,
+			},
+			expectedErr: model.ErrInvalidAmount,
+		},
+		{
+			name: "NaN balance",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      -6.25,
+				Balance:     &nanVal,
+			},
+			expectedErr: model.ErrInvalidBalance,
+		},
+		{
+			name: "positive infinity balance",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      -6.25,
+				Balance:     &posInf,
+			},
+			expectedErr: model.ErrInvalidBalance,
+		},
+		{
+			name: "negative infinity balance",
+			tx: &model.ChaseTransaction{
+				Lineage:     validLineage,
+				AccountID:   "chk-123",
+				PostingDate: validDate,
+				Description: "STARBUCKS",
+				Amount:      -6.25,
+				Balance:     &negInf,
+			},
+			expectedErr: model.ErrInvalidBalance,
 		},
 	}
 

@@ -12,5 +12,5 @@ type Extractor interface {
 	// SourceType returns the unique identifier for the extractor source type.
 	SourceType() string
 	// Extract parses raw data from the reader and returns a normalized IngestionBatch.
-	Extract(ctx context.Context, r io.Reader, meta model.SourceLineage) (*model.IngestionBatch, error)
+	Extract(ctx context.Context, r io.Reader, meta model.FileMetadata) (*model.IngestionBatch, error)
 }

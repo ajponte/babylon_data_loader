@@ -43,6 +43,11 @@ func TestDestination_Constants(t *testing.T) {
 			}
 		})
 	}
+
+	if model.DestChaseChecking != model.DestChaseCreditCard {
+		t.Errorf("expected Chase checking and credit card to share collection destination, got %q != %q",
+			model.DestChaseChecking, model.DestChaseCreditCard)
+	}
 }
 
 func TestDestination_IsValid(t *testing.T) {
@@ -129,10 +134,10 @@ func TestIngestionBatch_ZeroValue(t *testing.T) {
 	}
 }
 
-func TestIngestionBatch_PayloadTypes(t *testing.T) {
+func TestIngestionBatch_AsChaseTransactions(t *testing.T) {
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 
-	t.Run("ChaseTransaction slice payload", func(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
 		chaseTxs := []model.ChaseTransaction{
 			{
 				AccountID:   "chk-100",
@@ -149,19 +154,68 @@ func TestIngestionBatch_PayloadTypes(t *testing.T) {
 			Payload:     chaseTxs,
 		}
 
-		payload, ok := batch.Payload.([]model.ChaseTransaction)
-		if !ok {
-			t.Fatalf("expected []model.ChaseTransaction payload, got %T", batch.Payload)
+		txs, err := batch.AsChaseTransactions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(payload) != 1 {
-			t.Fatalf("expected 1 transaction in payload, got %d", len(payload))
+		if len(txs) != 1 {
+			t.Fatalf("expected 1 transaction, got %d", len(txs))
 		}
-		if payload[0].Description != "GROCERY STORE" {
-			t.Errorf("expected description 'GROCERY STORE', got %q", payload[0].Description)
+		if txs[0].Description != "GROCERY STORE" {
+			t.Errorf("expected description 'GROCERY STORE', got %q", txs[0].Description)
 		}
 	})
 
-	t.Run("FidelityPosition slice payload", func(t *testing.T) {
+	t.Run("nil receiver", func(t *testing.T) {
+		var nilBatch *model.IngestionBatch
+		txs, err := nilBatch.AsChaseTransactions()
+		if !errors.Is(err, model.ErrNilBatch) {
+			t.Errorf("expected ErrNilBatch, got %v", err)
+		}
+		if txs != nil {
+			t.Errorf("expected nil txs, got %v", txs)
+		}
+	})
+
+	t.Run("zero count nil payload", func(t *testing.T) {
+		batch := &model.IngestionBatch{
+			RecordCount: 0,
+			Payload:     nil,
+		}
+		txs, err := batch.AsChaseTransactions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if txs == nil || len(txs) != 0 {
+			t.Errorf("expected empty slice, got %v", txs)
+		}
+	})
+
+	t.Run("positive count nil payload", func(t *testing.T) {
+		batch := &model.IngestionBatch{
+			RecordCount: 5,
+			Payload:     nil,
+		}
+		_, err := batch.AsChaseTransactions()
+		if !errors.Is(err, model.ErrNilPayload) {
+			t.Errorf("expected ErrNilPayload, got %v", err)
+		}
+	})
+
+	t.Run("type mismatch", func(t *testing.T) {
+		batch := &model.IngestionBatch{
+			RecordCount: 1,
+			Payload:     []string{"wrong_type"},
+		}
+		_, err := batch.AsChaseTransactions()
+		if !errors.Is(err, model.ErrPayloadTypeMismatch) {
+			t.Errorf("expected ErrPayloadTypeMismatch, got %v", err)
+		}
+	})
+}
+
+func TestIngestionBatch_AsFidelityPositions(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
 		positions := []model.FidelityPosition{
 			{
 				AccountID:    "fid-200",
@@ -178,20 +232,69 @@ func TestIngestionBatch_PayloadTypes(t *testing.T) {
 			Payload:     positions,
 		}
 
-		payload, ok := batch.Payload.([]model.FidelityPosition)
-		if !ok {
-			t.Fatalf("expected []model.FidelityPosition payload, got %T", batch.Payload)
+		pos, err := batch.AsFidelityPositions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(payload) != 1 {
-			t.Fatalf("expected 1 position in payload, got %d", len(payload))
+		if len(pos) != 1 {
+			t.Fatalf("expected 1 position, got %d", len(pos))
 		}
-		if payload[0].Symbol != "FXAIX" {
-			t.Errorf("expected symbol 'FXAIX', got %q", payload[0].Symbol)
+		if pos[0].Symbol != "FXAIX" {
+			t.Errorf("expected symbol 'FXAIX', got %q", pos[0].Symbol)
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var nilBatch *model.IngestionBatch
+		pos, err := nilBatch.AsFidelityPositions()
+		if !errors.Is(err, model.ErrNilBatch) {
+			t.Errorf("expected ErrNilBatch, got %v", err)
+		}
+		if pos != nil {
+			t.Errorf("expected nil pos, got %v", pos)
+		}
+	})
+
+	t.Run("zero count nil payload", func(t *testing.T) {
+		batch := &model.IngestionBatch{
+			RecordCount: 0,
+			Payload:     nil,
+		}
+		pos, err := batch.AsFidelityPositions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if pos == nil || len(pos) != 0 {
+			t.Errorf("expected empty slice, got %v", pos)
+		}
+	})
+
+	t.Run("positive count nil payload", func(t *testing.T) {
+		batch := &model.IngestionBatch{
+			RecordCount: 5,
+			Payload:     nil,
+		}
+		_, err := batch.AsFidelityPositions()
+		if !errors.Is(err, model.ErrNilPayload) {
+			t.Errorf("expected ErrNilPayload, got %v", err)
+		}
+	})
+
+	t.Run("type mismatch", func(t *testing.T) {
+		batch := &model.IngestionBatch{
+			RecordCount: 1,
+			Payload:     12345,
+		}
+		_, err := batch.AsFidelityPositions()
+		if !errors.Is(err, model.ErrPayloadTypeMismatch) {
+			t.Errorf("expected ErrPayloadTypeMismatch, got %v", err)
 		}
 	})
 }
 
 func TestIngestionBatch_Validate(t *testing.T) {
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name        string
 		batch       *model.IngestionBatch
@@ -206,7 +309,11 @@ func TestIngestionBatch_Validate(t *testing.T) {
 			name: "valid batch",
 			batch: &model.IngestionBatch{
 				Destination: model.DestChaseCreditCard,
+				AccountID:   "act-123",
+				SourceFile:  "statements.csv",
+				IngestedAt:  now,
 				RecordCount: 10,
+				Payload:     []model.ChaseTransaction{},
 			},
 			expectedErr: nil,
 		},
@@ -214,17 +321,71 @@ func TestIngestionBatch_Validate(t *testing.T) {
 			name: "invalid destination",
 			batch: &model.IngestionBatch{
 				Destination: model.Destination("invalid_dest"),
+				AccountID:   "act-123",
+				SourceFile:  "statements.csv",
+				IngestedAt:  now,
 				RecordCount: 5,
+				Payload:     []string{"data"},
 			},
 			expectedErr: model.ErrInvalidDestination,
+		},
+		{
+			name: "missing account ID",
+			batch: &model.IngestionBatch{
+				Destination: model.DestChaseChecking,
+				AccountID:   "",
+				SourceFile:  "statements.csv",
+				IngestedAt:  now,
+				RecordCount: 5,
+				Payload:     []string{"data"},
+			},
+			expectedErr: model.ErrMissingAccountID,
+		},
+		{
+			name: "missing source file",
+			batch: &model.IngestionBatch{
+				Destination: model.DestChaseChecking,
+				AccountID:   "act-123",
+				SourceFile:  "",
+				IngestedAt:  now,
+				RecordCount: 5,
+				Payload:     []string{"data"},
+			},
+			expectedErr: model.ErrMissingFileName,
+		},
+		{
+			name: "missing ingested at",
+			batch: &model.IngestionBatch{
+				Destination: model.DestChaseChecking,
+				AccountID:   "act-123",
+				SourceFile:  "statements.csv",
+				RecordCount: 5,
+				Payload:     []string{"data"},
+			},
+			expectedErr: model.ErrMissingIngestedAt,
 		},
 		{
 			name: "negative record count",
 			batch: &model.IngestionBatch{
 				Destination: model.DestFidelityPosition,
+				AccountID:   "act-123",
+				SourceFile:  "statements.csv",
+				IngestedAt:  now,
 				RecordCount: -1,
 			},
 			expectedErr: model.ErrNegativeRecordCount,
+		},
+		{
+			name: "positive count with nil payload",
+			batch: &model.IngestionBatch{
+				Destination: model.DestFidelityPosition,
+				AccountID:   "act-123",
+				SourceFile:  "statements.csv",
+				IngestedAt:  now,
+				RecordCount: 10,
+				Payload:     nil,
+			},
+			expectedErr: model.ErrNilPayload,
 		},
 	}
 
@@ -236,6 +397,87 @@ func TestIngestionBatch_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFileMetadata(t *testing.T) {
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+
+	t.Run("Instantiation and zero value", func(t *testing.T) {
+		meta := model.FileMetadata{
+			FileName:   "test.csv",
+			FileHash:   "hash123",
+			AccountID:  "acc-999",
+			IngestedAt: now,
+		}
+
+		if meta.FileName != "test.csv" || meta.FileHash != "hash123" || meta.AccountID != "acc-999" || !meta.IngestedAt.Equal(now) {
+			t.Errorf("unexpected populated metadata: %+v", meta)
+		}
+
+		var zeroMeta model.FileMetadata
+		if zeroMeta.FileName != "" || zeroMeta.FileHash != "" || zeroMeta.AccountID != "" || !zeroMeta.IngestedAt.IsZero() {
+			t.Errorf("unexpected zero metadata: %+v", zeroMeta)
+		}
+	})
+
+	t.Run("Validate", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			meta        *model.FileMetadata
+			expectedErr error
+		}{
+			{
+				name:        "nil metadata",
+				meta:        nil,
+				expectedErr: model.ErrNilFileMetadata,
+			},
+			{
+				name: "valid metadata",
+				meta: &model.FileMetadata{
+					FileName:   "test.csv",
+					FileHash:   "hash123",
+					AccountID:  "acc-123",
+					IngestedAt: now,
+				},
+				expectedErr: nil,
+			},
+			{
+				name: "missing file name",
+				meta: &model.FileMetadata{
+					FileName:   "",
+					AccountID:  "acc-123",
+					IngestedAt: now,
+				},
+				expectedErr: model.ErrMissingFileName,
+			},
+			{
+				name: "missing account ID",
+				meta: &model.FileMetadata{
+					FileName:   "test.csv",
+					AccountID:  "",
+					IngestedAt: now,
+				},
+				expectedErr: model.ErrMissingAccountID,
+			},
+			{
+				name: "missing ingested at",
+				meta: &model.FileMetadata{
+					FileName:  "test.csv",
+					AccountID: "acc-123",
+				},
+				expectedErr: model.ErrMissingIngestedAt,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := tt.meta.Validate()
+				if !errors.Is(err, tt.expectedErr) {
+					t.Errorf("Validate() err = %v, want %v", err, tt.expectedErr)
+				}
+			})
+		}
+	})
 }
 
 func TestSourceLineage_Instantiation(t *testing.T) {

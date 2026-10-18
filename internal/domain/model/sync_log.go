@@ -12,6 +12,16 @@ var (
 	ErrInvalidSyncStatus = errors.New("invalid sync status")
 	// ErrNegativeDuration indicates that the duration is negative.
 	ErrNegativeDuration = errors.New("duration cannot be negative")
+	// ErrNegativeUpsertedCount indicates that the upserted count is negative.
+	ErrNegativeUpsertedCount = errors.New("upserted count cannot be negative")
+	// ErrNegativeMatchedCount indicates that the matched count is negative.
+	ErrNegativeMatchedCount = errors.New("matched count cannot be negative")
+	// ErrMissingCollectionName indicates that the target collection name is empty.
+	ErrMissingCollectionName = errors.New("collection name is required")
+	// ErrMissingSyncTime indicates that the synchronization timestamp is zero.
+	ErrMissingSyncTime = errors.New("sync timestamp is required")
+	// ErrMissingErrorMessage indicates that an error message is required for failed syncs.
+	ErrMissingErrorMessage = errors.New("error message is required for failed sync")
 )
 
 // SyncStatus represents the completion status of an ingestion sync operation.
@@ -120,8 +130,29 @@ func (l *SyncLog) Validate() error {
 	if !l.Status.IsValid() {
 		return ErrInvalidSyncStatus
 	}
+	if l.RecordCount < 0 {
+		return ErrNegativeRecordCount
+	}
+	if l.UpsertedCount < 0 {
+		return ErrNegativeUpsertedCount
+	}
+	if l.MatchedCount < 0 {
+		return ErrNegativeMatchedCount
+	}
 	if l.DurationMs < 0 {
 		return ErrNegativeDuration
+	}
+	if l.FileName == "" {
+		return ErrMissingFileName
+	}
+	if l.CollectionName == "" {
+		return ErrMissingCollectionName
+	}
+	if l.SyncedAt.IsZero() {
+		return ErrMissingSyncTime
+	}
+	if l.Status == SyncStatusFailed && l.ErrorMessage == "" {
+		return ErrMissingErrorMessage
 	}
 	return nil
 }
