@@ -83,12 +83,7 @@ func parseCreditCardRow(
 	return tx, nil
 }
 
-// isPlaceholderDate checks whether a date string is empty or contains an indicator for pending transactions.
+// isPlaceholderDate checks whether a date string is empty, placeholder numeric, or "pending".
 func isPlaceholderDate(val string) bool {
-	trimmed := strings.TrimSpace(val)
-	return trimmed == "" ||
-		trimmed == "-" ||
-		trimmed == "--" ||
-		strings.EqualFold(trimmed, "n/a") ||
-		strings.EqualFold(trimmed, "pending")
+	return isPlaceholderNumeric(val) || strings.EqualFold(strings.TrimSpace(val), "pending")
 }

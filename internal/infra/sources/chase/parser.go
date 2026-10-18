@@ -10,21 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"babylon/dataloader/internal/domain/model"
 )
 
 const defaultTransactionsCapacity = 64
-
-// supportedDateLayouts defines the accepted timestamp layouts in Chase statement CSVs.
-//
-//nolint:gochecknoglobals // immutable format string slice reused across row parsers
-var supportedDateLayouts = []string{
-	"01/02/2006",
-	"1/2/2006",
-	"2006-01-02",
-	"2006/01/02",
-}
 
 type rowParser func(
 	row []string,
@@ -141,10 +132,28 @@ func parseAmount(amtRaw string, lineNum int) (float64, error) {
 }
 
 // isPlaceholderNumeric reports whether val represents an absent or non-numeric placeholder value.
-// It checks for empty strings, dashes ("-", "--"), and "N/A" (case-insensitive).
+// It detects empty fields, tabular null tokens ("n/a", "na", "#n/a", "none", "null", "nil", "-$"),
+// and strings consisting entirely of ASCII or Unicode dashes (-, --, ---, –, —, −, ―).
 func isPlaceholderNumeric(val string) bool {
 	trimmed := strings.TrimSpace(val)
-	return trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a")
+	if trimmed == "" {
+		return true
+	}
+
+	switch strings.ToLower(trimmed) {
+	case "-", "--", "---", "n/a", "na", "#n/a", "none", "null", "nil", "-$":
+		return true
+	}
+
+	hasDash := false
+	for _, r := range trimmed {
+		if r == '-' || r == '\u2013' || r == '\u2014' || r == '\u2212' || r == '\u2015' {
+			hasDash = true
+			continue
+		}
+		return false
+	}
+	return hasDash
 }
 
 // parseBalance parses an optional running balance field.
@@ -185,7 +194,14 @@ func parseDate(val string) (time.Time, error) {
 		return time.Time{}, errors.New("date value is empty")
 	}
 
-	for _, layout := range supportedDateLayouts {
+	layouts := [...]string{
+		"01/02/2006",
+		"1/2/2006",
+		"2006-01-02",
+		"2006/01/02",
+	}
+
+	for _, layout := range layouts {
 		if parsed, err := time.Parse(layout, trimmed); err == nil {
 			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC), nil
 		}
@@ -195,10 +211,10 @@ func parseDate(val string) (time.Time, error) {
 }
 
 // cleanNumeric normalizes numeric strings by removing currency signs, formatting symbols,
-// and accounting parentheses without coercing placeholder values to zero.
+// Unicode whitespace, and accounting parentheses without coercing placeholder values to zero.
 func cleanNumeric(val string) string {
 	clean := strings.Map(func(r rune) rune {
-		if r == 0x00a0 || r == 0x202f || r == ' ' || r == '\t' {
+		if unicode.IsSpace(r) {
 			return -1
 		}
 		return r
@@ -217,7 +233,11 @@ func cleanNumeric(val string) string {
 
 func findColumn(colIndex map[string]int, aliases ...string) (int, bool) {
 	for _, alias := range aliases {
-		if idx, ok := colIndex[strings.ToLower(alias)]; ok {
+		normalized := strings.ToLower(strings.TrimSpace(alias))
+		if normalized == "" {
+			continue
+		}
+		if idx, ok := colIndex[normalized]; ok {
 			return idx, true
 		}
 	}
@@ -226,7 +246,7 @@ func findColumn(colIndex map[string]int, aliases ...string) (int, bool) {
 
 func getFieldValue(row []string, colIndex map[string]int, aliases ...string) string {
 	idx, ok := findColumn(colIndex, aliases...)
-	if !ok || idx >= len(row) {
+	if !ok || idx < 0 || idx >= len(row) {
 		return ""
 	}
 	return strings.TrimSpace(row[idx])
@@ -273,6 +293,20 @@ func newRowReader(row []string, colIndex map[string]int, lineNum int) rowReader 
 // get retrieves the trimmed value for the first matching column alias.
 func (r rowReader) get(aliases ...string) string {
 	return getFieldValue(r.row, r.colIndex, aliases...)
+}
+
+// parseDate extracts and validates a timestamp field from the specified column aliases.
+// It returns an error attributed to the physical row number if the date is missing or invalid.
+func (r rowReader) parseDate(aliases ...string) (time.Time, error) {
+	dateStr := r.get(aliases...)
+	if dateStr == "" {
+		return time.Time{}, fmt.Errorf("row %d: transaction date is required", r.lineNum)
+	}
+	t, err := parseDate(dateStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("row %d: %w", r.lineNum, err)
+	}
+	return t, nil
 }
 
 // parseDescription extracts and validates the description field.

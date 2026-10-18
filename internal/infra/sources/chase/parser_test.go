@@ -365,10 +365,25 @@ func TestIsPlaceholderNumeric(t *testing.T) {
 		{name: "whitespace-only field", input: "   ", want: true},
 		{name: "single placeholder dash", input: "-", want: true},
 		{name: "double placeholder dash with surrounding spaces", input: " -- ", want: true},
+		{name: "triple dash", input: "---", want: true},
 		{name: "lowercase n/a", input: "n/a", want: true},
 		{name: "uppercase N/A", input: "N/A", want: true},
+		{name: "lowercase na", input: "na", want: true},
+		{name: "uppercase NA", input: "NA", want: true},
+		{name: "hash N/A uppercase", input: "#N/A", want: true},
+		{name: "hash n/a lowercase", input: "#n/a", want: true},
+		{name: "none token", input: "none", want: true},
+		{name: "null token", input: "null", want: true},
+		{name: "nil token", input: "nil", want: true},
+		{name: "negative dollar placeholder", input: "-$", want: true},
+		{name: "unicode en-dash", input: "\u2013", want: true},
+		{name: "unicode em-dash", input: "\u2014", want: true},
+		{name: "unicode minus sign", input: "\u2212", want: true},
+		{name: "unicode horizontal bar", input: "\u2015", want: true},
 		{name: "zero string", input: "0", want: false},
 		{name: "decimal zero", input: "0.00", want: false},
+		{name: "currency zero", input: "$0.00", want: false},
+		{name: "negative zero", input: "-0.00", want: false},
 		{name: "positive float", input: "123.45", want: false},
 		{name: "negative float", input: "-50.00", want: false},
 		{name: "pending text", input: "pending", want: false},
@@ -480,6 +495,29 @@ func testRowReaderParseBalance(t *testing.T, rr rowReader, lineNum int) {
 	}
 }
 
+func testRowReaderParseDate(t *testing.T, rr rowReader, lineNum int) {
+	t.Helper()
+	parsed, err := rr.parseDate("posting date", "post date")
+	if err != nil {
+		t.Fatalf("unexpected parseDate error: %v", err)
+	}
+	if parsed.Year() != 2026 || parsed.Month() != time.October || parsed.Day() != 18 {
+		t.Errorf("expected 2026-10-18, got %v", parsed)
+	}
+
+	emptyRR := newRowReader([]string{""}, map[string]int{"posting date": 0}, lineNum)
+	_, err = emptyRR.parseDate("posting date")
+	if err == nil || !strings.Contains(err.Error(), "row 12: transaction date is required") {
+		t.Errorf("expected required error for row 12, got: %v", err)
+	}
+
+	invalidRR := newRowReader([]string{"invalid-date"}, map[string]int{"posting date": 0}, lineNum)
+	_, err = invalidRR.parseDate("posting date")
+	if err == nil || !strings.Contains(err.Error(), "row 12: invalid date format") {
+		t.Errorf("expected invalid date format error for row 12, got: %v", err)
+	}
+}
+
 func TestRowReader(t *testing.T) {
 	t.Parallel()
 
@@ -504,6 +542,11 @@ func TestRowReader(t *testing.T) {
 		testRowReaderGet(t, rr)
 	})
 
+	t.Run("parseDate", func(t *testing.T) {
+		t.Parallel()
+		testRowReaderParseDate(t, rr, lineNum)
+	})
+
 	t.Run("parseDescription", func(t *testing.T) {
 		t.Parallel()
 		testRowReaderParseDescription(t, rr, lineNum)
@@ -518,6 +561,155 @@ func TestRowReader(t *testing.T) {
 		t.Parallel()
 		testRowReaderParseBalance(t, rr, lineNum)
 	})
+}
+
+func TestRowReader_ZeroValueAndNegativeBounds(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero-value struct safety", func(t *testing.T) {
+		t.Parallel()
+		var rr rowReader
+		if val := rr.get("any"); val != "" {
+			t.Errorf("expected empty string from zero-value rowReader, got %q", val)
+		}
+		if _, err := rr.parseDescription("any"); err == nil {
+			t.Errorf("expected error from parseDescription on zero-value rowReader")
+		}
+		if _, err := rr.parseAmount("any"); err == nil {
+			t.Errorf("expected error from parseAmount on zero-value rowReader")
+		}
+		bal, balErr := rr.parseBalance("any")
+		if balErr != nil || bal != nil {
+			t.Errorf("expected (nil, nil) from parseBalance on zero-value rowReader, got (%v, %v)", bal, balErr)
+		}
+		if _, dateErr := rr.parseDate("any"); dateErr == nil {
+			t.Errorf("expected error from parseDate on zero-value rowReader")
+		}
+	})
+
+	t.Run("negative index bounds check", func(t *testing.T) {
+		t.Parallel()
+		row := []string{"value1", "value2"}
+		colIndex := map[string]int{
+			"neg":  -1,
+			"bad":  -99,
+			"good": 0,
+		}
+		rr := newRowReader(row, colIndex, 1)
+		if val := rr.get("neg"); val != "" {
+			t.Errorf("expected empty string for negative index, got %q", val)
+		}
+		if val := rr.get("bad"); val != "" {
+			t.Errorf("expected empty string for negative index, got %q", val)
+		}
+		if val := rr.get("good"); val != "value1" {
+			t.Errorf("expected 'value1', got %q", val)
+		}
+	})
+}
+
+func TestCleanNumeric_CRLFAndFigureSpace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "CRLF carriage returns", input: "\r-100.50\r", want: "-100.50"},
+		{name: "figure space tabular alignment", input: "1\u2007234.56", want: "1234.56"},
+		{name: "mixed tabs, spaces, and CR", input: " \t\r 45.20 \r ", want: "45.20"},
+		{name: "accounting negative with CRLF", input: " ($50.00) \r", want: "-50.00"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := cleanNumeric(tc.input)
+			if got != tc.want {
+				t.Errorf("cleanNumeric(%q): expected %q, got %q", tc.input, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFindColumn_TrimmingAndEmptyAliases(t *testing.T) {
+	t.Parallel()
+	colIndex := map[string]int{
+		"posting date": 0,
+		"amount":       1,
+	}
+
+	t.Run("untrimmed alias matches", func(t *testing.T) {
+		t.Parallel()
+		idx, ok := findColumn(colIndex, "  posting date  ")
+		if !ok || idx != 0 {
+			t.Errorf("expected (0, true), got (%d, %v)", idx, ok)
+		}
+	})
+
+	t.Run("empty and blank candidate skipped", func(t *testing.T) {
+		t.Parallel()
+		idx, ok := findColumn(colIndex, "", "   ", "amount")
+		if !ok || idx != 1 {
+			t.Errorf("expected (1, true), got (%d, %v)", idx, ok)
+		}
+	})
+}
+
+func BenchmarkDirect_ParseRow(b *testing.B) {
+	colIndex := map[string]int{
+		"details":         0,
+		"posting date":    1,
+		"description":     2,
+		"amount":          3,
+		"type":            4,
+		"balance":         5,
+		"check or slip #": 6,
+	}
+	row := []string{
+		"DEBIT",
+		"10/18/2026",
+		"WHOLE FOODS MARKET #1024",
+		"-42.75",
+		"POS",
+		"1,582.40",
+		"",
+	}
+	const lineNum = 42
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		dateStr := getFieldValue(row, colIndex, "posting date", "post date")
+		if dateStr == "" {
+			b.Fatal("unexpected empty date")
+		}
+
+		desc, err := parseDescription(getFieldValue(row, colIndex, "description"), lineNum)
+		if err != nil || desc == "" {
+			b.Fatalf("unexpected desc error: %v", err)
+		}
+
+		amt, err := parseAmount(getFieldValue(row, colIndex, "amount"), lineNum)
+		if err != nil || amt != -42.75 {
+			b.Fatalf("unexpected amount error: %v", err)
+		}
+
+		bal, err := parseBalance(getFieldValue(row, colIndex, "balance"), lineNum)
+		if err != nil || bal == nil || *bal != 1582.40 {
+			b.Fatalf("unexpected balance error: %v", err)
+		}
+
+		txType := firstNonEmpty(
+			getFieldValue(row, colIndex, "type"),
+			getFieldValue(row, colIndex, "details"),
+			"TRANSACTION",
+		)
+		if txType != "POS" {
+			b.Fatalf("unexpected txType: %s", txType)
+		}
+	}
 }
 
 func BenchmarkRowReader_ParseRow(b *testing.B) {
