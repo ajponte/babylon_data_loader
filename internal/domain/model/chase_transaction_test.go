@@ -74,10 +74,7 @@ func TestChaseTransaction_OptionalPointers(t *testing.T) {
 	t.Run("Transaction with non-nil balance", func(t *testing.T) {
 		val := 1250.75
 		tx := model.ChaseTransaction{
-			PostingDate: time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC),
-			Description: "PAYROLL DIRECT DEPOSIT",
-			Amount:      3500.00,
-			Balance:     &val,
+			Balance: &val,
 		}
 
 		if tx.Balance == nil {
@@ -90,11 +87,7 @@ func TestChaseTransaction_OptionalPointers(t *testing.T) {
 
 	t.Run("Transaction with nil balance (e.g. credit card)", func(t *testing.T) {
 		tx := model.ChaseTransaction{
-			PostingDate: time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC),
-			Description: "COFFEE SHOP",
-			Amount:      -4.50,
-			Balance:     nil,
-			Category:    "Food & Drink",
+			Balance: nil,
 		}
 
 		if tx.Balance != nil {
