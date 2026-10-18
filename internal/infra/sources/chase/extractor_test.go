@@ -711,7 +711,6 @@ func TestChaseExtractor_SentinelErrors(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var r io.Reader
@@ -771,7 +770,6 @@ func TestChaseExtractor_NonFiniteAmounts(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			meta := testFileMetadata("acc-nonfinite", "nonfinite.csv")
@@ -809,7 +807,6 @@ func TestChaseExtractor_HeaderOnlyCSV(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			meta := testFileMetadata("acc-empty", "empty.csv")
@@ -877,7 +874,6 @@ func TestChaseExtractor_CorruptedDates(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
