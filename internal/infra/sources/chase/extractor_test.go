@@ -3,16 +3,20 @@ package chase_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"babylon/dataloader/internal/domain/model"
+	"babylon/dataloader/internal/domain/port"
 	"babylon/dataloader/internal/infra/sources/chase"
 )
 
 func TestChaseExtractor_SourceType(t *testing.T) {
+	t.Parallel()
 	extractor := chase.NewExtractor(nil)
 	if extractor.SourceType() != "chase" {
 		t.Errorf("expected SourceType 'chase', got %q", extractor.SourceType())
@@ -20,6 +24,7 @@ func TestChaseExtractor_SourceType(t *testing.T) {
 }
 
 func TestChaseExtractor_Extract_CheckingInline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
@@ -73,6 +78,7 @@ CREDIT,10/16/2026,"PAYROLL DIRECT DEP",1500.00,ACH,3914.50,
 }
 
 func TestChaseExtractor_Extract_CreditCardInline(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
@@ -138,6 +144,7 @@ const mockCreditCardCSVFixture = `Transaction Date,Post Date,Description,Categor
 `
 
 func TestChaseExtractor_Fixtures_Checking(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	extractor := chase.NewExtractor(nil)
@@ -187,6 +194,7 @@ func TestChaseExtractor_Fixtures_Checking(t *testing.T) {
 }
 
 func TestChaseExtractor_Fixtures_CreditCard(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	extractor := chase.NewExtractor(nil)
@@ -234,11 +242,13 @@ func TestChaseExtractor_Fixtures_CreditCard(t *testing.T) {
 }
 
 func TestChaseExtractor_Errors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	extractor := chase.NewExtractor(nil)
 
 	t.Run("invalid metadata missing account ID", func(t *testing.T) {
+		t.Parallel()
 		meta := model.FileMetadata{
 			FileName:   "test.csv",
 			IngestedAt: now,
@@ -250,6 +260,7 @@ func TestChaseExtractor_Errors(t *testing.T) {
 	})
 
 	t.Run("nil reader", func(t *testing.T) {
+		t.Parallel()
 		meta := model.FileMetadata{
 			FileName:   "test.csv",
 			AccountID:  "acc-1",
@@ -265,6 +276,7 @@ func TestChaseExtractor_Errors(t *testing.T) {
 	})
 
 	t.Run("context cancelled", func(t *testing.T) {
+		t.Parallel()
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
@@ -280,6 +292,7 @@ func TestChaseExtractor_Errors(t *testing.T) {
 	})
 
 	t.Run("unknown dialect", func(t *testing.T) {
+		t.Parallel()
 		meta := model.FileMetadata{
 			FileName:   "unknown.csv",
 			AccountID:  "acc-1",
@@ -296,6 +309,7 @@ func TestChaseExtractor_Errors(t *testing.T) {
 }
 
 func TestChaseExtractor_LeadingBlankLines(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
@@ -333,6 +347,7 @@ func TestChaseExtractor_LeadingBlankLines(t *testing.T) {
 }
 
 func TestChaseExtractor_PendingCreditCardTransactions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
@@ -371,7 +386,152 @@ func TestChaseExtractor_PendingCreditCardTransactions(t *testing.T) {
 	}
 }
 
+func assertSingleTransactionDate(t *testing.T, batch *model.IngestionBatch, expectedDate time.Time) {
+	t.Helper()
+	txs, err := batch.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("failed to cast transactions: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	}
+	if !txs[0].PostingDate.Equal(expectedDate) {
+		t.Errorf("expected PostingDate %v, got %v", expectedDate, txs[0].PostingDate)
+	}
+}
+
+func TestChaseExtractor_CreditCardPendingFormats(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	pendingIndicators := []string{"", "Pending", "pending", "-", "--", "n/a", "N/A"}
+	for _, indicator := range pendingIndicators {
+		indicator := indicator
+		t.Run("indicator_"+indicator, func(t *testing.T) {
+			t.Parallel()
+			csvData := fmt.Sprintf("Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n10/14/2026,%s,COFFEE,Food & Drink,Sale,-4.50,latte\n", indicator)
+			meta := testFileMetadata("card-pending", "pending.csv")
+			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err != nil {
+				t.Fatalf("unexpected error for pending indicator %q: %v", indicator, err)
+			}
+			assertSingleTransactionDate(t, batch, time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC))
+		})
+	}
+}
+
+func TestChaseExtractor_CheckingWithoutBalance(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	csvData := "Details,Posting Date,Description,Amount\nDEBIT,10/15/2026,STORE,-20.00\n"
+	meta := testFileMetadata("chk-nobal", "nobal.csv")
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+	if batch.Destination != model.DestChaseChecking {
+		t.Errorf("expected destination %q, got %q", model.DestChaseChecking, batch.Destination)
+	}
+	txs, err := batch.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("failed to cast transactions: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	}
+	if txs[0].Balance != nil {
+		t.Errorf("expected nil Balance, got %v", *txs[0].Balance)
+	}
+}
+
+func TestChaseExtractor_CreditCardWithBalance(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	csvData := "Transaction Date,Post Date,Description,Category,Type,Amount,Balance,Memo\n10/14/2026,10/15/2026,AMAZON,Shopping,Sale,-50.00,1200.00,Book\n"
+	meta := testFileMetadata("card-bal", "card_bal.csv")
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+	if batch.Destination != model.DestChaseCreditCard {
+		t.Errorf("expected destination %q, got %q", model.DestChaseCreditCard, batch.Destination)
+	}
+	txs, err := batch.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("failed to cast transactions: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	}
+	if txs[0].Balance == nil {
+		t.Fatal("expected non-nil balance for credit card, got nil")
+	}
+	if *txs[0].Balance != 1200.00 {
+		t.Errorf("expected balance 1200.00, got %f", *txs[0].Balance)
+	}
+}
+
+func TestChaseExtractor_MissingAmountRejection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	extractor := chase.NewExtractor(nil)
+	missingAmts := []string{"-", "--", "n/a", "N/A", "   "}
+	for _, amt := range missingAmts {
+		amt := amt
+		t.Run("missing_amount_"+strings.TrimSpace(amt), func(t *testing.T) {
+			t.Parallel()
+			csvData := fmt.Sprintf("Details,Posting Date,Description,Amount,Type,Balance\nDEBIT,10/15/2026,STORE,%s,DEBIT,100.00\n", amt)
+			meta := testFileMetadata("chk-missing-amt", "missing_amt.csv")
+			_, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err == nil {
+				t.Fatalf("expected error for missing amount %q, got nil", amt)
+			}
+		})
+	}
+}
+
+func runConcurrentExtract(t *testing.T, ctx context.Context, extractor port.Extractor, id int) {
+	t.Helper()
+	var (
+		csvData string
+		meta    model.FileMetadata
+	)
+	if id%2 == 0 {
+		csvData = "Details,Posting Date,Description,Amount,Type,Balance\nDEBIT,10/15/2026,STORE,-10.00,DEBIT,100.00\n"
+		meta = testFileMetadata(fmt.Sprintf("chk-%d", id), fmt.Sprintf("chk_%d.csv", id))
+	} else {
+		csvData = "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n10/14/2026,10/15/2026,STORE,Shopping,Sale,-20.00,memo\n"
+		meta = testFileMetadata(fmt.Sprintf("card-%d", id), fmt.Sprintf("card_%d.csv", id))
+	}
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Errorf("worker %d: unexpected Extract error: %v", id, err)
+		return
+	}
+	if batch.RecordCount != 1 {
+		t.Errorf("worker %d: expected 1 record, got %d", id, batch.RecordCount)
+	}
+}
+
+func TestChaseExtractor_ConcurrentExecution(t *testing.T) {
+	t.Parallel()
+	extractor := chase.NewExtractor(nil)
+	var wg sync.WaitGroup
+	ctx := context.Background()
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			runConcurrentExtract(t, ctx, extractor, id)
+		}(i)
+	}
+	wg.Wait()
+}
+
 func TestChaseExtractor_AccountingFormatAndISODates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
