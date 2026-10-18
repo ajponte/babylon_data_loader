@@ -1,0 +1,88 @@
+package chase
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+
+	"babylon/dataloader/internal/domain/model"
+	"babylon/dataloader/internal/domain/port"
+)
+
+// Extractor implements port.Extractor for Chase checking and credit card statements.
+type Extractor struct {
+	classifier Classifier
+}
+
+// NewExtractor constructs a new Chase Extractor.
+// If classifier is nil, DefaultClassifier is used.
+func NewExtractor(c Classifier) port.Extractor {
+	if c == nil {
+		c = NewDefaultClassifier()
+	}
+	return &Extractor{classifier: c}
+}
+
+// SourceType returns the unique source identifier for Chase statements.
+func (e *Extractor) SourceType() string {
+	return "chase"
+}
+
+// Extract parses raw CSV data from r, classifies dialect, and returns an IngestionBatch.
+func (e *Extractor) Extract(
+	ctx context.Context,
+	r io.Reader,
+	meta model.FileMetadata,
+) (*model.IngestionBatch, error) {
+	if err := meta.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid file metadata: %w", err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if r == nil {
+		return nil, errors.New("reader cannot be nil")
+	}
+
+	dialect, stream, err := e.classifier.Classify(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to classify chase statement dialect: %w", err)
+	}
+
+	var (
+		records []model.ChaseTransaction
+		dest    model.Destination
+	)
+
+	switch dialect {
+	case DialectChecking:
+		dest = model.DestChaseChecking
+		records, err = parseChecking(ctx, stream, meta)
+	case DialectCreditCard:
+		dest = model.DestChaseCreditCard
+		records, err = parseCreditCard(ctx, stream, meta)
+	case DialectUnknown:
+		return nil, fmt.Errorf("unsupported or unknown Chase statement dialect: %s", dialect)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	batch := &model.IngestionBatch{
+		Destination: dest,
+		AccountID:   meta.AccountID,
+		SourceFile:  meta.FileName,
+		FileHash:    meta.FileHash,
+		IngestedAt:  meta.IngestedAt,
+		RecordCount: len(records),
+		Payload:     records,
+	}
+
+	if valErr := batch.Validate(); valErr != nil {
+		return nil, fmt.Errorf("generated batch failed validation: %w", valErr)
+	}
+
+	return batch, nil
+}
