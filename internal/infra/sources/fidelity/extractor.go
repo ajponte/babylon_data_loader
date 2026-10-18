@@ -158,35 +158,44 @@ func (e *Extractor) parsePositions(
 	parser := newRowParser(colIndex, meta)
 
 	for {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+		row, lineNum, eof, err := e.readNextRow(ctx, reader)
+		if err != nil {
+			return nil, err
+		}
+		if eof {
+			break
 		}
 
-		row, readErr := reader.Read()
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			return nil, fmt.Errorf("failed to read Fidelity CSV row: %w", readErr)
-		}
-
-		if isFidelityDisclaimerOrEmpty(row) {
-			continue
-		}
-
-		lineNum, _ := reader.FieldPos(0)
 		pos, ok, parseErr := parser.parse(row, lineNum)
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		if !ok {
-			continue
+		if ok {
+			positions = append(positions, pos)
 		}
-
-		positions = append(positions, pos)
 	}
 
 	return positions, nil
+}
+
+func (e *Extractor) readNextRow(
+	ctx context.Context,
+	reader *csv.Reader,
+) ([]string, int, bool, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, 0, false, ctxErr
+	}
+
+	row, err := reader.Read()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, 0, true, nil
+		}
+		return nil, 0, false, fmt.Errorf("failed to read Fidelity CSV row: %w", err)
+	}
+
+	lineNum, _ := reader.FieldPos(0)
+	return row, lineNum, false, nil
 }
 
 func resolveBatchAccountID(fallbackID string, positions []model.FidelityPosition) string {

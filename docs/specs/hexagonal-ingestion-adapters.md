@@ -5,7 +5,12 @@
 **Parent Architecture**: Hexagonal Architecture (Ports and Adapters)  
 **Tracking Issue**: [Issue #37: Pragmatic Layered Architecture](https://github.com/ajponte/babylon_data_loader/issues/37)  
 **Implementation Phase**: [Phase 2 — Ingestion Adapters](../../../agent-docs/hex-refactor/PHASE2-INGESTION-ADAPTERS.md)  
-**Review Synthesis**: [Phase 2 Review Findings](../../../agent-docs/reviews/hex-refactor-phase2/PHASE2-REVIEW-FINDINGS.md)  
+**Review Syntheses**:
+* [Phase 2 Consolidated Review Findings](../../../agent-docs/reviews/hex-refactor-phase2/PHASE2-REVIEW-FINDINGS.md)
+* [Phase 2B Fidelity Review Findings & Remediation](../../../agent-docs/reviews/hex-phase2b-fidelity/FIDELITY-REVIEW-FINDINGS.md)
+* [AI Effort Estimation Guardrails & Sizing Playbook](../../../agent-docs/reviews/hex-refactor-phase2/AI-EFFORT-ESTIMATION-GUARDRAILS.md)
+* [Blameless Retrospective: Schedule Variance & Sizing Breakdown](../../../agent-docs/reviews/HEX-REFACTOR-BLAMELESS-RETROSPECTIVE.md)
+
 **Related Specifications**: [Phase 1 Specification: Domain Core & Port Contracts](./hexagonal-domain-core.md)  
 **Status**: Implemented (Phase 2)  
 
@@ -62,28 +67,28 @@ flowchart TD
     %% Ingestion Adapter Boundary
     subgraph AdapterBoundary ["Secondary Source Adapter (internal/infra/sources)"]
         subgraph Classification ["Stream Inspection & Pre-Processing"]
-            BOM["BOM Stripper<br/>Peek(3) == 0xefbbbf"]
+            BOM["BOM Stripper<br/>Peek(3) == 0xefbbbf (propagates non-EOF errors)"]
             PEEK["Header Sniffer / Classifier<br/>bufio.Reader.Peek(4096)"]
-            SCAN["Leading Blank Line Skipper<br/>Discard whitespace rows"]
+            SCAN["Leading Blank Line Skipper<br/>Context-aware row scanning"]
         end
 
         subgraph Parsers ["Resilient Tabular Parsers"]
             CSV_R["encoding/csv.Reader<br/>FieldsPerRecord = -1<br/>TrimLeadingSpace = true"]
             POS["Physical Lineage Extractor<br/>csv.Reader.FieldPos(0)"]
-            NUM["Flexible Numeric Sanitizer<br/>Parens '($10)', Dash '-', '$', ','"]
+            NUM["Flexible Numeric Sanitizer<br/>Parens '($10)', Dash '-', Unicode Spaces, '$', ','"]
             DATE["Multi-Format Date Parser<br/>MM/DD/YYYY, YYYY-MM-DD"]
         end
 
         subgraph Validation ["Adapter Validation Layer"]
-            SIG["Mandatory Schema Signatures<br/>Require primary identifying columns"]
-            DISC["Disclaimer & Summary Filter<br/>Discard 'Total', 'Brokerage', 'Ending'"]
+            SIG["Mandatory Schema Signatures<br/>Exported Sentinels (ErrMissingRequiredColumns)"]
+            DISC["Disclaimer & Summary Filter<br/>Discard 'Total', 'Brokerage', 'Ending', Notes"]
             ENT_VAL["Domain Entity Validation<br/>ChaseTransaction.Validate()<br/>FidelityPosition.Validate()"]
         end
     end
 
     %% Domain Output Boundary
     subgraph OutputBoundary ["Domain Core Boundary"]
-        BATCH["model.IngestionBatch<br/>• Destination: transactions_chase / positions_fidelity<br/>• AccountID, SourceFile, FileHash, IngestedAt<br/>• RecordCount, Payload: []Entity"]
+        BATCH["model.IngestionBatch<br/>• Destination: transactions_chase / positions_fidelity<br/>• Inferred / Meta AccountID, SourceFile, FileHash, IngestedAt<br/>• RecordCount, Payload: []Entity"]
     end
 
     %% Flow connections
@@ -126,8 +131,9 @@ babylon_data_loader/internal/infra/sources/
 │   ├── extractor.go          # Implements port.Extractor for Chase; orchestrates classification & batching
 │   └── extractor_test.go     # End-to-end tests against fixtures and synthetic edge cases
 ├── fidelity/
-│   ├── extractor.go          # Implements port.Extractor for Fidelity; BOM, disclaimer filtering, cash heuristics
-│   └── extractor_test.go     # Schema signature validation, summary total exclusion, fixture tests
+│   ├── extractor.go          # Implements port.Extractor; driving adapter, I/O streaming, BOM, header detection, batch assembly
+│   ├── parser.go             # rowParser helper object, symbol normalization, summary filtering, parseFinancialNumber, disclaimers
+│   └── extractor_test.go     # Comprehensive table-driven test suite: 100% pass across all 10 review findings, BOM, accounting, cancellation
 └── synthetic/
     ├── extractor.go          # Implements port.Extractor; deterministic PRNG, bounds protection, concurrency safety
     └── extractor_test.go     # Determinism, RNG continuity, row-count bounds, and race safety tests
@@ -293,90 +299,186 @@ if postDateStr == "" {
 
 ## 5. Fidelity Portfolio Ingestion Adapter (`internal/infra/sources/fidelity/`)
 
-Fidelity brokerage portfolio exports differ significantly from banking statement feeds. They represent point-in-time holdings snapshots rather than double-entry ledger streams.
+Fidelity brokerage portfolio exports represent point-in-time holdings snapshots across one or more accounts. The adapter handles complex real-world export quirks, including UTF-8 Byte Order Marks (BOM), trailing asymmetric commas, multi-line legal disclaimers, cash sweep normalization, and accounting syntax.
 
-### 5.1. File Characteristics & Ingestion Challenges
-1. **UTF-8 Byte Order Mark (BOM)**: Files begin with `0xEF, 0xBB, 0xBF`, which corrupts the first column header if not stripped.
-2. **Trailing Asymmetric Commas**: Data rows frequently have 17 columns while headers specify 16. Handled via `reader.FieldsPerRecord = -1`.
-3. **Multi-Section Legal Footers & Disclaimers**: Disclaimers and account totals append to the file footer.
-4. **Cash Core Accounts Without Symbols**: Core cash and money market accounts often omit a ticker symbol.
+### 5.1. Two-Tier Architecture & Component Responsibilities
+
+Following Phase 2B review hardening, the Fidelity adapter is structured into a clean two-tier architectural separation:
+1. **I/O Streaming & Batch Lifecycle Tier ([`extractor.go`](../../internal/infra/sources/fidelity/extractor.go))**: Handles driving adapter responsibilities, parameter validation, stream buffering, BOM stripping with error propagation, header scanning, signature validation, slice memory pre-allocation, and batch envelope assembly with account ID inference.
+2. **Row Classification & Parsing Helper Object Tier ([`parser.go`](../../internal/infra/sources/fidelity/parser.go))**: Implements `rowParser`, an encapsulated helper object that performs holding resolution, cash sweep normalization, robust numeric metric extraction, disclaimer and summary filtering, and entity validation.
+
+```mermaid
+flowchart TD
+    subgraph StreamTier ["I/O Streaming & Batch Lifecycle Tier (extractor.go)"]
+        EXT["Fidelity Extractor<br/>(implements port.Extractor)"]
+        BOM["stripUTF8BOM()<br/>Peek(3) == 0xefbbbf (surfaces non-EOF errors)"]
+        HDR["readHeader()<br/>Context-aware blank line skipping"]
+        VAL_HDR["parseAndValidateHeader()<br/>Checks Group 1 & 2 signatures<br/>Yields ErrMissingRequiredColumns"]
+        POS_LOOP["parsePositions()<br/>make([]Position, 0, defaultPositionsCapacity=64)"]
+        BATCH["makeBatch()<br/>resolveBatchAccountID()"]
+    end
+
+    subgraph RowTier ["Row Classification & Metric Parsing Tier (parser.go)"]
+        RP["rowParser Helper Object<br/>newRowParser(colIndex, meta)"]
+        DISC["isFidelityDisclaimerOrEmpty()<br/>Prefixes: please note, important, *, 1., etc."]
+        HOLD["resolveHolding()<br/>isSummaryRow() & normalizeHoldingSymbol()"]
+        METRICS["parseMetrics()<br/>parseFinancialNumber()<br/>Unicode spaces, parens, dashes"]
+        ACC["resolveAccountID()<br/>isPlaceholderAccountID()"]
+        BUILD["buildPosition()<br/>model.FidelityPosition + Validate()"]
+    end
+
+    EXT --> BOM --> HDR --> VAL_HDR --> POS_LOOP
+    POS_LOOP --> DISC
+    DISC -->|Data Row| RP
+    RP --> HOLD --> METRICS --> ACC --> BUILD
+    BUILD --> POS_LOOP
+    POS_LOOP --> BATCH
+
+    classDef stream fill:#e1f5fe,stroke:#0288d1,stroke-width:1.5px;
+    classDef row fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px;
+
+    class StreamTier,EXT,BOM,HDR,VAL_HDR,POS_LOOP,BATCH stream;
+    class RowTier,RP,DISC,HOLD,METRICS,ACC,BUILD row;
+```
 
 ---
 
-### 5.2. Mandatory Schema Signature Validation
-To prevent arbitrary CSV files (such as Chase statements or unrelated documents) from parsing into phantom positions, [`fidelity.Extractor.Extract`](../../internal/infra/sources/fidelity/extractor.go) enforces mandatory column group signatures:
+### 5.2. Mandatory Schema Signature Validation & Sentinel Errors
+
+To prevent arbitrary or malformed CSV files (such as Chase statements or unrelated documents) from producing phantom holdings, [`parseAndValidateHeader`](../../internal/infra/sources/fidelity/extractor.go) requires at least one column match from each of two mandatory signature groups:
 
 ```go
 requiredSignatures := [][]string{
-    {"symbol", "description"},
-    {"current value", "last price", "quantity"},
+    {"symbol", "ticker"},
+    {"current value", "market value", "current balance", "last price", "quantity"},
+}
+```
+
+#### Exported Sentinel Errors
+The adapter exports explicit sentinel errors, allowing callers, pipeline routers, and test harnesses to programmatically evaluate error conditions via `errors.Is()`:
+
+```go
+var (
+    // ErrNilReader indicates that a nil io.Reader was provided to Extract.
+    ErrNilReader = errors.New("reader cannot be nil")
+
+    // ErrMissingRequiredColumns indicates that the CSV header is missing mandatory columns.
+    ErrMissingRequiredColumns = errors.New("fidelity CSV missing required header columns")
+)
+```
+
+```go
+if r == nil {
+    return ErrNilReader
 }
 
 for _, sig := range requiredSignatures {
     if _, ok := findColumn(colIndex, sig...); !ok {
-        return nil, fmt.Errorf("fidelity CSV missing required header column (expected one of %v)", sig)
+        return nil, fmt.Errorf("%w (expected one of %v)", ErrMissingRequiredColumns, sig)
     }
 }
 ```
-Any CSV lacking at least one column from each signature group is immediately rejected.
 
 ---
 
-### 5.3. Section & Disclaimer Filtering Heuristics
+### 5.3. Section, Disclaimer & Normalization Heuristics
 
-#### Leading Blank Lines & UTF-8 BOM
-The adapter peeks and discards `0xEF, 0xBB, 0xBF` via `stripUTF8BOM` and scans past empty lines to locate the true header row.
-
-#### Footer & Disclaimer Filtering
-The `isFidelityDisclaimerOrEmpty` function inspects rows and skips non-position records matching any of the following prefix patterns (case-insensitive):
-- `"the data and information"`
-- `"brokerage services"`
-- `"date downloaded"`
-- `"total"`
-- `"account total"`
-- `"portfolio total"`
-- `"ending value"`
-- `"disclaimer"`
-
-#### In-Data Summary Keyword Filtering
-Summary totals occasionally appear within tabular sections. Rows where the symbol or description matches `isSummaryKeyword` (e.g., `"total"`, `"account total"`, `"portfolio total"`, `"total "`) return `ok = false` and are discarded from the batch.
-
-#### Cash Holding Evidence Heuristic
-When a row has an empty `symbol`, the parser does **not** blindly default to `"CASH"`. It requires holding evidence inside the security description:
-
+#### 1. Preservation of Legitimate Holdings with "Total" in Description (F-01)
+Broad-market index funds (e.g., Vanguard Total Stock Market `VTI`, Vanguard Total Bond Market `BND`, TotalEnergies `TTE`) routinely contain `"Total "` in their descriptive fund titles.
+In [`parser.go`](../../internal/infra/sources/fidelity/parser.go), `isSummaryRow` explicitly decouples ticker symbol evaluation from description scanning:
 ```go
-if symbol == "" {
-    descUpper := strings.ToUpper(description)
-    if isCashDescription(descUpper) {
-        symbol = "CASH"
-    } else {
-        // Skip metadata / non-position row cleanly
-        return model.FidelityPosition{}, false, nil
-    }
-}
+func isSummaryRow(symbol, description string) bool {
+    symLower := strings.ToLower(symbol)
+    descLower := strings.ToLower(description)
 
-func isCashDescription(descUpper string) bool {
-    return strings.Contains(descUpper, "HELD IN") ||
-        strings.Contains(descUpper, "CASH") ||
-        strings.Contains(descUpper, "FCASH") ||
-        strings.Contains(descUpper, "CORE")
+    if isSummaryKeyword(symLower) {
+        return true
+    }
+    // Only filter based on description if the symbol is empty or a placeholder
+    return (symbol == "" || symbol == "**") && isSummaryKeyword(descLower)
 }
 ```
+If a row contains a valid ticker symbol (e.g. `VTI`), it is **never** dropped as a summary row, guaranteeing zero accidental data loss on index funds.
+
+#### 2. Cash Sweep Holding Normalization (F-03)
+Fidelity exports core cash sweep accounts with varying symbols (`"**"`, `""`, `"FCASH"`, `"CORE"`) and descriptions like `"HELD IN MONEY MARKET"` or `"DEPOSIT SWEEP"`:
+- **Normalization to `"CASH"`**: If the symbol is strictly `"**"`, `"FCASH"`, `"CORE"`, or empty with cash holding markers (`isCashDescription`), it is normalized to `"CASH"`.
+- **Footnote Asterisk Preservation**: For valid market tickers that include footnote asterisks (e.g. `SPAXX**`), the symbol is preserved as a distinct money market fund rather than coerced into generic `"CASH"`.
+
+```go
+func normalizeHoldingSymbol(symbol, description string) (string, bool) {
+    if symbol != "" && symbol != "**" && !strings.EqualFold(symbol, "fcash") && !strings.EqualFold(symbol, "core") {
+        return symbol, true
+    }
+
+    descUpper := strings.ToUpper(description)
+    if isCashHolding(symbol, descUpper) {
+        return "CASH", true
+    }
+
+    return "", false
+}
+```
+
+#### 3. Stream I/O Safety & Non-EOF BOM Error Propagation (F-02)
+[`stripUTF8BOM`](../../internal/infra/sources/fidelity/extractor.go) inspects the first 3 bytes for `0xef, 0xbb, 0xbf`. It surfaces non-EOF I/O errors immediately, treats graceful EOF (empty files) as a non-error, and verifies that `br.Discard(3)` succeeds:
+```go
+func stripUTF8BOM(br *bufio.Reader) error {
+    bom := []byte{0xef, 0xbb, 0xbf}
+    peekBytes, err := br.Peek(len(bom))
+    if err != nil {
+        if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+            return nil
+        }
+        return fmt.Errorf("failed to peek BOM header: %w", err)
+    }
+    if bytes.Equal(peekBytes, bom) {
+        if _, discardErr := br.Discard(len(bom)); discardErr != nil {
+            return fmt.Errorf("failed to discard BOM: %w", discardErr)
+        }
+    }
+    return nil
+}
+```
+
+#### 4. Context Cancellation in Header and Row Loops (F-05)
+Both `readHeader()` and `parsePositions()` evaluate `ctx.Err()` at the start of every iteration, preventing goroutine hangs when reading slow network streams or infinite preamble lines.
+
+#### 5. Expanded Legal Footer & Footnote Filtering (F-06)
+[`isDisclaimerText`](../../internal/infra/sources/fidelity/parser.go) inspects the first non-empty field of non-data records to filter legal notices and definitions:
+- **Disclaimers**: `"the data and information"`, `"brokerage services"`, `"date downloaded"`, `"disclaimer"`, `"disclosure"`, `"please note"`, `"important"`, `"quotes are"`, `"security prices"`.
+- **Totals**: `"total"`, `"total market"`, `"account total"`, `"portfolio total"`, `"ending value"`.
+- **Footnotes & Numbered Notes**: Lines beginning with `"* "` (excluding cash `"**"`) or numbered annotations (`"1."`).
+
+#### 6. Slice Memory Pre-Allocation (F-07)
+In `parsePositions()`, the positions slice is pre-allocated with `const defaultPositionsCapacity = 64`. This eliminates continuous array reallocations and garbage collection churn when ingesting typical multi-position brokerage accounts.
+
+#### 7. Unified Financial Number Parsing (F-08)
+[`parseFinancialNumber`](../../internal/infra/sources/fidelity/parser.go) unifies currency and quantity sanitization:
+- **Unicode Non-Breaking Space Sanitization**: Strips both standard non-breaking spaces (`\u00a0` / `&nbsp;`) and narrow non-breaking spaces (`\u202f`) frequently injected by Safari, Firefox, or localized OS exports.
+- **Accounting Parentheses**: Automatically transforms `($50.00)` to `-50.00`.
+- **Dashes and Placeholders**: Resolves `""`, `"-"`, `"--"`, `"n/a"`, `"unknown"`, and `"pending"` to `0.0, nil`.
+- **Enriched Error Context**: Wraps syntax errors with field name and raw value (`invalid %s value %q: %w`).
+
+#### 8. Single-Account Batch Inference (F-09)
+In [`resolveBatchAccountID`](../../internal/infra/sources/fidelity/extractor.go), if all extracted positions share the exact same non-empty account identifier, `batch.AccountID` is set to that inferred account ID, overriding generic metadata placeholders (`"DEFAULT"`, `"ALL"`, `"UNKNOWN"`). If records span multiple accounts, `meta.AccountID` is preserved.
 
 ---
 
 ### 5.4. Fidelity Column Resolution Mapping
 
-| Domain Field | Target Column | Supported Aliases | Invariant / Conversion Rule |
+The `rowParser` maps column headers to domain fields using case-insensitive alias lookups:
+
+| Domain Field | Canonical Target | Supported Aliases | Conversion & Sanitization Rules |
 | :--- | :--- | :--- | :--- |
-| `AccountID` | `account number` | `"account id"` | Falls back to `meta.AccountID` if unmasked in CSV. |
-| `AccountName` | `account name` | — | Human-readable account label (e.g., `"ROTH IRA"`). |
-| `Symbol` | `symbol` | — | Ticker or `"CASH"` (with cash description evidence). |
-| `Description` | `description` | — | Full security title or money market description. |
-| `Quantity` | `quantity` | — | `parseQuantity`: strips `,`, parens, converts to `float64`. |
-| `LastPrice` | `last price` | — | `parseCurrency`: must be `>= 0` and finite. |
-| `CurrentValue` | `current value` | — | `parseCurrency`: total market value. |
-| `CostBasis` | `cost basis total`| `"cost basis"` | `parseCurrency`: purchase cost basis (`0.0` for cash). |
+| `AccountID` | `account number` | `"account id"`, `"account #"`, `"account"` | Falls back to `meta.AccountID` if empty or placeholder (`"-"`, `"n/a"`). |
+| `AccountName` | `account name` | `"account nickname"` | Human-readable account label (e.g., `"ROTH IRA"`). |
+| `Symbol` | `symbol` | `"ticker"`, `"symbol/cusip"` | Clean ticker; `"**"`, `"FCASH"`, `"CORE"` normalized to `"CASH"`. |
+| `Description` | `description` | `"security description"`, `"investment name"` | Full security title or money market description. |
+| `Quantity` | `quantity` | `"shares"`, `"qty"` | `parseQuantity`: strips Unicode spaces, parens, commas, plus signs. |
+| `LastPrice` | `last price` | `"price"`, `"last"` | `parseCurrency`: strips `$`, must be `>= 0` and finite. |
+| `CurrentValue` | `current value` | `"market value"`, `"current value ($)"` | `parseCurrency`: total market valuation. |
+| `CostBasis` | `cost basis total`| `"cost basis"`, `"total cost basis"` | `parseCurrency`: aggregate purchase basis (`0.0` for cash/gifts). |
 
 ---
 
@@ -440,11 +542,12 @@ records := make([]model.ChaseTransaction, 0, min(count, maxInitialBatchCapacity)
 
 ## 7. Architectural Decisions & Remediation Log
 
-During the Phase 2 code review and QA analysis, 10 findings (4 High Severity, 6 Medium Severity) were identified and remediated. The table below details the architectural impacts and the applied resolutions:
+### 7.1. Phase 2 Consolidated Ingestion Findings
+The table below documents the 10 consolidated findings from the initial Phase 2 architectural and QA review:
 
 | ID | Severity | Component | Architectural Impact Prior to Remediation | Remediation Implemented |
 | :---: | :---: | :--- | :--- | :--- |
-| **F-01** | `High` | `fidelity` | Arbitrary non-Fidelity CSVs parsed into phantom batches of $0.00 `"CASH"` positions due to unvalidated schema. | Added mandatory schema signature checks requiring `{"symbol", "description"}` and `{"current value", "last price", "quantity"}`. |
+| **F-01** | `High` | `fidelity` | Arbitrary non-Fidelity CSVs parsed into phantom batches of $0.00 `"CASH"` positions due to unvalidated schema. | Added mandatory schema signature checks requiring `{"symbol", "ticker"}` and `{"current value", "market value", "current balance", "last price", "quantity"}`. |
 | **F-02** | `High` | `fidelity` | Summary totals (e.g. `"Account Total"`) and legal footers parsed as massive cash positions, corrupting valuation. | Expanded disclaimer filtering prefixes (`"total"`, `"portfolio total"`, `"ending value"`) and required holding evidence (`"HELD IN"`, `"CORE"`, `"CASH"`) before assigning `"CASH"`. |
 | **F-03** | `High` | `chase` | Unbounded `ReadBytes('\n')` in header classification risked memory exhaustion (OOM) on streams without newlines. | Replaced with memory-bounded `bufio.Reader.Peek(4096)`, non-destructive reader reuse, and explicit EOF handling. |
 | **F-04** | `High` | `chase`, `fidelity` | Statements with leading blank lines failed header reading on first `reader.Read()`, rejecting valid bank exports. | Introduced leading blank line scanning loops across all CSV parsers to skip empty records until reaching the header. |
@@ -454,6 +557,24 @@ During the Phase 2 code review and QA analysis, 10 findings (4 High Severity, 6 
 | **F-08** | `Medium` | `chase`, `fidelity` | Financial values with accounting parens `($10.00)`, dashes `"-"`, or ISO 8601 dates (`YYYY-MM-DD`) failed parsing. | Updated `cleanNumeric` to translate parens to negative values and dashes to `"0"`; expanded `parseDate` to support ISO 8601 layouts. |
 | **F-09** | `Medium` | `chase`, `fidelity` | Manual `rowIdx++` drifted from physical file line numbers on multiline quoted fields and skipped rows. | Adopted `csv.Reader.FieldPos(0)` to capture exact 1-based physical line numbers for record lineage. |
 | **F-10** | `Medium` | `synthetic` | PRNG recreated per invocation yielding duplicate batches; slice pre-allocation risked OOM on extreme row counts. | Stored mutex-guarded `*rand.Rand` on struct for sequential continuity; capped row counts at 100,000 and clamped initial pre-allocation at 10,000. |
+
+---
+
+### 7.2. Phase 2B Fidelity Adapter Hardening Log
+During the dedicated code review and QA hardening of the isolated Fidelity adapter on branch `hex-phase2b-fidelity` (documented in detail in [`agent-docs/reviews/hex-phase2b-fidelity/FIDELITY-REVIEW-FINDINGS.md`](../../../agent-docs/reviews/hex-phase2b-fidelity/FIDELITY-REVIEW-FINDINGS.md)), an additional 10 findings were prioritized and resolved:
+
+| ID | Severity | Target File(s) | Architectural Impact Prior to Hardening | Implemented Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **F-01** | `High` | `parser.go` | False-positive dropping of legitimate index funds containing `"Total "` in descriptions (e.g. `VTI`, `BND`, `TTE`). | Decoupled ticker evaluation from description checking; if `symbol != ""` and non-summary, row is always preserved. |
+| **F-02** | `High` | `extractor.go` | `stripUTF8BOM` swallowed non-EOF peek and discard errors, masking underlying stream I/O failures. | Refactored `stripUTF8BOM` to return `error`, surfaces non-EOF errors, and treats graceful EOF as non-error. |
+| **F-03** | `High` | `parser.go` | Core cash sweep positions retained raw punctuation ticker `"**"`, causing downstream ticker lookup failures. | Normalized `"**"`, `"FCASH"`, and `"CORE"` to `"CASH"`, while preserving footnote asterisks on valid tickers (`SPAXX**`). |
+| **F-04** | `Medium` | `extractor.go` | Anonymous string errors prevented programmatic inspection via `errors.Is()`. | Declared exported sentinels: `ErrNilReader` and `ErrMissingRequiredColumns`. |
+| **F-05** | `Medium` | `extractor.go` | Header-seeking loop ignored `ctx.Err()`, risking worker goroutine leaks on infinite or slow preamble streams. | Added `ctx.Err()` check to every iteration of the header-seeking loop. |
+| **F-06** | `Medium` | `parser.go` | Legal notices and numbered footnotes (`"Please note"`, `"* "`, `"1."`) caused currency parsing failures. | Expanded `isDisclaimerText` to filter standard legal notices, quote disclaimers, and numbered footnote annotations. |
+| **F-07** | `Medium` | `extractor.go` | Slice initialized with zero capacity, causing repeated memory reallocation churn on large exports. | Pre-allocated positions slice with `defaultPositionsCapacity = 64`. |
+| **F-08** | `Medium` | `parser.go` | Unicode non-breaking spaces (`\u00a0`, `\u202f`) caused `strconv.ParseFloat` syntax errors. | Implemented `parseFinancialNumber` stripping Unicode spaces, parens, dashes, and enriching error context. |
+| **F-09** | `Medium` | `extractor.go` | Homogeneous single-account statements retained generic placeholder `AccountID` (`"DEFAULT"`). | Implemented `resolveBatchAccountID` inferring single account ID across all positions for the batch envelope. |
+| **F-10** | `Medium` | `extractor_test.go` | Missing table-driven tests for BOM error handling, cash normalization, accounting parens, and cancellation. | Expanded unit test matrix with 10 dedicated suites providing 100% test pass rate across all findings. |
 
 ---
 
@@ -487,7 +608,7 @@ go test -v -race ./internal/infra/sources/...
 
 **Verified Test Summary**:
 - `chase`: Passes dialect classification (peek bounds, credit card precedence, leading blank lines), checking parser (corrupted balance rejection, accounting parens, ISO dates, multiline physical lineage), credit card parser (pending transaction fallback), and production statement fixtures (`Chase6921_Activity_20260131.CSV`, `Chase2472_Activity20250101_20251231_20260201.CSV`).
-- `fidelity`: Passes schema signature rejection on arbitrary CSVs, disclaimer and summary total filtering, cash holding heuristics, and synthetic fixture parsing (`Portfolio_Positions_Synthetic.csv`).
+- `fidelity`: Passes schema signature rejection on arbitrary CSVs, disclaimer and summary total filtering, preservation of legitimate funds with `"Total "` in descriptions (`VTI`, `BND`, `TTE`), cash holding normalization, BOM error handling, accounting parentheses, Unicode non-breaking space parsing, single-account inference, sentinel errors, context cancellation, and synthetic fixture parsing (`Portfolio_Positions_Synthetic.csv`).
 - `synthetic`: Passes deterministic reproducibility, RNG continuity across sequential calls, zero counts, metadata validation, and row-count safety bounds (>100,000 rejection).
 
 ---
@@ -525,4 +646,7 @@ make test-ci
 - [Hexagonal Architecture Refactoring Plan (Parent Strategy)](../../../agent-docs/hex-refactor/README.md)
 - [Phase 2 Implementation Plan: Ingestion Adapters & Dialects](../../../agent-docs/hex-refactor/PHASE2-INGESTION-ADAPTERS.md)
 - [Phase 2 Review Findings & Remediation Synthesis](../../../agent-docs/reviews/hex-refactor-phase2/PHASE2-REVIEW-FINDINGS.md)
+- [Phase 2B Fidelity Review Findings & Remediation Synthesis](../../../agent-docs/reviews/hex-phase2b-fidelity/FIDELITY-REVIEW-FINDINGS.md)
+- [AI Effort Estimation Guardrails & Task Decomposition Playbook](../../../agent-docs/reviews/hex-refactor-phase2/AI-EFFORT-ESTIMATION-GUARDRAILS.md)
+- [Blameless Retrospective: Hexagonal Refactor Schedule Variance & Sizing Breakdown](../../../agent-docs/reviews/HEX-REFACTOR-BLAMELESS-RETROSPECTIVE.md)
 - [Phase 3 Plan: Storage Adapters & MongoDB Router](../../../agent-docs/hex-refactor/PHASE3-STORAGE-ADAPTERS.md)

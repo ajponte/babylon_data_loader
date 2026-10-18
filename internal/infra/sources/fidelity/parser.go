@@ -28,6 +28,10 @@ func newRowParser(colIndex map[string]int, meta model.FileMetadata) *rowParser {
 }
 
 func (p *rowParser) parse(row []string, lineNum int) (model.FidelityPosition, bool, error) {
+	if isFidelityDisclaimerOrEmpty(row) {
+		return model.FidelityPosition{}, false, nil
+	}
+
 	symbol, description, ok := p.resolveHolding(row)
 	if !ok {
 		return model.FidelityPosition{}, false, nil
