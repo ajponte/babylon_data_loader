@@ -8,6 +8,7 @@ import (
 	"babylon/dataloader/internal/domain/model"
 )
 
+// parseChecking parses Chase checking account CSV records from the provided reader.
 func parseChecking(
 	ctx context.Context,
 	r io.Reader,
@@ -21,43 +22,38 @@ func parseChecking(
 	return parseChaseRecords(ctx, r, meta, "checking", required, parseCheckingRow)
 }
 
+// parseCheckingRow parses a single row of a Chase checking CSV into a ChaseTransaction.
 func parseCheckingRow(
 	row []string,
 	colIndex map[string]int,
 	lineNum int,
 	meta model.FileMetadata,
 ) (model.ChaseTransaction, error) {
-	postDateStr := getFieldValue(row, colIndex, "posting date", "post date")
-	postingDate, err := parseDate(postDateStr)
-	if err != nil {
-		return model.ChaseTransaction{}, fmt.Errorf("row %d: %w", lineNum, err)
-	}
+	rr := newRowReader(row, colIndex, lineNum)
 
-	desc, err := parseDescription(getFieldValue(row, colIndex, "description"), lineNum)
+	postingDate, err := rr.parseDate("posting date", "post date")
 	if err != nil {
 		return model.ChaseTransaction{}, err
 	}
 
-	amount, err := parseAmount(getFieldValue(row, colIndex, "amount"), lineNum)
+	desc, err := rr.parseDescription("description")
 	if err != nil {
 		return model.ChaseTransaction{}, err
 	}
 
-	details := getFieldValue(row, colIndex, "details")
-	txType := getFieldValue(row, colIndex, "type")
-	if txType == "" {
-		txType = details
-	}
-	if txType == "" {
-		txType = "TRANSACTION"
-	}
-
-	balance, err := parseBalance(getFieldValue(row, colIndex, "balance"), lineNum)
+	amount, err := rr.parseAmount("amount")
 	if err != nil {
 		return model.ChaseTransaction{}, err
 	}
 
-	checkNum := getFieldValue(row, colIndex, "check or slip #", "check or slip num")
+	balance, err := rr.parseBalance("balance")
+	if err != nil {
+		return model.ChaseTransaction{}, err
+	}
+
+	details := rr.get("details")
+	txType := firstNonEmpty(rr.get("type"), details, "TRANSACTION")
+	checkNum := rr.get("check or slip #", "check or slip num")
 
 	tx := model.ChaseTransaction{
 		Lineage:        buildLineage(meta, lineNum),
