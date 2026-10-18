@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"babylon/dataloader/internal/domain/model"
 )
@@ -28,10 +29,10 @@ func parseCreditCardRow(
 	meta model.FileMetadata,
 ) (model.ChaseTransaction, error) {
 	postDateStr := getFieldValue(row, colIndex, "post date", "posting date")
-	if postDateStr == "" {
+	if isPlaceholderDate(postDateStr) {
 		postDateStr = getFieldValue(row, colIndex, "transaction date", "trans date")
 	}
-	if postDateStr == "" {
+	if isPlaceholderDate(postDateStr) {
 		return model.ChaseTransaction{}, fmt.Errorf("row %d: missing both post date and transaction date", lineNum)
 	}
 	postingDate, err := parseDate(postDateStr)
@@ -56,6 +57,11 @@ func parseCreditCardRow(
 	}
 	memo := getFieldValue(row, colIndex, "memo")
 
+	balance, err := parseBalance(getFieldValue(row, colIndex, "balance"), lineNum)
+	if err != nil {
+		return model.ChaseTransaction{}, err
+	}
+
 	tx := model.ChaseTransaction{
 		Lineage:        buildLineage(meta, lineNum),
 		AccountID:      meta.AccountID,
@@ -64,7 +70,7 @@ func parseCreditCardRow(
 		Details:        "",
 		Amount:         amount,
 		Type:           txType,
-		Balance:        nil,
+		Balance:        balance,
 		CheckOrSlipNum: "",
 		Category:       category,
 		Memo:           memo,
@@ -75,4 +81,10 @@ func parseCreditCardRow(
 	}
 
 	return tx, nil
+}
+
+// isPlaceholderDate checks whether a date string is empty or contains an indicator for pending transactions.
+func isPlaceholderDate(val string) bool {
+	trimmed := strings.TrimSpace(val)
+	return trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") || strings.EqualFold(trimmed, "pending")
 }

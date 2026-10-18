@@ -140,6 +140,31 @@ func parseAmount(amtRaw string, lineNum int) (float64, error) {
 	return amount, nil
 }
 
+// parseBalance parses an optional running balance field.
+// It returns (nil, nil) if the field is empty or contains a placeholder dash/NA.
+//
+//nolint:nilnil // nil balance represents an intentionally absent optional value
+func parseBalance(balRaw string, lineNum int) (*float64, error) {
+	trimmed := strings.TrimSpace(balRaw)
+	if trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") {
+		return nil, nil
+	}
+
+	balStr := cleanNumeric(trimmed)
+	if balStr == "" || balStr == "-" || balStr == "--" || strings.EqualFold(balStr, "n/a") {
+		return nil, nil
+	}
+
+	bal, err := strconv.ParseFloat(balStr, 64)
+	if err != nil {
+		return nil, fmt.Errorf("row %d: invalid balance %q: %w", lineNum, balStr, err)
+	}
+	if math.IsNaN(bal) || math.IsInf(bal, 0) {
+		return nil, fmt.Errorf("row %d: invalid balance %q: non-finite number", lineNum, balStr)
+	}
+	return &bal, nil
+}
+
 func parseDescription(descRaw string, lineNum int) (string, error) {
 	desc := strings.TrimSpace(descRaw)
 	if desc == "" {
@@ -163,28 +188,25 @@ func parseDate(val string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid date format %q: expected MM/DD/YYYY or YYYY-MM-DD", val)
 }
 
+// cleanNumeric normalizes numeric strings by removing currency signs, formatting symbols,
+// and accounting parentheses without coercing placeholder values to zero.
 func cleanNumeric(val string) string {
-	clean := strings.TrimSpace(val)
-	if clean == "-" || clean == "--" || strings.EqualFold(clean, "n/a") {
-		return "0"
-	}
-	clean = strings.ReplaceAll(clean, "\u00a0", "")
-	clean = strings.ReplaceAll(clean, "\u202f", "")
+	clean := strings.Map(func(r rune) rune {
+		if r == 0x00a0 || r == 0x202f || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, val)
+
 	clean = strings.ReplaceAll(clean, "$", "")
 	clean = strings.ReplaceAll(clean, ",", "")
 	clean = strings.ReplaceAll(clean, "+", "")
-	clean = strings.TrimSpace(clean)
 
 	if strings.HasPrefix(clean, "(") && strings.HasSuffix(clean, ")") {
 		clean = "-" + clean[1:len(clean)-1]
 	}
-	clean = strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' {
-			return -1
-		}
-		return r
-	}, clean)
-	return strings.TrimSpace(clean)
+
+	return clean
 }
 
 func findColumn(colIndex map[string]int, aliases ...string) (int, bool) {

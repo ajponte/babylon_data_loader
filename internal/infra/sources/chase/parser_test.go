@@ -10,6 +10,7 @@ import (
 )
 
 func TestCleanNumeric(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -24,14 +25,18 @@ func TestCleanNumeric(t *testing.T) {
 		{name: "narrow non-breaking space", input: "$\u202f1,000.50", want: "1000.50"},
 		{name: "spaces and tabs", input: "$ 1 000 . 50 \t", want: "1000.50"},
 		{name: "empty string returns empty", input: "", want: ""},
-		{name: "single dash defaults to zero", input: "-", want: "0"},
-		{name: "double dash defaults to zero", input: "--", want: "0"},
-		{name: "n/a lowercase defaults to zero", input: "n/a", want: "0"},
-		{name: "N/A uppercase defaults to zero", input: "N/A", want: "0"},
+		{name: "single dash preserved without zero coercion", input: "-", want: "-"},
+		{name: "double dash preserved without zero coercion", input: "--", want: "--"},
+		{name: "currency with single dash", input: "$ -", want: "-"},
+		{name: "currency with multiple spaces and dash", input: "$   -", want: "-"},
+		{name: "n/a lowercase preserved", input: "n/a", want: "n/a"},
+		{name: "N/A uppercase preserved", input: "N/A", want: "N/A"},
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := cleanNumeric(tc.input)
 			if got != tc.want {
 				t.Errorf("cleanNumeric(%q): expected %q, got %q", tc.input, tc.want, got)
@@ -40,7 +45,27 @@ func TestCleanNumeric(t *testing.T) {
 	}
 }
 
+func assertAmountResult(t *testing.T, got float64, err error, want float64, wantErr bool, errSubstr string) {
+	t.Helper()
+	if wantErr {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", errSubstr)
+		}
+		if !strings.Contains(err.Error(), errSubstr) {
+			t.Errorf("expected error containing %q, got %q", errSubstr, err.Error())
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if math.Abs(got-want) > 1e-6 {
+		t.Errorf("expected %f, got %f", want, got)
+	}
+}
+
 func TestParseAmount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		raw       string
@@ -52,6 +77,12 @@ func TestParseAmount(t *testing.T) {
 		{name: "negative accounting parentheses", raw: "($75.00)", want: -75.00},
 		{name: "outer dollar negative", raw: "$(120.50)", want: -120.50},
 		{name: "empty amount returns error", raw: "", wantErr: true, errSubstr: "transaction amount is required"},
+		{name: "single dash fails with invalid amount", raw: "-", wantErr: true, errSubstr: "invalid amount"},
+		{name: "double dash fails with invalid amount", raw: "--", wantErr: true, errSubstr: "invalid amount"},
+		{name: "currency dash fails with invalid amount", raw: "$ -", wantErr: true, errSubstr: "invalid amount"},
+		{name: "currency multi space dash fails with invalid amount", raw: "$   -", wantErr: true, errSubstr: "invalid amount"},
+		{name: "N/A uppercase fails with invalid amount", raw: "N/A", wantErr: true, errSubstr: "invalid amount"},
+		{name: "n/a lowercase fails with invalid amount", raw: "n/a", wantErr: true, errSubstr: "invalid amount"},
 		{name: "alphabetic string error", raw: "not_a_number", wantErr: true, errSubstr: "invalid amount"},
 		{name: "non-finite NaN", raw: "NaN", wantErr: true, errSubstr: "non-finite number"},
 		{name: "non-finite lowercase nan", raw: "nan", wantErr: true, errSubstr: "non-finite number"},
@@ -61,28 +92,17 @@ func TestParseAmount(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := parseAmount(tc.raw, 5)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
-				}
-				if !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("expected error containing %q, got %q", tc.errSubstr, err.Error())
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected parse error: %v", err)
-			}
-			if math.Abs(got-tc.want) > 1e-6 {
-				t.Errorf("expected %f, got %f", tc.want, got)
-			}
+			assertAmountResult(t, got, err, tc.want, tc.wantErr, tc.errSubstr)
 		})
 	}
 }
 
 func TestParseDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		raw       string
@@ -97,7 +117,9 @@ func TestParseDescription(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := parseDescription(tc.raw, 10)
 			if tc.wantErr {
 				if err == nil {
@@ -147,6 +169,7 @@ func assertBalanceResult(t *testing.T, bal *float64, err error, wantVal float64,
 }
 
 func TestParseBalance(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		raw       string
@@ -158,17 +181,25 @@ func TestParseBalance(t *testing.T) {
 		{name: "valid positive balance", raw: "$1,250.75", wantVal: 1250.75},
 		{name: "valid negative balance", raw: "($20.00)", wantVal: -20.00},
 		{name: "empty string is nil", raw: "", wantNil: true},
+		{name: "whitespace only string is nil", raw: "   ", wantNil: true},
 		{name: "single dash is nil", raw: "-", wantNil: true},
+		{name: "single dash with whitespace is nil", raw: " - ", wantNil: true},
 		{name: "double dash is nil", raw: "--", wantNil: true},
+		{name: "double dash with whitespace is nil", raw: " -- ", wantNil: true},
+		{name: "currency dash is nil", raw: "$ -", wantNil: true},
+		{name: "currency multiple space dash is nil", raw: "$   -", wantNil: true},
 		{name: "n/a lowercase is nil", raw: "n/a", wantNil: true},
 		{name: "N/A uppercase is nil", raw: "N/A", wantNil: true},
+		{name: "N/A with whitespace is nil", raw: " N/A ", wantNil: true},
 		{name: "syntax error balance", raw: "corrupted_val", wantErr: true, errSubstr: "invalid balance"},
 		{name: "non-finite NaN", raw: "NaN", wantErr: true, errSubstr: "non-finite number"},
 		{name: "non-finite Inf", raw: "+Inf", wantErr: true, errSubstr: "non-finite number"},
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			bal, err := parseBalance(tc.raw, 12)
 			assertBalanceResult(t, bal, err, tc.wantVal, tc.wantNil, tc.wantErr, tc.errSubstr)
 		})
@@ -199,6 +230,7 @@ func assertDateResult(t *testing.T, got time.Time, err error, wantYear int, want
 }
 
 func TestParseDate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		raw       string
@@ -218,7 +250,9 @@ func TestParseDate(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := parseDate(tc.raw)
 			assertDateResult(t, got, err, tc.wantYear, tc.wantMonth, tc.wantDay, tc.wantErr, tc.errSubstr)
 		})
@@ -226,6 +260,7 @@ func TestParseDate(t *testing.T) {
 }
 
 func TestFindColumnAndGetFieldValue(t *testing.T) {
+	t.Parallel()
 	colIndex := map[string]int{
 		"primary":   0,
 		"secondary": 1,
@@ -235,6 +270,7 @@ func TestFindColumnAndGetFieldValue(t *testing.T) {
 	row := []string{"  val_one  ", "val_two"}
 
 	t.Run("matches primary alias", func(t *testing.T) {
+		t.Parallel()
 		idx, ok := findColumn(colIndex, "primary")
 		if !ok || idx != 0 {
 			t.Errorf("expected (0, true), got (%d, %v)", idx, ok)
@@ -246,6 +282,7 @@ func TestFindColumnAndGetFieldValue(t *testing.T) {
 	})
 
 	t.Run("matches secondary alias", func(t *testing.T) {
+		t.Parallel()
 		idx, ok := findColumn(colIndex, "missing", "secondary")
 		if !ok || idx != 1 {
 			t.Errorf("expected (1, true), got (%d, %v)", idx, ok)
@@ -257,6 +294,7 @@ func TestFindColumnAndGetFieldValue(t *testing.T) {
 	})
 
 	t.Run("bounds overflow returns empty", func(t *testing.T) {
+		t.Parallel()
 		val := getFieldValue(row, colIndex, "overflow")
 		if val != "" {
 			t.Errorf("expected empty string for overflow column, got %q", val)
@@ -264,6 +302,7 @@ func TestFindColumnAndGetFieldValue(t *testing.T) {
 	})
 
 	t.Run("column not found returns empty", func(t *testing.T) {
+		t.Parallel()
 		val := getFieldValue(row, colIndex, "nonexistent")
 		if val != "" {
 			t.Errorf("expected empty string for nonexistent column, got %q", val)
@@ -272,6 +311,7 @@ func TestFindColumnAndGetFieldValue(t *testing.T) {
 }
 
 func TestIsRowEmpty(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		row  []string
@@ -284,7 +324,9 @@ func TestIsRowEmpty(t *testing.T) {
 	}
 
 	for _, tc := range tests {
+		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := isRowEmpty(tc.row)
 			if got != tc.want {
 				t.Errorf("isRowEmpty(%v): expected %v, got %v", tc.row, tc.want, got)
@@ -294,6 +336,7 @@ func TestIsRowEmpty(t *testing.T) {
 }
 
 func TestBuildLineage(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
 		FileName:   "chase_checking.csv",

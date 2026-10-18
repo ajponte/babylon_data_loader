@@ -50,7 +50,7 @@ func (c *DefaultClassifier) Classify(ctx context.Context, r io.Reader) (DialectT
 		return DialectUnknown, nil, ctxErr
 	}
 
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, peekBufferSize)
 	peekBytes, err := br.Peek(peekBufferSize)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return DialectUnknown, br, fmt.Errorf("failed to peek stream header: %w", err)
@@ -70,15 +70,17 @@ func (c *DefaultClassifier) Classify(ctx context.Context, r io.Reader) (DialectT
 	// Credit card markers take precedence over checking indicators
 	if strings.Contains(lower, "category") ||
 		strings.Contains(lower, "memo") ||
-		strings.Contains(lower, "transaction date") {
+		strings.Contains(lower, "transaction date") ||
+		strings.Contains(lower, "trans date") {
 		return DialectCreditCard, br, nil
 	}
 
-	// Checking markers
+	// Checking markers require explicit Chase deposit statement indicators
 	if strings.Contains(lower, "check or slip") ||
-		(strings.Contains(lower, "details") && strings.Contains(lower, "balance")) ||
+		(strings.Contains(lower, "details") && (strings.Contains(lower, "posting date") || strings.Contains(lower, "post date"))) ||
+		(strings.Contains(lower, "details") && strings.Contains(lower, "description") && strings.Contains(lower, "amount")) ||
 		(strings.Contains(lower, "posting date") && strings.Contains(lower, "balance")) ||
-		strings.Contains(lower, "balance") {
+		(strings.Contains(lower, "details") && strings.Contains(lower, "balance")) {
 		return DialectChecking, br, nil
 	}
 

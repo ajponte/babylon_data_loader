@@ -10,7 +10,24 @@ import (
 	"babylon/dataloader/internal/infra/sources/chase"
 )
 
+func assertClassifyResult(t *testing.T, dialect, expectedDialect chase.DialectType, reconstructedReader io.Reader, input string) {
+	t.Helper()
+	if dialect != expectedDialect {
+		t.Errorf("expected dialect %q, got %q", expectedDialect, dialect)
+	}
+
+	// Verify stream preservation: reconstructedReader must contain all original bytes
+	reconstructedBytes, readErr := io.ReadAll(reconstructedReader)
+	if readErr != nil {
+		t.Fatalf("failed to read reconstructed reader: %v", readErr)
+	}
+	if string(reconstructedBytes) != input {
+		t.Errorf("stream data corrupted:\nexpected: %q\ngot:      %q", input, string(reconstructedBytes))
+	}
+}
+
 func TestDefaultClassifier_Classify(t *testing.T) {
+	t.Parallel()
 	classifier := chase.NewDefaultClassifier()
 	ctx := context.Background()
 
@@ -39,8 +56,32 @@ func TestDefaultClassifier_Classify(t *testing.T) {
 			expectErr:       false,
 		},
 		{
+			name:            "checking header without balance column",
+			input:           "Details,Posting Date,Description,Amount,Type\nDEBIT,10/15/2026,Store,-10.00,DEBIT\n",
+			expectedDialect: chase.DialectChecking,
+			expectErr:       false,
+		},
+		{
+			name:            "checking header with details and posting date",
+			input:           "Details,Posting Date\nDEBIT,10/15/2026\n",
+			expectedDialect: chase.DialectChecking,
+			expectErr:       false,
+		},
+		{
+			name:            "foreign CSV containing balance column is unknown",
+			input:           "Employee Name,Leave Balance,Start Date\nAlice,15,2024-01-01\n",
+			expectedDialect: chase.DialectUnknown,
+			expectErr:       false,
+		},
+		{
 			name:            "standard credit card header",
 			input:           "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n12/21/2025,12/22/2025,LEETCODE,Shopping,Sale,-35.00,\n",
+			expectedDialect: chase.DialectCreditCard,
+			expectErr:       false,
+		},
+		{
+			name:            "credit card header with trans date alias",
+			input:           "Trans Date,Post Date,Description,Amount\n10/14/2026,10/15/2026,Store,-10.00\n",
 			expectedDialect: chase.DialectCreditCard,
 			expectErr:       false,
 		},
@@ -83,34 +124,27 @@ func TestDefaultClassifier_Classify(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			r := strings.NewReader(tt.input)
 			dialect, reconstructedReader, err := classifier.Classify(ctx, r)
 
 			if (err != nil) != tt.expectErr {
 				t.Fatalf("Classify() error = %v, expectErr = %v", err, tt.expectErr)
 			}
-			if dialect != tt.expectedDialect {
-				t.Errorf("expected dialect %q, got %q", tt.expectedDialect, dialect)
-			}
-
-			// Verify stream preservation: reconstructedReader must contain all original bytes
-			reconstructedBytes, readErr := io.ReadAll(reconstructedReader)
-			if readErr != nil {
-				t.Fatalf("failed to read reconstructed reader: %v", readErr)
-			}
-			if string(reconstructedBytes) != tt.input {
-				t.Errorf("stream data corrupted:\nexpected: %q\ngot:      %q", tt.input, string(reconstructedBytes))
-			}
+			assertClassifyResult(t, dialect, tt.expectedDialect, reconstructedReader, tt.input)
 		})
 	}
 }
 
 func TestDefaultClassifier_Classify_Errors(t *testing.T) {
+	t.Parallel()
 	classifier := chase.NewDefaultClassifier()
 	ctx := context.Background()
 
 	t.Run("nil reader returns error", func(t *testing.T) {
+		t.Parallel()
 		_, _, err := classifier.Classify(ctx, nil)
 		if err == nil {
 			t.Error("expected error when reader is nil")
@@ -121,6 +155,7 @@ func TestDefaultClassifier_Classify_Errors(t *testing.T) {
 	})
 
 	t.Run("nil context is safely handled", func(t *testing.T) {
+		t.Parallel()
 		var nilCtx context.Context
 		dialect, _, err := classifier.Classify(nilCtx, strings.NewReader("Details,Posting Date,Balance\n"))
 		if err != nil {
@@ -132,6 +167,7 @@ func TestDefaultClassifier_Classify_Errors(t *testing.T) {
 	})
 
 	t.Run("context cancelled returns error", func(t *testing.T) {
+		t.Parallel()
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 		_, _, err := classifier.Classify(canceledCtx, strings.NewReader("Details,Posting Date\n"))
@@ -142,6 +178,7 @@ func TestDefaultClassifier_Classify_Errors(t *testing.T) {
 }
 
 func TestDefaultClassifier_Classify_PeekBounds(t *testing.T) {
+	t.Parallel()
 	classifier := chase.NewDefaultClassifier()
 	ctx := context.Background()
 
@@ -168,6 +205,7 @@ func TestDefaultClassifier_Classify_PeekBounds(t *testing.T) {
 }
 
 func TestDefaultClassifier_Classify_CreditCardWithBalance(t *testing.T) {
+	t.Parallel()
 	classifier := chase.NewDefaultClassifier()
 	ctx := context.Background()
 
@@ -178,15 +216,5 @@ func TestDefaultClassifier_Classify_CreditCardWithBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected Classify error: %v", err)
 	}
-	if dialect != chase.DialectCreditCard {
-		t.Errorf("expected dialect %q, got %q", chase.DialectCreditCard, dialect)
-	}
-
-	reconstructedBytes, readErr := io.ReadAll(reconstructedReader)
-	if readErr != nil {
-		t.Fatalf("failed to read reconstructed stream: %v", readErr)
-	}
-	if string(reconstructedBytes) != input {
-		t.Errorf("reconstructed stream mismatch:\nexpected: %q\ngot:      %q", input, string(reconstructedBytes))
-	}
+	assertClassifyResult(t, dialect, chase.DialectCreditCard, reconstructedReader, input)
 }

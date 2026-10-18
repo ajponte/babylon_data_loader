@@ -61,6 +61,9 @@ func (e *Extractor) Extract(
 
 	dialect, stream, err := e.classifier.Classify(ctx, r)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to classify chase statement dialect: %w", err)
 	}
 
@@ -78,9 +81,14 @@ func (e *Extractor) Extract(
 		records, err = parseCreditCard(ctx, stream, meta)
 	case DialectUnknown:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownDialect, dialect)
+	default:
+		return nil, fmt.Errorf("%w: unrecognized dialect %q", ErrUnknownDialect, dialect)
 	}
 
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		return nil, err
 	}
 

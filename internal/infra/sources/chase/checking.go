@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
-	"strconv"
-	"strings"
 
 	"babylon/dataloader/internal/domain/model"
 )
@@ -81,20 +78,4 @@ func parseCheckingRow(
 	}
 
 	return tx, nil
-}
-
-//nolint:nilnil // nil balance represents an intentionally absent optional value
-func parseBalance(balRaw string, lineNum int) (*float64, error) {
-	if balRaw == "" || balRaw == "-" || balRaw == "--" || strings.EqualFold(balRaw, "n/a") {
-		return nil, nil
-	}
-	balStr := cleanNumeric(balRaw)
-	bal, balErr := strconv.ParseFloat(balStr, 64)
-	if balErr != nil {
-		return nil, fmt.Errorf("row %d: invalid balance %q: %w", lineNum, balStr, balErr)
-	}
-	if math.IsNaN(bal) || math.IsInf(bal, 0) {
-		return nil, fmt.Errorf("row %d: invalid balance %q: non-finite number", lineNum, balStr)
-	}
-	return &bal, nil
 }
