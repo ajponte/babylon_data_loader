@@ -988,3 +988,65 @@ func TestChaseExtractor_NilContext(t *testing.T) {
 		t.Errorf("expected 1 record, got %d", batch.RecordCount)
 	}
 }
+
+type mockClassifier struct {
+	dialect chase.DialectType
+	err     error
+}
+
+func (m *mockClassifier) Classify(_ context.Context, r io.Reader) (chase.DialectType, io.Reader, error) {
+	if m.err != nil {
+		return chase.DialectUnknown, nil, m.err
+	}
+	return m.dialect, r, nil
+}
+
+func TestChaseExtractor_ClassifierAndRoutingEdgeCases(t *testing.T) {
+	t.Parallel()
+	meta := testFileMetadata("acc-route-edge", "edge.csv")
+
+	t.Run("unrecognized dialect enum returns ErrUnknownDialect", func(t *testing.T) {
+		t.Parallel()
+		customClassifier := &mockClassifier{dialect: chase.DialectType("CHASE_FUTURE_DIALECT")}
+		extractor := chase.NewExtractor(customClassifier)
+
+		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
+		if err == nil {
+			t.Fatal("expected error for unrecognized dialect, got nil")
+		}
+		if !errors.Is(err, chase.ErrUnknownDialect) {
+			t.Errorf("expected ErrUnknownDialect, got %v", err)
+		}
+		if !strings.Contains(err.Error(), `unrecognized dialect "CHASE_FUTURE_DIALECT"`) {
+			t.Errorf("expected error message to contain unrecognized dialect description, got %v", err)
+		}
+	})
+
+	t.Run("classifier generic error wrapping", func(t *testing.T) {
+		t.Parallel()
+		customClassifier := &mockClassifier{err: errors.New("underlying disk read failure")}
+		extractor := chase.NewExtractor(customClassifier)
+
+		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
+		if err == nil {
+			t.Fatal("expected error from failing classifier, got nil")
+		}
+		if !strings.Contains(err.Error(), "failed to classify chase statement dialect: underlying disk read failure") {
+			t.Errorf("expected wrapped classification error, got %v", err)
+		}
+	})
+
+	t.Run("classifier deadline exceeded returns unwrapped error", func(t *testing.T) {
+		t.Parallel()
+		customClassifier := &mockClassifier{err: context.DeadlineExceeded}
+		extractor := chase.NewExtractor(customClassifier)
+
+		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
+		if err == nil {
+			t.Fatal("expected deadline exceeded error, got nil")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("expected unwrapped context.DeadlineExceeded, got %v", err)
+		}
+	})
+}
