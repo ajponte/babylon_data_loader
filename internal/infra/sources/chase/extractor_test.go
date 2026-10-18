@@ -406,7 +406,6 @@ func TestChaseExtractor_CreditCardPendingFormats(t *testing.T) {
 	extractor := chase.NewExtractor(nil)
 	pendingIndicators := []string{"", "Pending", "pending", "-", "--", "n/a", "N/A"}
 	for _, indicator := range pendingIndicators {
-		indicator := indicator
 		t.Run("indicator_"+indicator, func(t *testing.T) {
 			t.Parallel()
 			csvData := fmt.Sprintf("Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n10/14/2026,%s,COFFEE,Food & Drink,Sale,-4.50,latte\n", indicator)
@@ -479,7 +478,6 @@ func TestChaseExtractor_MissingAmountRejection(t *testing.T) {
 	extractor := chase.NewExtractor(nil)
 	missingAmts := []string{"-", "--", "n/a", "N/A", "   "}
 	for _, amt := range missingAmts {
-		amt := amt
 		t.Run("missing_amount_"+strings.TrimSpace(amt), func(t *testing.T) {
 			t.Parallel()
 			csvData := fmt.Sprintf("Details,Posting Date,Description,Amount,Type,Balance\nDEBIT,10/15/2026,STORE,%s,DEBIT,100.00\n", amt)
@@ -520,7 +518,7 @@ func TestChaseExtractor_ConcurrentExecution(t *testing.T) {
 	extractor := chase.NewExtractor(nil)
 	var wg sync.WaitGroup
 	ctx := context.Background()
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -580,6 +578,7 @@ CREDIT,2026/10/19,"REFUND","+$100.50",CREDIT,"($200.00)",--
 }
 
 func TestChaseExtractor_CorruptedBalanceFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
@@ -604,6 +603,7 @@ DEBIT,10/15/2026,"VALID TX",-10.00,DEBIT,CORRUPT_VAL,
 }
 
 func TestChaseExtractor_MultilinePhysicalLineage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
@@ -672,6 +672,7 @@ func (cr *cancelingReader) Read(p []byte) (int, error) {
 }
 
 func TestChaseExtractor_SentinelErrors(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	extractor := chase.NewExtractor(nil)
 	meta := testFileMetadata("acc-sentinel", "test.csv")
@@ -710,7 +711,9 @@ func TestChaseExtractor_SentinelErrors(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var r io.Reader
 			if !tt.passNilR {
 				r = strings.NewReader(tt.csvData)
@@ -727,6 +730,7 @@ func TestChaseExtractor_SentinelErrors(t *testing.T) {
 }
 
 func TestChaseExtractor_NonFiniteAmounts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	extractor := chase.NewExtractor(nil)
 
@@ -767,7 +771,9 @@ func TestChaseExtractor_NonFiniteAmounts(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			meta := testFileMetadata("acc-nonfinite", "nonfinite.csv")
 			_, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
 			if err == nil {
@@ -781,6 +787,7 @@ func TestChaseExtractor_NonFiniteAmounts(t *testing.T) {
 }
 
 func TestChaseExtractor_HeaderOnlyCSV(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	extractor := chase.NewExtractor(nil)
 
@@ -802,7 +809,9 @@ func TestChaseExtractor_HeaderOnlyCSV(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			meta := testFileMetadata("acc-empty", "empty.csv")
 			batch, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
 			if err != nil {
@@ -826,6 +835,7 @@ func TestChaseExtractor_HeaderOnlyCSV(t *testing.T) {
 }
 
 func TestChaseExtractor_MalformedCSVSyntax(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	extractor := chase.NewExtractor(nil)
 	meta := testFileMetadata("acc-malformed", "malformed.csv")
@@ -840,6 +850,7 @@ func TestChaseExtractor_MalformedCSVSyntax(t *testing.T) {
 }
 
 func TestChaseExtractor_CorruptedDates(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	extractor := chase.NewExtractor(nil)
 	meta := testFileMetadata("acc-corrupt-date", "corrupt_date.csv")
@@ -866,7 +877,9 @@ func TestChaseExtractor_CorruptedDates(t *testing.T) {
 	}
 
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := extractor.Extract(ctx, strings.NewReader(tt.csvData), meta)
 			if err == nil {
 				t.Fatalf("expected error for corrupted date in %s, got nil", tt.name)
@@ -876,10 +889,12 @@ func TestChaseExtractor_CorruptedDates(t *testing.T) {
 }
 
 func TestChaseExtractor_ContextCancellation_HeaderAndBody(t *testing.T) {
+	t.Parallel()
 	extractor := chase.NewExtractor(nil)
 	meta := testFileMetadata("acc-cancel", "cancel.csv")
 
 	t.Run("pre-canceled context during extract", func(t *testing.T) {
+		t.Parallel()
 		canceledCtx, cancel := context.WithCancel(context.Background())
 		cancel()
 
@@ -894,6 +909,7 @@ func TestChaseExtractor_ContextCancellation_HeaderAndBody(t *testing.T) {
 	})
 
 	t.Run("cancellation during stream processing", func(t *testing.T) {
+		t.Parallel()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -917,6 +933,7 @@ func TestChaseExtractor_ContextCancellation_HeaderAndBody(t *testing.T) {
 }
 
 func TestChaseExtractor_AccountingNegativesAndUnicodeSpaces(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	extractor := chase.NewExtractor(nil)
 	meta := testFileMetadata("acc-unicode", "unicode.csv")
@@ -959,6 +976,7 @@ func TestChaseExtractor_AccountingNegativesAndUnicodeSpaces(t *testing.T) {
 }
 
 func TestChaseExtractor_NilContext(t *testing.T) {
+	t.Parallel()
 	extractor := chase.NewExtractor(nil)
 	meta := testFileMetadata("acc-nil-ctx", "nil_ctx.csv")
 

@@ -34,7 +34,6 @@ func TestCleanNumeric(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := cleanNumeric(tc.input)
@@ -92,7 +91,6 @@ func TestParseAmount(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseAmount(tc.raw, 5)
@@ -117,7 +115,6 @@ func TestParseDescription(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseDescription(tc.raw, 10)
@@ -197,7 +194,6 @@ func TestParseBalance(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bal, err := parseBalance(tc.raw, 12)
@@ -250,7 +246,6 @@ func TestParseDate(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseDate(tc.raw)
@@ -324,7 +319,6 @@ func TestIsRowEmpty(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := isRowEmpty(tc.row)
