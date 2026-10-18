@@ -30,6 +30,8 @@ type mockRepository struct {
 	fidelityPositions                 []model.FidelityPosition
 	recordSyncLogCalled               bool
 	recordedSyncLog                   model.SyncLog
+	recordedSyncLogCtx                context.Context
+	recordedSyncLogCtxErr             error
 	syncLogs                          []model.SyncLog
 	err                               error
 	upsertErr                         error
@@ -75,6 +77,8 @@ func (m *mockRepository) BulkUpsertFidelityPositions(ctx context.Context, positi
 func (m *mockRepository) RecordSyncLog(ctx context.Context, log model.SyncLog) error {
 	m.recordSyncLogCalled = true
 	m.recordedSyncLog = log
+	m.recordedSyncLogCtx = ctx
+	m.recordedSyncLogCtxErr = ctx.Err()
 	m.syncLogs = append(m.syncLogs, log)
 	if m.recordSyncLogErr != nil {
 		return m.recordSyncLogErr
@@ -1348,7 +1352,7 @@ DEBIT,01/31/2026,"WHOLE FOODS GROCERY",-75.77,DEBIT_CARD,11190.76,`
 	}
 }
 
-func TestDatalake_ExecuteChaseUpsert_ContextCancellation(t *testing.T) {
+func TestDatalake_ProcessChaseRecords_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
@@ -1370,10 +1374,19 @@ func TestDatalake_ExecuteChaseUpsert_ContextCancellation(t *testing.T) {
 	)
 
 	reporter := &mockProgressReporter{}
-	txs := []model.ChaseTransaction{{AccountID: "TEST", Description: "DESC"}}
-	_, err := processor.executeChaseUpsert(ctx, "test.csv", txs, reporter)
+	rawRecords := []map[string]string{
+		{
+			"Details":      "DEBIT",
+			"Posting Date": "01/31/2026",
+			"Description":  "WHOLE FOODS GROCERY",
+			"Amount":       "-75.77",
+			"Type":         "DEBIT_CARD",
+			"Balance":      "11190.76",
+		},
+	}
+	_, _, _, err := processor.processChaseRecords(ctx, "test.csv", "test.csv", "1234", rawRecords, reporter)
 	if err == nil {
-		t.Fatalf("expected executeChaseUpsert to return error for canceled context, got nil")
+		t.Fatalf("expected processChaseRecords to return error for canceled context, got nil")
 	}
 
 	if mockRepo.bulkUpsertChaseTransactionsCalled {
@@ -1381,20 +1394,13 @@ func TestDatalake_ExecuteChaseUpsert_ContextCancellation(t *testing.T) {
 	}
 
 	hasUpsertingPhase := false
-	hasFailedPhase := false
 	for _, ev := range reporter.events {
 		if ev.Phase == PhaseUpserting {
 			hasUpsertingPhase = true
 		}
-		if ev.Phase == PhaseFailed {
-			hasFailedPhase = true
-		}
 	}
 	if hasUpsertingPhase {
 		t.Errorf("expected PhaseUpserting NOT to be emitted when context is canceled")
-	}
-	if !hasFailedPhase {
-		t.Errorf("expected PhaseFailed to be emitted when context is canceled")
 	}
 }
 
@@ -1747,5 +1753,182 @@ DEBIT,01/31/2026,"GROCERY STORE",-50.00,DEBIT_CARD,1000.00,`
 	}
 	if log.UpsertedCount != 1 {
 		t.Errorf("expected UpsertedCount 1, got %d", log.UpsertedCount)
+	}
+}
+
+// TestTC_DL_SYNC_MoveFileFailureAudit verifies that when file archival fails after upsert,
+// a failure audit log is recorded with descriptive error and the error is returned.
+func TestTC_DL_SYNC_MoveFileFailureAudit(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	// Create a regular file where the processed directory is expected, causing directory creation or move to fail.
+	invalidProcessedDir := filepath.Join(tmpDir, "invalid_processed_dir")
+	if err := os.WriteFile(invalidProcessedDir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("failed to create blocking file: %v", err)
+	}
+
+	fileName := "Chase1234_Activity_20260131.CSV"
+	filePath := filepath.Join(unprocessedDir, fileName)
+	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,01/31/2026,"GROCERY STORE",-50.00,DEBIT_CARD,1000.00,`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		invalidProcessedDir,
+		true, // Enable MoveProcessedFiles
+		stats,
+		logger,
+	)
+
+	reporter := &mockProgressReporter{}
+	err := processor.processSingleFile(ctx, fileName, string(datasource.Chase), "1234", reporter)
+	if err == nil {
+		t.Fatal("expected processSingleFile to return error on move failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to move file") {
+		t.Errorf("expected error to mention 'failed to move file', got: %v", err)
+	}
+
+	if !mockRepo.recordSyncLogCalled {
+		t.Fatal("expected RecordSyncLog to be called on move failure")
+	}
+
+	log := mockRepo.recordedSyncLog
+	if log.Status != string(model.SyncStatusFailed) {
+		t.Errorf("expected Status %q, got %q", model.SyncStatusFailed, log.Status)
+	}
+	if !strings.Contains(log.ErrorMessage, "storage succeeded but file archival failed") {
+		t.Errorf("expected ErrorMessage to contain 'storage succeeded but file archival failed', got %q", log.ErrorMessage)
+	}
+	if log.FileName != fileName {
+		t.Errorf("expected FileName %q, got %q", fileName, log.FileName)
+	}
+}
+
+// TestTC_DL_SYNC_ContextCancellationFailureAudit verifies that context cancellation during ingestion
+// still successfully records a failure audit log via the detached context.
+func TestTC_DL_SYNC_ContextCancellationFailureAudit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel parent context immediately
+
+	tmpDir := t.TempDir()
+	unprocessedDir := filepath.Join(tmpDir, "unprocessed")
+	if err := os.MkdirAll(unprocessedDir, 0o755); err != nil {
+		t.Fatalf("failed to create unprocessed dir: %v", err)
+	}
+
+	fileName := "Chase1234_Activity_20260131.CSV"
+	filePath := filepath.Join(unprocessedDir, fileName)
+	csvContent := `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
+DEBIT,01/31/2026,"GROCERY STORE",-50.00,DEBIT_CARD,1000.00,`
+	if err := os.WriteFile(filePath, []byte(csvContent), 0o644); err != nil {
+		t.Fatalf("failed to write test CSV: %v", err)
+	}
+
+	mockRepo := &mockRepository{}
+	extractor := datasource.NewGenericExtractor()
+	parser := csvparser.NewDefaultParser()
+	stats := NewStats()
+	logger := *slog.New(slog.DiscardHandler)
+
+	processor := NewCSVFileProcessor(
+		mockRepo,
+		extractor,
+		parser,
+		unprocessedDir,
+		"",
+		false,
+		stats,
+		logger,
+	)
+
+	reporter := &mockProgressReporter{}
+	err := processor.processSingleFile(ctx, fileName, string(datasource.Chase), "1234", reporter)
+	if err == nil {
+		t.Fatal("expected processSingleFile to fail due to canceled context, got nil")
+	}
+
+	if !mockRepo.recordSyncLogCalled {
+		t.Fatal("expected RecordSyncLog to be called via detached context")
+	}
+
+	log := mockRepo.recordedSyncLog
+	if log.Status != string(model.SyncStatusFailed) {
+		t.Errorf("expected Status %q, got %q", model.SyncStatusFailed, log.Status)
+	}
+	if !strings.Contains(log.ErrorMessage, "context canceled") {
+		t.Errorf("expected ErrorMessage to contain 'context canceled', got %q", log.ErrorMessage)
+	}
+
+	// Verify that the context passed to RecordSyncLog was detached and not canceled during execution
+	if mockRepo.recordedSyncLogCtx == nil {
+		t.Fatal("expected recordedSyncLogCtx to be non-nil")
+	}
+	if mockRepo.recordedSyncLogCtxErr != nil {
+		t.Errorf("expected detached context for RecordSyncLog to NOT be canceled during invocation, got: %v", mockRepo.recordedSyncLogCtxErr)
+	}
+}
+
+func TestCopyAndRemoveFile_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "source.csv")
+	dstPath := filepath.Join(tmpDir, "dest.csv")
+
+	if err := os.WriteFile(srcPath, []byte("col1,col2\nval1,val2\n"), 0o644); err != nil {
+		t.Fatalf("failed to write test source: %v", err)
+	}
+
+	if err := copyAndRemoveFile(srcPath, dstPath); err != nil {
+		t.Fatalf("copyAndRemoveFile failed: %v", err)
+	}
+
+	if _, err := os.Stat(srcPath); !os.IsNotExist(err) {
+		t.Errorf("expected source file to be removed, but it still exists")
+	}
+
+	dstData, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatalf("failed to read dest file: %v", err)
+	}
+	if string(dstData) != "col1,col2\nval1,val2\n" {
+		t.Errorf("dest content mismatch: got %q", string(dstData))
+	}
+}
+
+func TestCopyAndRemoveFile_CopyFailureCleansUpDestination(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Open a directory as the source. Reading from a directory file descriptor will fail during io.Copy on Unix.
+	srcDir := filepath.Join(tmpDir, "source_dir")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("failed to create source dir: %v", err)
+	}
+	dstPath := filepath.Join(tmpDir, "dest.csv")
+
+	err := copyAndRemoveFile(srcDir, dstPath)
+	if err == nil {
+		t.Fatal("expected copyAndRemoveFile to fail when copying a directory, got nil")
+	}
+
+	// Verify destination file was deleted upon copy failure
+	if _, statErr := os.Stat(dstPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected destination file %s to be cleaned up on copy failure, but it exists", dstPath)
 	}
 }

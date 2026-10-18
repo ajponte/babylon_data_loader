@@ -91,7 +91,9 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ refreshTrigger = 0 }
                 const fileName = log.fileName || 'N/A';
                 const records = log.upsertedCount ?? log.recordsUploaded ?? 0;
                 const duplicates = log.matchedCount ?? 0;
-                const duration = log.durationMs !== undefined && log.durationMs !== null ? `${log.durationMs}ms` : 'N/A';
+                const isLegacy = !log.fileHash && !log.fileName;
+                const duration = log.durationMs !== undefined && log.durationMs !== null && (!isLegacy || log.durationMs > 0) ? `${log.durationMs}ms` : 'N/A';
+                const collection = log.collectionName?.trim() || 'N/A';
                 const timestamp = log.syncedAt || log.syncTimestamp;
 
                 return (
@@ -102,7 +104,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ refreshTrigger = 0 }
                       </span>
                     </td>
                     <td className="file-name" title={log.fileName || ''}>{fileName}</td>
-                    <td className="col-name">{log.collectionName}</td>
+                    <td className="col-name">{collection}</td>
                     <td className="records-count">{String(records)}</td>
                     <td className="duplicates-count">{String(duplicates)}</td>
                     <td className="duration">{duration}</td>

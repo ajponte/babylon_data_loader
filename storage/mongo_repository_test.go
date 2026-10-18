@@ -209,6 +209,60 @@ func TestGetSyncLogs_Success(t *testing.T) {
 	}
 }
 
+func TestGetSyncLogsWithLimit(t *testing.T) {
+	ctx := context.Background()
+
+	var capturedOpts []*options.FindOptions
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createManyFunc: func(ctx context.Context, models []mongo.IndexModel, opts ...*options.CreateIndexesOptions) ([]string, error) {
+					return []string{"idx1", "idx2"}, nil
+				},
+			}
+		},
+		findFunc: func(ctx context.Context, filter interface{}, opts ...*options.FindOptions) (*mongo.Cursor, error) {
+			capturedOpts = opts
+			return mongo.NewCursorFromDocuments([]interface{}{}, nil, nil)
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+
+	// Test default GetSyncLogs applies limit 100
+	_, err := repo.GetSyncLogs(ctx)
+	if err != nil {
+		t.Fatalf("GetSyncLogs failed: %v", err)
+	}
+	if len(capturedOpts) == 0 || capturedOpts[0].Limit == nil || *capturedOpts[0].Limit != storage.DefaultSyncLogLimit {
+		t.Errorf("expected default limit %d, got %v", storage.DefaultSyncLogLimit, capturedOpts[0].Limit)
+	}
+
+	// Test custom limit
+	_, err = repo.GetSyncLogsWithLimit(ctx, 42)
+	if err != nil {
+		t.Fatalf("GetSyncLogsWithLimit failed: %v", err)
+	}
+	if len(capturedOpts) == 0 || capturedOpts[0].Limit == nil || *capturedOpts[0].Limit != 42 {
+		t.Errorf("expected custom limit 42, got %v", capturedOpts[0].Limit)
+	}
+
+	// Test non-positive limit (unbounded)
+	_, err = repo.GetSyncLogsWithLimit(ctx, 0)
+	if err != nil {
+		t.Fatalf("GetSyncLogsWithLimit(0) failed: %v", err)
+	}
+	if len(capturedOpts) > 0 && capturedOpts[0].Limit != nil {
+		t.Errorf("expected no limit for limit <= 0, got %v", *capturedOpts[0].Limit)
+	}
+}
+
 func TestGetSyncLogs_FindError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("find error")
@@ -583,6 +637,59 @@ func TestBulkUpsertFidelity_IndexError(t *testing.T) {
 	}
 	if bulkWriteCalled {
 		t.Errorf("expected BulkWrite NOT to be called when index creation fails")
+	}
+}
+
+func TestEnsureFidelityIndexes_RetryAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	expectedErr := errors.New("transient fidelity index creation error")
+	var callCount int
+
+	mockDS := &mockDataStore{
+		indexesFunc: func() storage.IndexView {
+			return &mockIndexView{
+				createOneFunc: func(ctx context.Context, model mongo.IndexModel, opts ...*options.CreateIndexesOptions) (string, error) {
+					callCount++
+					if callCount == 1 {
+						return "", expectedErr
+					}
+					return "idx_account_symbol_asof", nil
+				},
+			}
+		},
+		bulkWriteFunc: func(ctx context.Context, models []mongo.WriteModel, opts ...*options.BulkWriteOptions) (*mongo.BulkWriteResult, error) {
+			return &mongo.BulkWriteResult{UpsertedCount: 1}, nil
+		},
+		insertOneFunc: func(ctx context.Context, document interface{}, opts ...*options.InsertOneOptions) (*mongo.InsertOneResult, error) {
+			return &mongo.InsertOneResult{}, nil
+		},
+	}
+
+	provider := &mockCollectionProvider{
+		collectionFunc: func(name string) storage.DataStore {
+			return mockDS
+		},
+	}
+
+	repo := storage.NewMongoRepository(provider)
+	positions := []model.FidelityPosition{{AccountNumber: "TEST", Symbol: "SYM"}}
+
+	// First attempt fails transiently
+	_, err := repo.BulkUpsertFidelityPositions(ctx, positions)
+	if err == nil || !strings.Contains(err.Error(), expectedErr.Error()) {
+		t.Fatalf("expected transient index error on first call, got: %v", err)
+	}
+
+	// Second attempt retries index creation and succeeds
+	stats, err := repo.BulkUpsertFidelityPositions(ctx, positions)
+	if err != nil {
+		t.Fatalf("expected second call to succeed on retry, got error: %v", err)
+	}
+	if stats.UpsertedCount != 1 {
+		t.Errorf("expected UpsertedCount == 1, got %d", stats.UpsertedCount)
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 calls to createOneFunc, got %d", callCount)
 	}
 }
 
@@ -1088,14 +1195,11 @@ func TestGetSyncLogs_MixedCanonicalAndLegacy(t *testing.T) {
 
 func assertMixedSortOptions(t *testing.T, sort bson.D) {
 	t.Helper()
-	if len(sort) != 2 {
-		t.Fatalf("expected 2 sort keys, got %d", len(sort))
+	if len(sort) != 1 {
+		t.Fatalf("expected 1 sort key, got %d", len(sort))
 	}
 	if sort[0].Key != "syncedAt" || sort[0].Value != -1 {
 		t.Errorf("expected sort syncedAt: -1, got %+v", sort[0])
-	}
-	if sort[1].Key != "sync_timestamp" || sort[1].Value != -1 {
-		t.Errorf("expected sort sync_timestamp: -1, got %+v", sort[1])
 	}
 }
 

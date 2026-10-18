@@ -149,4 +149,39 @@ describe('HistoryPanel Component', () => {
 
     expect(screen.getByText(/Connection timed out/i)).toBeInTheDocument();
   });
+
+  it('renders fallback values for legacy records with durationMs=0 and empty collection names', async () => {
+    const mockLogs = [
+      model.SyncLog.createFrom({
+        collectionName: '',
+        syncTimestamp: '2026-06-06T15:00:00Z',
+        recordsUploaded: 25,
+        durationMs: 0,
+      }),
+      model.SyncLog.createFrom({
+        collectionName: '   ',
+        syncTimestamp: '2026-06-05T12:30:00Z',
+        recordsUploaded: 10,
+        durationMs: 0,
+      }),
+    ];
+
+    vi.mocked(wailsApp.GetHistory).mockResolvedValue(mockLogs);
+
+    render(<HistoryPanel />);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Loading/i)).not.toBeInTheDocument();
+    });
+
+    const colCells = document.querySelectorAll('.col-name');
+    expect(colCells.length).toBe(2);
+    expect(colCells[0]?.textContent).toBe('N/A');
+    expect(colCells[1]?.textContent).toBe('N/A');
+
+    const durationCells = document.querySelectorAll('.duration');
+    expect(durationCells.length).toBe(2);
+    expect(durationCells[0]?.textContent).toBe('N/A');
+    expect(durationCells[1]?.textContent).toBe('N/A');
+  });
 });
