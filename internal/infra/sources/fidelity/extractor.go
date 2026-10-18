@@ -1,3 +1,4 @@
+// Package fidelity implements the port.Extractor driving adapter for Fidelity portfolio position statement exports.
 package fidelity
 
 import (
@@ -136,7 +137,7 @@ func (e *Extractor) parseAndValidateHeader(header []string) (map[string]int, err
 	// Enforce required column signatures for Fidelity portfolio positions
 	requiredSignatures := [][]string{
 		{"symbol", "ticker"},
-		{"current value", "market value", "current balance", "last price", "quantity"},
+		{"current value", "market value", "current balance"},
 	}
 
 	for _, sig := range requiredSignatures {

@@ -2,6 +2,7 @@ package fidelity
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -277,6 +278,9 @@ func parseFinancialNumber(val string, stripDollar bool, fieldName string) (float
 	f, err := strconv.ParseFloat(clean, 64)
 	if err != nil {
 		return 0.0, fmt.Errorf("invalid %s value %q: %w", fieldName, val, err)
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0.0, fmt.Errorf("invalid %s value %q: non-finite float value", fieldName, val)
 	}
 	return f, nil
 }

@@ -694,6 +694,255 @@ func TestFidelityExtractor_SentinelErrors(t *testing.T) {
 	})
 }
 
+func TestFidelityExtractor_NonFiniteFloats(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "non_finite.csv",
+		FileHash:   "hash_non_finite",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name     string
+		quantity string
+		value    string
+	}{
+		{name: "NaN quantity", quantity: "NaN", value: "100.00"},
+		{name: "nan lowercase quantity", quantity: "nan", value: "100.00"},
+		{name: "+Inf quantity", quantity: "+Inf", value: "100.00"},
+		{name: "-Inf quantity", quantity: "-Inf", value: "100.00"},
+		{name: "Infinity quantity", quantity: "Infinity", value: "100.00"},
+		{name: "NaN value", quantity: "10", value: "NaN"},
+		{name: "-Inf value", quantity: "10", value: "-Inf"},
+		{name: "+Infinity value", quantity: "10", value: "+Infinity"},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			csvData := fmt.Sprintf(
+				"Account number,Symbol,Quantity,Current value\nFID-1,AAPL,%s,%s\n",
+				tc.quantity, tc.value,
+			)
+			_, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "non-finite float") {
+				t.Errorf("expected error to mention 'non-finite float', got: %v", err)
+			}
+		})
+	}
+}
+
+func TestFidelityExtractor_StrictValuationColumnRequirements(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "no_valuation.csv",
+		FileHash:   "hash_no_val",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{name: "symbol and quantity only", header: "Account number,Symbol,Quantity\nFID-1,AAPL,10\n"},
+		{name: "symbol and last price only", header: "Account number,Symbol,Last price\nFID-1,AAPL,150.00\n"},
+		{name: "symbol and description only", header: "Account number,Symbol,Description\nFID-1,AAPL,Apple Inc\n"},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := extractor.Extract(ctx, strings.NewReader(tc.header), meta)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !errors.Is(err, fidelity.ErrMissingRequiredColumns) {
+				t.Errorf("expected ErrMissingRequiredColumns, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestFidelityExtractor_AccountIDPlaceholders(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "placeholders.csv",
+		FileHash:   "hash_placeholders",
+		AccountID:  "FALLBACK-ACC-99",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name       string
+		rawAccount string
+	}{
+		{name: "empty account id", rawAccount: ""},
+		{name: "single dash", rawAccount: "-"},
+		{name: "double dash", rawAccount: "--"},
+		{name: "N/A uppercase", rawAccount: "N/A"},
+		{name: "n/a lowercase", rawAccount: "n/a"},
+		{name: "none lowercase", rawAccount: "none"},
+		{name: "NONE uppercase", rawAccount: "NONE"},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			csvData := fmt.Sprintf(
+				"Account number,Symbol,Current value\n%s,AAPL,1500.00\n",
+				tc.rawAccount,
+			)
+			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err != nil {
+				t.Fatalf("unexpected Extract error for %s: %v", tc.name, err)
+			}
+			positions, err := batch.AsFidelityPositions()
+			if err != nil {
+				t.Fatalf("failed to cast positions: %v", err)
+			}
+			if len(positions) != 1 {
+				t.Fatalf("expected 1 position, got %d", len(positions))
+			}
+			if positions[0].AccountID != "FALLBACK-ACC-99" {
+				t.Errorf("expected fallback AccountID 'FALLBACK-ACC-99', got %q", positions[0].AccountID)
+			}
+		})
+	}
+}
+
+func TestFidelityExtractor_DirectCashTickers(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "direct_cash.csv",
+		FileHash:   "hash_direct_cash",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name        string
+		symbol      string
+		description string
+	}{
+		{name: "FCASH symbol", symbol: "FCASH", description: "HELD IN FCASH"},
+		{name: "CORE symbol", symbol: "CORE", description: "CORE MONEY MARKET"},
+		{name: "fcash lowercase", symbol: "fcash", description: "FIDELITY CASH SWEEP"},
+		{name: "core lowercase", symbol: "core", description: "CORE POSITION"},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			csvData := fmt.Sprintf(
+				"Account number,Symbol,Description,Current value\nFID-1,%s,%s,1000.00\n",
+				tc.symbol, tc.description,
+			)
+			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err != nil {
+				t.Fatalf("unexpected Extract error for %s: %v", tc.name, err)
+			}
+			positions, err := batch.AsFidelityPositions()
+			if err != nil {
+				t.Fatalf("failed to cast positions: %v", err)
+			}
+			if len(positions) != 1 {
+				t.Fatalf("expected 1 position, got %d", len(positions))
+			}
+			if positions[0].Symbol != "CASH" {
+				t.Errorf("expected normalized symbol 'CASH', got %q", positions[0].Symbol)
+			}
+		})
+	}
+}
+
+func TestFidelityExtractor_HeaderOnlyCSV(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "header_only.csv",
+		FileHash:   "hash_header_only",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	csvData := "Account number,Symbol,Current value\n"
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error for header-only CSV: %v", err)
+	}
+	if batch.RecordCount != 0 {
+		t.Errorf("expected RecordCount == 0, got %d", batch.RecordCount)
+	}
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	if len(positions) != 0 {
+		t.Errorf("expected len(positions) == 0, got %d", len(positions))
+	}
+}
+
+func TestFidelityExtractor_MalformedCSVSyntax(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "malformed.csv",
+		FileHash:   "hash_malformed",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	// CSV with unclosed quote in data row
+	csvData := "Account number,Symbol,Current value\nFID-1,\"UNCLOSED QUOTE,150.00\n"
+	extractor := fidelity.NewExtractor()
+	_, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err == nil {
+		t.Fatal("expected error on malformed CSV syntax with unclosed quote, got nil")
+	}
+}
+
+func TestFidelityExtractor_LeadingBlankLines(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "leading_blanks.csv",
+		FileHash:   "hash_blanks",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	csvData := "\n   \n\n\t\nAccount number,Symbol,Current value\nFID-1,AAPL,1500.00\n"
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error on leading blank lines: %v", err)
+	}
+	if batch.RecordCount != 1 {
+		t.Fatalf("expected RecordCount == 1, got %d", batch.RecordCount)
+	}
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	if len(positions) != 1 || positions[0].Symbol != "AAPL" {
+		t.Errorf("expected position AAPL, got %+v", positions)
+	}
+}
+
 type testErrorReader struct {
 	err error
 }
