@@ -353,3 +353,223 @@ func TestBuildLineage(t *testing.T) {
 		t.Errorf("IngestedAt: expected %v, got %v", now, lineage.IngestedAt)
 	}
 }
+
+func TestIsPlaceholderNumeric(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "empty field", input: "", want: true},
+		{name: "whitespace-only field", input: "   ", want: true},
+		{name: "single placeholder dash", input: "-", want: true},
+		{name: "double placeholder dash with surrounding spaces", input: " -- ", want: true},
+		{name: "lowercase n/a", input: "n/a", want: true},
+		{name: "uppercase N/A", input: "N/A", want: true},
+		{name: "zero string", input: "0", want: false},
+		{name: "decimal zero", input: "0.00", want: false},
+		{name: "positive float", input: "123.45", want: false},
+		{name: "negative float", input: "-50.00", want: false},
+		{name: "pending text", input: "pending", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isPlaceholderNumeric(tc.input)
+			if got != tc.want {
+				t.Errorf("isPlaceholderNumeric(%q): expected %v, got %v", tc.input, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFirstNonEmpty(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		inputs []string
+		want   string
+	}{
+		{name: "zero arguments", inputs: nil, want: ""},
+		{name: "single non-empty argument", inputs: []string{"test"}, want: "test"},
+		{name: "multiple empty strings", inputs: []string{"", "   ", "\t"}, want: ""},
+		{name: "fallback chain", inputs: []string{"", "   ", "Second", "Third"}, want: "Second"},
+		{name: "trimming behavior", inputs: []string{"  Valid  "}, want: "Valid"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := firstNonEmpty(tc.inputs...)
+			if got != tc.want {
+				t.Errorf("firstNonEmpty(%v): expected %q, got %q", tc.inputs, tc.want, got)
+			}
+		})
+	}
+}
+
+func testRowReaderGet(t *testing.T, rr rowReader) {
+	t.Helper()
+	if got := rr.get("description"); got != "GROCERY STORE" {
+		t.Errorf("expected 'GROCERY STORE', got %q", got)
+	}
+	if got := rr.get("post date", "posting date"); got != "10/18/2026" {
+		t.Errorf("expected '10/18/2026', got %q", got)
+	}
+	if got := rr.get("nonexistent"); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+	if got := rr.get("overflow"); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func testRowReaderParseDescription(t *testing.T, rr rowReader, lineNum int) {
+	t.Helper()
+	desc, err := rr.parseDescription("description")
+	if err != nil || desc != "GROCERY STORE" {
+		t.Errorf("expected 'GROCERY STORE', got %q, err: %v", desc, err)
+	}
+
+	emptyRR := newRowReader([]string{""}, map[string]int{"description": 0}, lineNum)
+	_, err = emptyRR.parseDescription("description")
+	if err == nil || !strings.Contains(err.Error(), "row 12: transaction description is required") {
+		t.Errorf("expected required error for row 12, got: %v", err)
+	}
+}
+
+func testRowReaderParseAmount(t *testing.T, rr rowReader, lineNum int) {
+	t.Helper()
+	amt, err := rr.parseAmount("amount")
+	if err != nil || amt != -50.00 {
+		t.Errorf("expected -50.00, got %f, err: %v", amt, err)
+	}
+
+	nanRR := newRowReader([]string{"NaN"}, map[string]int{"amount": 0}, lineNum)
+	_, err = nanRR.parseAmount("amount")
+	if err == nil || !strings.Contains(err.Error(), "non-finite number") {
+		t.Errorf("expected non-finite error, got: %v", err)
+	}
+}
+
+func testRowReaderParseBalance(t *testing.T, rr rowReader, lineNum int) {
+	t.Helper()
+	bal, err := rr.parseBalance("balance")
+	if err != nil || bal == nil || *bal != 1234.56 {
+		t.Errorf("expected 1234.56, got %v, err: %v", bal, err)
+	}
+
+	placeholderRR := newRowReader([]string{"-"}, map[string]int{"balance": 0}, lineNum)
+	bal, err = placeholderRR.parseBalance("balance")
+	if err != nil || bal != nil {
+		t.Errorf("expected nil balance without error, got %v, err: %v", bal, err)
+	}
+
+	emptyBalRR := newRowReader([]string{""}, map[string]int{"balance": 0}, lineNum)
+	bal, err = emptyBalRR.parseBalance("balance")
+	if err != nil || bal != nil {
+		t.Errorf("expected nil balance without error, got %v, err: %v", bal, err)
+	}
+
+	invalidRR := newRowReader([]string{"corrupt"}, map[string]int{"balance": 0}, lineNum)
+	_, err = invalidRR.parseBalance("balance")
+	if err == nil || !strings.Contains(err.Error(), "invalid balance") {
+		t.Errorf("expected invalid balance error, got: %v", err)
+	}
+}
+
+func TestRowReader(t *testing.T) {
+	t.Parallel()
+
+	colIndex := map[string]int{
+		"posting date": 0,
+		"description":  1,
+		"amount":       2,
+		"balance":      3,
+		"overflow":     10,
+	}
+	row := []string{
+		"10/18/2026",
+		"GROCERY STORE",
+		"($50.00)",
+		"1,234.56",
+	}
+	const lineNum = 12
+	rr := newRowReader(row, colIndex, lineNum)
+
+	t.Run("get", func(t *testing.T) {
+		t.Parallel()
+		testRowReaderGet(t, rr)
+	})
+
+	t.Run("parseDescription", func(t *testing.T) {
+		t.Parallel()
+		testRowReaderParseDescription(t, rr, lineNum)
+	})
+
+	t.Run("parseAmount", func(t *testing.T) {
+		t.Parallel()
+		testRowReaderParseAmount(t, rr, lineNum)
+	})
+
+	t.Run("parseBalance", func(t *testing.T) {
+		t.Parallel()
+		testRowReaderParseBalance(t, rr, lineNum)
+	})
+}
+
+func BenchmarkRowReader_ParseRow(b *testing.B) {
+	colIndex := map[string]int{
+		"details":         0,
+		"posting date":    1,
+		"description":     2,
+		"amount":          3,
+		"type":            4,
+		"balance":         5,
+		"check or slip #": 6,
+	}
+	row := []string{
+		"DEBIT",
+		"10/18/2026",
+		"WHOLE FOODS MARKET #1024",
+		"-42.75",
+		"POS",
+		"1,582.40",
+		"",
+	}
+	lineNum := 42
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		rr := newRowReader(row, colIndex, lineNum)
+
+		dateStr := rr.get("posting date", "post date")
+		if dateStr == "" {
+			b.Fatal("unexpected empty date")
+		}
+
+		desc, err := rr.parseDescription("description")
+		if err != nil || desc == "" {
+			b.Fatalf("unexpected desc error: %v", err)
+		}
+
+		amt, err := rr.parseAmount("amount")
+		if err != nil || amt != -42.75 {
+			b.Fatalf("unexpected amount error: %v", err)
+		}
+
+		bal, err := rr.parseBalance("balance")
+		if err != nil || bal == nil || *bal != 1582.40 {
+			b.Fatalf("unexpected balance error: %v", err)
+		}
+
+		txType := firstNonEmpty(rr.get("type"), rr.get("details"), "TRANSACTION")
+		if txType != "POS" {
+			b.Fatalf("unexpected txType: %s", txType)
+		}
+	}
+}

@@ -140,18 +140,24 @@ func parseAmount(amtRaw string, lineNum int) (float64, error) {
 	return amount, nil
 }
 
+// isPlaceholderNumeric reports whether val represents an absent or non-numeric placeholder value.
+// It checks for empty strings, dashes ("-", "--"), and "N/A" (case-insensitive).
+func isPlaceholderNumeric(val string) bool {
+	trimmed := strings.TrimSpace(val)
+	return trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a")
+}
+
 // parseBalance parses an optional running balance field.
 // It returns (nil, nil) if the field is empty or contains a placeholder dash/NA.
 //
 //nolint:nilnil // nil balance represents an intentionally absent optional value
 func parseBalance(balRaw string, lineNum int) (*float64, error) {
-	trimmed := strings.TrimSpace(balRaw)
-	if trimmed == "" || trimmed == "-" || trimmed == "--" || strings.EqualFold(trimmed, "n/a") {
+	if isPlaceholderNumeric(balRaw) {
 		return nil, nil
 	}
 
-	balStr := cleanNumeric(trimmed)
-	if balStr == "" || balStr == "-" || balStr == "--" || strings.EqualFold(balStr, "n/a") {
+	balStr := cleanNumeric(balRaw)
+	if isPlaceholderNumeric(balStr) {
 		return nil, nil
 	}
 
@@ -245,4 +251,53 @@ func buildLineage(meta model.FileMetadata, lineNum int) model.SourceLineage {
 		RowNumber:  lineNum,
 		IngestedAt: meta.IngestedAt,
 	}
+}
+
+// rowReader encapsulates row values, header index, and physical line number
+// to provide ergonomic, bounds-checked extraction without heap allocation.
+type rowReader struct {
+	row      []string
+	colIndex map[string]int
+	lineNum  int
+}
+
+// newRowReader constructs a stack-allocated rowReader value.
+func newRowReader(row []string, colIndex map[string]int, lineNum int) rowReader {
+	return rowReader{
+		row:      row,
+		colIndex: colIndex,
+		lineNum:  lineNum,
+	}
+}
+
+// get retrieves the trimmed value for the first matching column alias.
+func (r rowReader) get(aliases ...string) string {
+	return getFieldValue(r.row, r.colIndex, aliases...)
+}
+
+// parseDescription extracts and validates the description field.
+func (r rowReader) parseDescription(aliases ...string) (string, error) {
+	return parseDescription(r.get(aliases...), r.lineNum)
+}
+
+// parseAmount extracts and validates the transaction amount field.
+func (r rowReader) parseAmount(aliases ...string) (float64, error) {
+	return parseAmount(r.get(aliases...), r.lineNum)
+}
+
+// parseBalance extracts and validates an optional running balance field.
+func (r rowReader) parseBalance(aliases ...string) (*float64, error) {
+	return parseBalance(r.get(aliases...), r.lineNum)
+}
+
+// firstNonEmpty returns the first non-whitespace trimmed value among the supplied candidates.
+// If all candidates are blank or whitespace-only, it returns an empty string.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		trimmed := strings.TrimSpace(v)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
