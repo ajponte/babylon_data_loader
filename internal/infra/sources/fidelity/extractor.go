@@ -22,7 +22,10 @@ var (
 	ErrMissingRequiredColumns = errors.New("fidelity CSV missing required header columns")
 )
 
-const defaultPositionsCapacity = 64
+const (
+	defaultPositionsCapacity = 64
+	utf8BOMString            = "\xef\xbb\xbf"
+)
 
 // Extractor implements port.Extractor for Fidelity portfolio positions exports.
 type Extractor struct{}
@@ -43,41 +46,37 @@ func (e *Extractor) Extract(
 	r io.Reader,
 	meta model.FileMetadata,
 ) (*model.IngestionBatch, error) {
-	if err := e.validateParams(ctx, r, meta); err != nil {
+	if err := validateParams(ctx, r, meta); err != nil {
 		return nil, err
 	}
 
-	reader, err := e.newCSVReader(r)
+	reader, err := newCSVReader(r)
 	if err != nil {
 		return nil, err
 	}
 
-	header, err := e.readHeader(ctx, reader)
+	header, err := readHeader(ctx, reader)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return e.makeBatch(meta, []model.FidelityPosition{})
+			return makeBatch(meta, []model.FidelityPosition{})
 		}
 		return nil, err
 	}
 
-	colIndex, err := e.parseAndValidateHeader(header)
+	colIndex := buildColumnIndex(header)
+	if valErr := validateHeaderSignatures(colIndex); valErr != nil {
+		return nil, valErr
+	}
+
+	positions, err := parsePositions(ctx, reader, colIndex, meta)
 	if err != nil {
 		return nil, err
 	}
 
-	positions, err := e.parsePositions(ctx, reader, colIndex, meta)
-	if err != nil {
-		return nil, err
-	}
-
-	return e.makeBatch(meta, positions)
+	return makeBatch(meta, positions)
 }
 
-func (e *Extractor) validateParams(
-	ctx context.Context,
-	r io.Reader,
-	meta model.FileMetadata,
-) error {
+func validateParams(ctx context.Context, r io.Reader, meta model.FileMetadata) error {
 	if ctx == nil {
 		return errors.New("context cannot be nil")
 	}
@@ -93,7 +92,7 @@ func (e *Extractor) validateParams(
 	return nil
 }
 
-func (e *Extractor) newCSVReader(r io.Reader) (*csv.Reader, error) {
+func newCSVReader(r io.Reader) (*csv.Reader, error) {
 	br := bufio.NewReader(r)
 	if err := stripUTF8BOM(br); err != nil {
 		return nil, err
@@ -106,10 +105,7 @@ func (e *Extractor) newCSVReader(r io.Reader) (*csv.Reader, error) {
 	return reader, nil
 }
 
-func (e *Extractor) readHeader(
-	ctx context.Context,
-	reader *csv.Reader,
-) ([]string, error) {
+func readHeader(ctx context.Context, reader *csv.Reader) ([]string, error) {
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -127,29 +123,29 @@ func (e *Extractor) readHeader(
 	}
 }
 
-func (e *Extractor) parseAndValidateHeader(header []string) (map[string]int, error) {
+func buildColumnIndex(header []string) map[string]int {
 	colIndex := make(map[string]int, len(header))
 	for i, col := range header {
-		cleanCol := strings.TrimSpace(strings.TrimPrefix(col, "\xef\xbb\xbf"))
+		cleanCol := strings.TrimSpace(strings.TrimPrefix(col, utf8BOMString))
 		colIndex[strings.ToLower(cleanCol)] = i
 	}
+	return colIndex
+}
 
-	// Enforce required column signatures for Fidelity portfolio positions
+func validateHeaderSignatures(colIndex map[string]int) error {
 	requiredSignatures := [][]string{
 		{"symbol", "ticker"},
 		{"current value", "market value", "current balance"},
 	}
-
 	for _, sig := range requiredSignatures {
 		if _, ok := findColumn(colIndex, sig...); !ok {
-			return nil, fmt.Errorf("%w (expected one of %v)", ErrMissingRequiredColumns, sig)
+			return fmt.Errorf("%w (expected one of %v)", ErrMissingRequiredColumns, sig)
 		}
 	}
-
-	return colIndex, nil
+	return nil
 }
 
-func (e *Extractor) parsePositions(
+func parsePositions(
 	ctx context.Context,
 	reader *csv.Reader,
 	colIndex map[string]int,
@@ -159,12 +155,12 @@ func (e *Extractor) parsePositions(
 	parser := newRowParser(colIndex, meta)
 
 	for {
-		row, lineNum, eof, err := e.readNextRow(ctx, reader)
+		row, lineNum, err := readNextRow(ctx, reader)
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			return nil, err
-		}
-		if eof {
-			break
 		}
 
 		pos, ok, parseErr := parser.parse(row, lineNum)
@@ -179,24 +175,21 @@ func (e *Extractor) parsePositions(
 	return positions, nil
 }
 
-func (e *Extractor) readNextRow(
-	ctx context.Context,
-	reader *csv.Reader,
-) ([]string, int, bool, error) {
+func readNextRow(ctx context.Context, reader *csv.Reader) ([]string, int, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, 0, false, ctxErr
+		return nil, 0, ctxErr
 	}
 
 	row, err := reader.Read()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return nil, 0, true, nil
+			return nil, 0, io.EOF
 		}
-		return nil, 0, false, fmt.Errorf("failed to read Fidelity CSV row: %w", err)
+		return nil, 0, fmt.Errorf("failed to read Fidelity CSV row: %w", err)
 	}
 
 	lineNum, _ := reader.FieldPos(0)
-	return row, lineNum, false, nil
+	return row, lineNum, nil
 }
 
 func resolveBatchAccountID(fallbackID string, positions []model.FidelityPosition) string {
@@ -215,10 +208,7 @@ func resolveBatchAccountID(fallbackID string, positions []model.FidelityPosition
 	return firstID
 }
 
-func (e *Extractor) makeBatch(
-	meta model.FileMetadata,
-	positions []model.FidelityPosition,
-) (*model.IngestionBatch, error) {
+func makeBatch(meta model.FileMetadata, positions []model.FidelityPosition) (*model.IngestionBatch, error) {
 	batch := &model.IngestionBatch{
 		Destination: model.DestFidelityPosition,
 		AccountID:   resolveBatchAccountID(meta.AccountID, positions),
@@ -237,7 +227,7 @@ func (e *Extractor) makeBatch(
 }
 
 func stripUTF8BOM(br *bufio.Reader) error {
-	bom := []byte{0xef, 0xbb, 0xbf}
+	bom := []byte(utf8BOMString)
 	peekBytes, err := br.Peek(len(bom))
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
