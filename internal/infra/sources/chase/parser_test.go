@@ -765,3 +765,305 @@ func BenchmarkRowReader_ParseRow(b *testing.B) {
 		}
 	}
 }
+
+func TestIsPlaceholderDate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "empty string", input: "", want: true},
+		{name: "whitespace only", input: "   ", want: true},
+		{name: "single dash", input: "-", want: true},
+		{name: "double dash", input: "--", want: true},
+		{name: "lowercase n/a", input: "n/a", want: true},
+		{name: "uppercase N/A", input: "N/A", want: true},
+		{name: "lowercase pending", input: "pending", want: true},
+		{name: "uppercase PENDING", input: "PENDING", want: true},
+		{name: "titlecase Pending", input: "Pending", want: true},
+		{name: "pending with whitespace", input: "  pending  ", want: true},
+		{name: "valid slash date", input: "10/18/2026", want: false},
+		{name: "valid iso date", input: "2026-10-18", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isPlaceholderDate(tc.input)
+			if got != tc.want {
+				t.Errorf("isPlaceholderDate(%q): expected %v, got %v", tc.input, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestResolveCreditCardDate(t *testing.T) {
+	t.Parallel()
+	const lineNum = 7
+
+	tests := []struct {
+		name      string
+		row       []string
+		colIndex  map[string]int
+		wantDate  string
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:     "post date present and valid",
+			row:      []string{"10/18/2026", "10/17/2026"},
+			colIndex: map[string]int{"post date": 0, "transaction date": 1},
+			wantDate: "2026-10-18",
+		},
+		{
+			name:     "post date pending falls back to transaction date",
+			row:      []string{"pending", "10/17/2026"},
+			colIndex: map[string]int{"post date": 0, "transaction date": 1},
+			wantDate: "2026-10-17",
+		},
+		{
+			name:     "post date placeholder dash falls back to transaction date",
+			row:      []string{"-", "10/17/2026"},
+			colIndex: map[string]int{"post date": 0, "transaction date": 1},
+			wantDate: "2026-10-17",
+		},
+		{
+			name:      "missing both post date and transaction date returns error",
+			row:       []string{"pending", "-"},
+			colIndex:  map[string]int{"post date": 0, "transaction date": 1},
+			wantErr:   true,
+			errSubstr: "row 7: missing both post date and transaction date",
+		},
+		{
+			name:      "corrupted date returns parse error with line number",
+			row:       []string{"invalid-date"},
+			colIndex:  map[string]int{"post date": 0},
+			wantErr:   true,
+			errSubstr: "invalid date format",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rr := newRowReader(tc.row, tc.colIndex, lineNum)
+			got, err := resolveCreditCardDate(rr)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Format("2006-01-02") != tc.wantDate {
+				t.Errorf("expected %s, got %v", tc.wantDate, got)
+			}
+		})
+	}
+}
+
+func testParseCheckingRowStandard(t *testing.T, meta model.FileMetadata, colIndex map[string]int) {
+	t.Helper()
+	row := []string{"10/18/2026", "CHECK PAYMENT", "-150.00", "CHECK", "2,450.00", "1001", "DEBIT"}
+	tx, err := parseCheckingRow(row, colIndex, 10, meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tx.PostingDate.Format("2006-01-02") != "2026-10-18" {
+		t.Errorf("expected 2026-10-18, got %v", tx.PostingDate)
+	}
+	if tx.Description != "CHECK PAYMENT" {
+		t.Errorf("expected 'CHECK PAYMENT', got %q", tx.Description)
+	}
+	if tx.Amount != -150.00 {
+		t.Errorf("expected -150.00, got %f", tx.Amount)
+	}
+	if tx.Type != "CHECK" {
+		t.Errorf("expected 'CHECK', got %q", tx.Type)
+	}
+	if tx.Balance == nil || *tx.Balance != 2450.00 {
+		t.Errorf("expected 2450.00, got %v", tx.Balance)
+	}
+	if tx.CheckOrSlipNum != "1001" {
+		t.Errorf("expected '1001', got %q", tx.CheckOrSlipNum)
+	}
+	if tx.Details != "DEBIT" {
+		t.Errorf("expected 'DEBIT', got %q", tx.Details)
+	}
+	if tx.Lineage.RowNumber != 10 {
+		t.Errorf("expected row number 10, got %d", tx.Lineage.RowNumber)
+	}
+}
+
+func testParseCheckingRowTypeFallbacks(t *testing.T, meta model.FileMetadata, colIndex map[string]int) {
+	t.Helper()
+	rowATM := []string{"10/18/2026", "ATM WITHDRAWAL", "-100.00", "", "2,350.00", "", "ATM"}
+	txATM, err := parseCheckingRow(rowATM, colIndex, 11, meta)
+	if err != nil || txATM.Type != "ATM" {
+		t.Errorf("expected 'ATM', got tx.Type=%q, err=%v", txATM.Type, err)
+	}
+
+	rowDefault := []string{"10/18/2026", "MISC TRANSACTION", "-50.00", "", "2,300.00", "", ""}
+	txDef, err := parseCheckingRow(rowDefault, colIndex, 12, meta)
+	if err != nil || txDef.Type != "TRANSACTION" {
+		t.Errorf("expected 'TRANSACTION', got tx.Type=%q, err=%v", txDef.Type, err)
+	}
+}
+
+func testParseCheckingRowBalanceAndAliases(t *testing.T, meta model.FileMetadata) {
+	t.Helper()
+	colIndex := map[string]int{
+		"posting date": 0, "description": 1, "amount": 2, "type": 3, "balance": 4,
+	}
+	rowNoBal := []string{"10/18/2026", "MISC", "-50.00", "DEBIT", ""}
+	txNoBal, err := parseCheckingRow(rowNoBal, colIndex, 13, meta)
+	if err != nil || txNoBal.Balance != nil {
+		t.Errorf("expected nil balance, got %v, err=%v", txNoBal.Balance, err)
+	}
+
+	aliasColIndex := map[string]int{
+		"posting date": 0, "description": 1, "amount": 2, "check or slip num": 3,
+	}
+	rowAlias := []string{"10/18/2026", "CHECK", "-25.00", "2002"}
+	txAlias, err := parseCheckingRow(rowAlias, aliasColIndex, 14, meta)
+	if err != nil || txAlias.CheckOrSlipNum != "2002" {
+		t.Errorf("expected '2002', got %q, err=%v", txAlias.CheckOrSlipNum, err)
+	}
+}
+
+func testParseCheckingRowValidationError(t *testing.T, colIndex map[string]int) {
+	t.Helper()
+	invalidMeta := model.FileMetadata{AccountID: ""}
+	row := []string{"10/18/2026", "VALID DESC", "-50.00", "DEBIT", "", "", ""}
+	_, err := parseCheckingRow(row, colIndex, 15, invalidMeta)
+	if err == nil || !strings.Contains(err.Error(), "row 15 validation error:") {
+		t.Errorf("expected 'row 15 validation error:', got: %v", err)
+	}
+}
+
+func TestParseCheckingRow(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "test_checking.csv",
+		FileHash:   "hash123",
+		AccountID:  "acc-chk-001",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	colIndex := map[string]int{
+		"posting date":    0,
+		"description":     1,
+		"amount":          2,
+		"type":            3,
+		"balance":         4,
+		"check or slip #": 5,
+		"details":         6,
+	}
+
+	t.Run("standard", func(t *testing.T) {
+		t.Parallel()
+		testParseCheckingRowStandard(t, meta, colIndex)
+	})
+	t.Run("type fallbacks", func(t *testing.T) {
+		t.Parallel()
+		testParseCheckingRowTypeFallbacks(t, meta, colIndex)
+	})
+	t.Run("balance and aliases", func(t *testing.T) {
+		t.Parallel()
+		testParseCheckingRowBalanceAndAliases(t, meta)
+	})
+	t.Run("validation error", func(t *testing.T) {
+		t.Parallel()
+		testParseCheckingRowValidationError(t, colIndex)
+	})
+}
+
+func testParseCreditCardRowStandard(t *testing.T, meta model.FileMetadata, colIndex map[string]int) {
+	t.Helper()
+	row := []string{"10/18/2026", "AIRLINE TICKET", "-350.00", "Travel", "1,200.00", "Travel", "Flight to SFO", "10/17/2026"}
+	tx, err := parseCreditCardRow(row, colIndex, 20, meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tx.PostingDate.Format("2006-01-02") != "2026-10-18" {
+		t.Errorf("expected 2026-10-18, got %v", tx.PostingDate)
+	}
+	if tx.Description != "AIRLINE TICKET" {
+		t.Errorf("expected 'AIRLINE TICKET', got %q", tx.Description)
+	}
+	if tx.Amount != -350.00 {
+		t.Errorf("expected -350.00, got %f", tx.Amount)
+	}
+	if tx.Type != "Travel" {
+		t.Errorf("expected 'Travel', got %q", tx.Type)
+	}
+	if tx.Category != "Travel" {
+		t.Errorf("expected 'Travel', got %q", tx.Category)
+	}
+	if tx.Memo != "Flight to SFO" {
+		t.Errorf("expected 'Flight to SFO', got %q", tx.Memo)
+	}
+	if tx.Balance == nil || *tx.Balance != 1200.00 {
+		t.Errorf("expected 1200.00, got %v", tx.Balance)
+	}
+}
+
+func testParseCreditCardRowFallbacks(t *testing.T, meta model.FileMetadata, colIndex map[string]int) {
+	t.Helper()
+	rowDefaultType := []string{"10/18/2026", "GROCERY", "-50.00", "", "", "", "", "10/17/2026"}
+	txDef, err := parseCreditCardRow(rowDefaultType, colIndex, 21, meta)
+	if err != nil || txDef.Type != "Sale" {
+		t.Errorf("expected 'Sale', got %q, err=%v", txDef.Type, err)
+	}
+
+	rowPending := []string{"pending", "COFFEE SHOP", "-4.50", "Sale", "", "", "", "10/17/2026"}
+	txPending, err := parseCreditCardRow(rowPending, colIndex, 22, meta)
+	if err != nil || txPending.PostingDate.Format("2006-01-02") != "2026-10-17" {
+		t.Errorf("expected 2026-10-17, got %v, err=%v", txPending.PostingDate, err)
+	}
+}
+
+func testParseCreditCardRowValidationError(t *testing.T, colIndex map[string]int) {
+	t.Helper()
+	invalidMeta := model.FileMetadata{AccountID: ""}
+	row := []string{"10/18/2026", "COFFEE", "-4.50", "Sale", "", "", "", "10/17/2026"}
+	_, err := parseCreditCardRow(row, colIndex, 23, invalidMeta)
+	if err == nil || !strings.Contains(err.Error(), "row 23 validation error:") {
+		t.Errorf("expected 'row 23 validation error:', got: %v", err)
+	}
+}
+
+func TestParseCreditCardRow(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "test_credit_card.csv",
+		FileHash:   "hash456",
+		AccountID:  "acc-cc-001",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	colIndex := map[string]int{
+		"post date":        0,
+		"description":      1,
+		"amount":           2,
+		"type":             3,
+		"balance":          4,
+		"category":         5,
+		"memo":             6,
+		"transaction date": 7,
+	}
+
+	t.Run("standard", func(t *testing.T) {
+		t.Parallel()
+		testParseCreditCardRowStandard(t, meta, colIndex)
+	})
+	t.Run("defaults and fallbacks", func(t *testing.T) {
+		t.Parallel()
+		testParseCreditCardRowFallbacks(t, meta, colIndex)
+	})
+	t.Run("validation error", func(t *testing.T) {
+		t.Parallel()
+		testParseCreditCardRowValidationError(t, colIndex)
+	})
+}
