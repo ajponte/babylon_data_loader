@@ -46,11 +46,27 @@ func (e *Extractor) Extract(
 	r io.Reader,
 	meta model.FileMetadata,
 ) (*model.IngestionBatch, error) {
+	ctx, err := validateExtractParams(ctx, r, meta)
+	if err != nil {
+		return nil, err
+	}
+
+	dialect, stream, err := e.classifyStream(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	dest, records, err := parseDialect(ctx, dialect, stream, meta)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildBatch(dest, meta, records)
+}
+
+func validateExtractParams(ctx context.Context, r io.Reader, meta model.FileMetadata) (context.Context, error) {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if err := meta.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid file metadata: %w", err)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
@@ -58,40 +74,91 @@ func (e *Extractor) Extract(
 	if r == nil {
 		return nil, ErrNilReader
 	}
+	if err := meta.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid file metadata: %w", err)
+	}
+	return ctx, nil
+}
+
+func (e *Extractor) classifyStream(ctx context.Context, r io.Reader) (DialectType, io.Reader, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return DialectUnknown, nil, ctxErr
+	}
 
 	dialect, stream, err := e.classifier.Classify(ctx, r)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return DialectUnknown, nil, ctxErr
 		}
-		return nil, fmt.Errorf("failed to classify chase statement dialect: %w", err)
+		if errors.Is(err, context.Canceled) {
+			return DialectUnknown, nil, context.Canceled
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return DialectUnknown, nil, context.DeadlineExceeded
+		}
+		return DialectUnknown, nil, fmt.Errorf("failed to classify chase statement dialect: %w", err)
 	}
 
-	var (
-		records []model.ChaseTransaction
-		dest    model.Destination
-	)
+	if stream == nil {
+		return DialectUnknown, nil, fmt.Errorf("classifier returned nil reader stream for dialect %s", dialect)
+	}
 
+	return dialect, stream, nil
+}
+
+type dialectParser func(ctx context.Context, r io.Reader, meta model.FileMetadata) ([]model.ChaseTransaction, error)
+
+type dialectRoute struct {
+	destination model.Destination
+	parser      dialectParser
+}
+
+func resolveDialectRoute(dialect DialectType) (dialectRoute, bool) {
 	switch dialect {
 	case DialectChecking:
-		dest = model.DestChaseChecking
-		records, err = parseChecking(ctx, stream, meta)
+		return dialectRoute{
+			destination: model.DestChaseChecking,
+			parser:      parseChecking,
+		}, true
 	case DialectCreditCard:
-		dest = model.DestChaseCreditCard
-		records, err = parseCreditCard(ctx, stream, meta)
+		return dialectRoute{
+			destination: model.DestChaseCreditCard,
+			parser:      parseCreditCard,
+		}, true
 	case DialectUnknown:
-		return nil, fmt.Errorf("%w: %s", ErrUnknownDialect, dialect)
+		return dialectRoute{}, false
 	default:
-		return nil, fmt.Errorf("%w: unrecognized dialect %q", ErrUnknownDialect, dialect)
+		return dialectRoute{}, false
 	}
+}
 
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+func parseDialect(
+	ctx context.Context,
+	dialect DialectType,
+	stream io.Reader,
+	meta model.FileMetadata,
+) (model.Destination, []model.ChaseTransaction, error) {
+	route, ok := resolveDialectRoute(dialect)
+	if !ok {
+		if dialect == DialectUnknown {
+			return "", nil, fmt.Errorf("%w: %s", ErrUnknownDialect, dialect)
 		}
-		return nil, err
+		return "", nil, fmt.Errorf("%w: unrecognized dialect %q", ErrUnknownDialect, dialect)
 	}
 
+	records, err := route.parser(ctx, stream, meta)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return route.destination, records, nil
+}
+
+func buildBatch(
+	dest model.Destination,
+	meta model.FileMetadata,
+	records []model.ChaseTransaction,
+) (*model.IngestionBatch, error) {
 	batch := &model.IngestionBatch{
 		Destination: dest,
 		AccountID:   meta.AccountID,
