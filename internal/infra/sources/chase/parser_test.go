@@ -770,6 +770,134 @@ func BenchmarkRowReader_ParseRow(b *testing.B) {
 	}
 }
 
+func verifyDirectParseIteration(row []string, colIndex map[string]int, lineNum int) bool {
+	dateStr := getFieldValue(row, colIndex, "posting date", "post date")
+	if dateStr == "" {
+		return false
+	}
+	postingDate, err := parseDate(dateStr)
+	if err != nil || postingDate.IsZero() {
+		return false
+	}
+
+	desc, err := parseDescription(getFieldValue(row, colIndex, "description"), lineNum)
+	if err != nil || desc == "" {
+		return false
+	}
+
+	amt, err := parseAmount(getFieldValue(row, colIndex, "amount"), lineNum)
+	if err != nil || amt != -42.75 {
+		return false
+	}
+
+	bal, err := parseBalance(getFieldValue(row, colIndex, "balance"), lineNum)
+	if err != nil || bal == nil || *bal != 1582.40 {
+		return false
+	}
+
+	txType := firstNonEmpty(
+		getFieldValue(row, colIndex, "type"),
+		getFieldValue(row, colIndex, "details"),
+		"TRANSACTION",
+	)
+	return txType == "POS"
+}
+
+func BenchmarkDirect_ParseRow_Parallel(b *testing.B) {
+	colIndex := map[string]int{
+		"details":         0,
+		"posting date":    1,
+		"description":     2,
+		"amount":          3,
+		"type":            4,
+		"balance":         5,
+		"check or slip #": 6,
+	}
+	row := []string{
+		"DEBIT",
+		"10/18/2026",
+		"WHOLE FOODS MARKET #1024",
+		"-42.75",
+		"POS",
+		"1,582.40",
+		"",
+	}
+	const lineNum = 42
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if !verifyDirectParseIteration(row, colIndex, lineNum) {
+				b.Errorf("direct parse row verification failed")
+				return
+			}
+		}
+	})
+}
+
+func verifyRowReaderParseIteration(row []string, colIndex map[string]int, lineNum int) bool {
+	rr := newRowReader(row, colIndex, lineNum)
+
+	postingDate, err := rr.parseDate("posting date", "post date")
+	if err != nil || postingDate.IsZero() {
+		return false
+	}
+
+	desc, err := rr.parseDescription("description")
+	if err != nil || desc == "" {
+		return false
+	}
+
+	amt, err := rr.parseAmount("amount")
+	if err != nil || amt != -42.75 {
+		return false
+	}
+
+	bal, err := rr.parseBalance("balance")
+	if err != nil || bal == nil || *bal != 1582.40 {
+		return false
+	}
+
+	txType := firstNonEmpty(rr.get("type"), rr.get("details"), "TRANSACTION")
+	return txType == "POS"
+}
+
+func BenchmarkRowReader_ParseRow_Parallel(b *testing.B) {
+	colIndex := map[string]int{
+		"details":         0,
+		"posting date":    1,
+		"description":     2,
+		"amount":          3,
+		"type":            4,
+		"balance":         5,
+		"check or slip #": 6,
+	}
+	row := []string{
+		"DEBIT",
+		"10/18/2026",
+		"WHOLE FOODS MARKET #1024",
+		"-42.75",
+		"POS",
+		"1,582.40",
+		"",
+	}
+	const lineNum = 42
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if !verifyRowReaderParseIteration(row, colIndex, lineNum) {
+				b.Errorf("row reader parse verification failed")
+				return
+			}
+		}
+	})
+}
+
 func TestIsPlaceholderDate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

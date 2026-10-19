@@ -1170,6 +1170,7 @@ func BenchmarkChaseExtractor_Extract_Checking(b *testing.B) {
 	ctx := context.Background()
 	meta := testFileMetadata("chk-bench", "checking.csv")
 
+	b.SetBytes(int64(len(mockCheckingCSVFixture)))
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -1186,6 +1187,7 @@ func BenchmarkChaseExtractor_Extract_CreditCard(b *testing.B) {
 	ctx := context.Background()
 	meta := testFileMetadata("card-bench", "credit_card.csv")
 
+	b.SetBytes(int64(len(mockCreditCardCSVFixture)))
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -1224,6 +1226,7 @@ func BenchmarkChaseExtractor_Extract_Parallel(b *testing.B) {
 	metaChk := testFileMetadata("chk-bench-p", "checking.csv")
 	metaCC := testFileMetadata("card-bench-p", "credit_card.csv")
 
+	b.SetBytes(int64((len(mockCheckingCSVFixture) + len(mockCreditCardCSVFixture)) / 2))
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -1278,6 +1281,26 @@ func BenchmarkChaseExtractor_Extract_PreCanceledContext(b *testing.B) {
 	}
 }
 
+func BenchmarkChaseExtractor_Extract_PreCanceledContext_Parallel(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	meta := testFileMetadata("chk-bench-canceled-p", "checking.csv")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, err := extractor.Extract(canceledCtx, strings.NewReader(mockCheckingCSVFixture), meta)
+			if err == nil {
+				b.Errorf("expected error with pre-canceled context in parallel")
+				return
+			}
+		}
+	})
+}
+
 func BenchmarkChaseExtractor_Extract_EmptyStream(b *testing.B) {
 	extractor := chase.NewExtractor(nil)
 	ctx := context.Background()
@@ -1309,6 +1332,7 @@ func BenchmarkChaseExtractor_Extract_HighVolume_500Rows(b *testing.B) {
 	meta := testFileMetadata("chk-bench-500", "checking_500.csv")
 	csvData := generateSyntheticCheckingCSV(500)
 
+	b.SetBytes(int64(len(csvData)))
 	b.ReportAllocs()
 	b.ResetTimer()
 
@@ -1318,4 +1342,25 @@ func BenchmarkChaseExtractor_Extract_HighVolume_500Rows(b *testing.B) {
 			b.Fatalf("unexpected extract error in high volume: %v", err)
 		}
 	}
+}
+
+func BenchmarkChaseExtractor_Extract_HighVolume_Parallel(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	ctx := context.Background()
+	meta := testFileMetadata("chk-bench-500-p", "checking_500.csv")
+	csvData := generateSyntheticCheckingCSV(500)
+
+	b.SetBytes(int64(len(csvData)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err != nil || batch == nil || batch.RecordCount != 500 {
+				b.Errorf("unexpected extract error in high volume parallel: %v", err)
+				return
+			}
+		}
+	})
 }

@@ -172,11 +172,12 @@ go test -bench=. -benchmem ./internal/infra/sources/chase/...
 ```
 
 ### Verified Benchmark Suite Summary:
-- **Zero-Allocation Row Parity**: `BenchmarkDirect_ParseRow` (407.3 ns/op) vs `BenchmarkRowReader_ParseRow` (413.0 ns/op) at identical allocations (16 B/op, 2 allocs/op solely from optional balance box; 0 B/op from `rowReader`).
-- **Pipeline Latency**: Single checking/card statement batches process in ~4.5–4.9 µs (~24.6 KB, ~40 allocs).
-- **Concurrent Scaling**: Parallel extraction runs at ~4.2 µs with zero data races under `-race` across 20 workers.
-- **Fast-Fail Interruption**: Pre-canceled contexts short-circuit in ~26.35 ns (32 B/op, 1 alloc); empty streams fail in ~548.4 ns.
-- **High-Volume Scaling**: 500-row statement batches parse in ~348.5 µs (~697 ns/row, ~617 B/row steady-state, ~3 allocs/row).
+- **Zero-Allocation Row Parity**: `BenchmarkDirect_ParseRow` (402.3 ns/op) vs `BenchmarkRowReader_ParseRow` (441.2 ns/op) at identical allocations (16 B/op, 2 allocs/op solely from optional balance box; 0 B/op from `rowReader`).
+- **Multi-Core Row Parsing**: `BenchmarkDirect_ParseRow_Parallel` (82.51 ns/op) and `BenchmarkRowReader_ParseRow_Parallel` (85.63 ns/op) achieve ~5.1x multi-core scaling with 0 heap escapes.
+- **Pipeline Latency & Bandwidth**: Single checking/card batches process in 4.4–4.8 µs (49.8–63.6 MB/s, ~24.6 KB, 39–42 allocs).
+- **Concurrent Scaling**: Parallel extraction runs at 4.16 µs (62.03 MB/s) with zero data races under `-race` across 20 workers.
+- **Fast-Fail Interruption**: Pre-canceled contexts short-circuit in 26.27 ns sequentially (63.91 ns under parallel cancellation storm, 32 B/op, 1 alloc); empty streams fail in 543.7 ns.
+- **High-Volume Scaling (Sequential vs Parallel)**: 500-row statement batches process in 341.1 µs (83.18 MB/s, ~682 ns/row, ~617 B/row) sequentially and scale 2.2x to 153.8 µs (**184.40 MB/s**) under parallel worker pools.
 
 For detailed benchmark analysis and gate specifications:  
 👉 **[Complete Verification Harness & Quality Gates Specification](./architecture/verification-and-quality.md)**

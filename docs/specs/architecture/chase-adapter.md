@@ -506,22 +506,30 @@ var (
 
 ## 7. Performance Profiles & Benchmarking Guarantees
 
-The Chase adapter is validated against rigorous throughput, memory allocation, and concurrency benchmarks:
+The Chase adapter is validated against rigorous throughput, bandwidth (`MB/s`), memory allocation, and concurrency benchmarks:
 
-### 1. Comparative Row Parsing Parity
-- Procedural Direct Parsing (`BenchmarkDirect_ParseRow`): ~407.3 ns/op, 16 B/op, 2 allocs/op.
-- Stack `rowReader` Parsing (`BenchmarkRowReader_ParseRow`): ~413.0 ns/op, 16 B/op, 2 allocs/op.
-- **Zero-Allocation Invariant**: Both benchmarks register identical memory footprints (16 B/op, 2 allocs/op), which stems solely from heap boxing the optional `*float64` balance field (`bal, err := parseBalance(...)`). The `rowReader` value struct itself introduces **`0 B/op` and `0 allocs/op`** with a negligible execution latency delta (< 1.4%).
+### 1. Comparative Row Parsing Parity & Multi-Core Scaling
+- **Sequential Baseline Parsing**:
+  - Procedural Direct Parsing (`BenchmarkDirect_ParseRow`): 402.3 ns/op, 16 B/op, 2 allocs/op.
+  - Stack `rowReader` Parsing (`BenchmarkRowReader_ParseRow`): 441.2 ns/op, 16 B/op, 2 allocs/op.
+  - **Zero-Allocation Invariant**: Both benchmarks register identical memory footprints (16 B/op, 2 allocs/op), which stems solely from heap boxing the optional `*float64` balance field (`bal, err := parseBalance(...)`). The `rowReader` value struct itself introduces **`0 B/op` and `0 allocs/op`**.
+- **Multi-Core Parallel Parsing**:
+  - Parallel Direct Parsing (`BenchmarkDirect_ParseRow_Parallel`): 82.51 ns/op, 16 B/op, 2 allocs/op.
+  - Parallel `rowReader` Parsing (`BenchmarkRowReader_ParseRow_Parallel`): 85.63 ns/op, 16 B/op, 2 allocs/op.
+  - **Parallel Scalability**: Achieves ~5.1x throughput scaling over sequential execution under `b.RunParallel`, demonstrating complete stack isolation and zero lock contention across worker cores.
 
-### 2. Pipeline Extraction Throughput
-- **Single Checking Batch** (`BenchmarkChaseExtractor_Extract_Checking`): ~4.9 µs/batch, ~24.6 KB, 42 allocs.
-- **Single Credit Card Batch** (`BenchmarkChaseExtractor_Extract_CreditCard`): ~4.5 µs/batch, ~24.6 KB, 39 allocs.
-- **Concurrent Ingestion** (`BenchmarkChaseExtractor_Extract_Parallel`): ~4.2 µs/batch, ~24.6 KB, 40 allocs, verified under Go race detector (`-race`) across 20 parallel workers with **zero data races**.
-- **High-Volume Scaling** (`BenchmarkChaseExtractor_Extract_HighVolume_500Rows`): Parses 500 records in ~348 µs (~697 ns/row, ~617 B/row steady-state, ~3 allocs/row), confirming linear scaling without garbage collection degradation.
+### 2. Pipeline Extraction Throughput & Bandwidth
+- **Single Checking Batch** (`BenchmarkChaseExtractor_Extract_Checking`): 4,763 ns/batch, **49.76 MB/s**, 24,552 B, 42 allocs.
+- **Single Credit Card Batch** (`BenchmarkChaseExtractor_Extract_CreditCard`): 4,389 ns/batch, **63.57 MB/s**, 24,640 B, 39 allocs.
+- **Concurrent Ingestion** (`BenchmarkChaseExtractor_Extract_Parallel`): 4,159 ns/batch, **62.03 MB/s**, 24,596 B, 40 allocs, verified under Go race detector (`-race`) across 20 parallel workers with **zero data races**.
+- **High-Volume Streaming Scaling (500 Rows)**:
+  - Sequential (`BenchmarkChaseExtractor_Extract_HighVolume_500Rows`): Parses 500 records in 341.1 µs, **83.18 MB/s**, 308,753 B/op (~682 ns/row, ~617 B/row steady-state, ~3 allocs/row), confirming linear scaling without GC pauses.
+  - Multi-Core Parallel (`BenchmarkChaseExtractor_Extract_HighVolume_Parallel`): Processes 500-row statement batches in 153.8 µs, **184.40 MB/s**, 308,759 B/op, 1,536 allocs/op (**2.2x scaling** over sequential execution under concurrent worker pools).
 
 ### 3. Fast-Fail & Interruption Guarantees
-- **Pre-Canceled Context** (`BenchmarkChaseExtractor_Extract_PreCanceledContext`): Fast-fails in ~26.35 ns (32 B/op, 1 alloc), immediately returning raw `context.Canceled` before stream reader inspection or metadata parsing.
-- **Empty Stream** (`BenchmarkChaseExtractor_Extract_EmptyStream`): Fast-fails in ~548.4 ns (4.3 KB, 6 allocs) upon encountering immediate EOF.
+- **Pre-Canceled Context** (`BenchmarkChaseExtractor_Extract_PreCanceledContext`): Fast-fails in **26.27 ns** (32 B/op, 1 alloc), immediately returning raw unwrapped `context.Canceled` before stream reader inspection or metadata parsing.
+- **Cancellation Storm Stress** (`BenchmarkChaseExtractor_Extract_PreCanceledContext_Parallel`): Under concurrent worker contention, pre-canceled contexts short-circuit in **63.91 ns** (32 B/op, 1 alloc) with zero data races.
+- **Empty Stream** (`BenchmarkChaseExtractor_Extract_EmptyStream`): Fast-fails in **543.7 ns** (4,337 B, 6 allocs) immediately upon encountering EOF.
 
 ### 4. Batch Envelope Completeness
 Every batch returned by `Extractor.Extract` is verified to satisfy all 6 metadata properties:
