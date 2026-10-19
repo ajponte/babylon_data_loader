@@ -735,7 +735,7 @@ func BenchmarkRowReader_ParseRow(b *testing.B) {
 		"1,582.40",
 		"",
 	}
-	lineNum := 42
+	const lineNum = 42
 
 	b.ReportAllocs()
 	b.ResetTimer()

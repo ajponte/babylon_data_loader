@@ -47,8 +47,17 @@ CREDIT,10/16/2026,"PAYROLL DIRECT DEP",1500.00,ACH,3914.50,
 	if batch.Destination != model.DestChaseChecking {
 		t.Errorf("expected destination %q, got %q", model.DestChaseChecking, batch.Destination)
 	}
-	if batch.AccountID != "chk-999" {
-		t.Errorf("expected account ID 'chk-999', got %q", batch.AccountID)
+	if batch.AccountID != meta.AccountID {
+		t.Errorf("expected account ID %q, got %q", meta.AccountID, batch.AccountID)
+	}
+	if batch.SourceFile != meta.FileName {
+		t.Errorf("expected source file %q, got %q", meta.FileName, batch.SourceFile)
+	}
+	if batch.FileHash != meta.FileHash {
+		t.Errorf("expected file hash %q, got %q", meta.FileHash, batch.FileHash)
+	}
+	if !batch.IngestedAt.Equal(meta.IngestedAt) {
+		t.Errorf("expected ingested at %v, got %v", meta.IngestedAt, batch.IngestedAt)
 	}
 	if batch.RecordCount != 2 {
 		t.Fatalf("expected 2 records, got %d", batch.RecordCount)
@@ -100,6 +109,18 @@ func TestChaseExtractor_Extract_CreditCardInline(t *testing.T) {
 
 	if batch.Destination != model.DestChaseCreditCard {
 		t.Errorf("expected destination %q, got %q", model.DestChaseCreditCard, batch.Destination)
+	}
+	if batch.AccountID != meta.AccountID {
+		t.Errorf("expected account ID %q, got %q", meta.AccountID, batch.AccountID)
+	}
+	if batch.SourceFile != meta.FileName {
+		t.Errorf("expected source file %q, got %q", meta.FileName, batch.SourceFile)
+	}
+	if batch.FileHash != meta.FileHash {
+		t.Errorf("expected file hash %q, got %q", meta.FileHash, batch.FileHash)
+	}
+	if !batch.IngestedAt.Equal(meta.IngestedAt) {
+		t.Errorf("expected ingested at %v, got %v", meta.IngestedAt, batch.IngestedAt)
 	}
 	if batch.RecordCount != 2 {
 		t.Fatalf("expected 2 records, got %d", batch.RecordCount)
@@ -1048,20 +1069,21 @@ func TestChaseExtractor_NilContext(t *testing.T) {
 }
 
 type mockClassifier struct {
-	dialect chase.DialectType
-	stream  io.Reader
-	err     error
+	dialect         chase.DialectType
+	stream          io.Reader
+	err             error
+	returnNilStream bool
 }
 
 func (m *mockClassifier) Classify(_ context.Context, r io.Reader) (chase.DialectType, io.Reader, error) {
 	if m.err != nil {
 		return chase.DialectUnknown, nil, m.err
 	}
+	if m.returnNilStream {
+		return m.dialect, nil, nil
+	}
 	if m.stream != nil {
 		return m.dialect, m.stream, nil
-	}
-	if m.dialect == chase.DialectChecking {
-		return m.dialect, nil, nil
 	}
 	return m.dialect, r, nil
 }
@@ -1121,7 +1143,10 @@ func TestChaseExtractor_ClassifierAndRoutingEdgeCases(t *testing.T) {
 
 	t.Run("classifier nil stream returns error", func(t *testing.T) {
 		t.Parallel()
-		customClassifier := &mockClassifier{dialect: chase.DialectChecking}
+		customClassifier := &mockClassifier{
+			dialect:         chase.DialectChecking,
+			returnNilStream: true,
+		}
 		extractor := chase.NewExtractor(customClassifier)
 
 		_, err := extractor.Extract(context.Background(), strings.NewReader("some,data\n"), meta)
@@ -1192,8 +1217,68 @@ func BenchmarkChaseExtractor_Extract_Parallel(b *testing.B) {
 			i++
 			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 			if err != nil || batch == nil {
-				b.Fatalf("unexpected extract error in parallel: %v", err)
+				b.Errorf("unexpected extract error in parallel: %v", err)
+				return
 			}
 		}
 	})
+}
+
+func BenchmarkChaseExtractor_Extract_PreCanceledContext(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	meta := testFileMetadata("chk-bench-canceled", "checking.csv")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		_, err := extractor.Extract(canceledCtx, strings.NewReader(mockCheckingCSVFixture), meta)
+		if err == nil {
+			b.Fatal("expected error with pre-canceled context")
+		}
+	}
+}
+
+func BenchmarkChaseExtractor_Extract_EmptyStream(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	ctx := context.Background()
+	meta := testFileMetadata("chk-bench-empty", "empty.csv")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		_, err := extractor.Extract(ctx, strings.NewReader(""), meta)
+		if err == nil {
+			b.Fatal("expected error with empty stream")
+		}
+	}
+}
+
+func generateSyntheticCheckingCSV(rows int) string {
+	var sb strings.Builder
+	sb.WriteString("Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n")
+	for i := range rows {
+		fmt.Fprintf(&sb, "DEBIT,10/18/2026,\"TRANSACTION %d\",-%d.50,DEBIT,%d.00,\n", i, (i%50)+1, 10000-i)
+	}
+	return sb.String()
+}
+
+func BenchmarkChaseExtractor_Extract_HighVolume_500Rows(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	ctx := context.Background()
+	meta := testFileMetadata("chk-bench-500", "checking_500.csv")
+	csvData := generateSyntheticCheckingCSV(500)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+		if err != nil || batch == nil || batch.RecordCount != 500 {
+			b.Fatalf("unexpected extract error in high volume: %v", err)
+		}
+	}
 }
