@@ -143,6 +143,7 @@ All architectural decisions, defect remediations, and code review hardening logs
 - **Phase 1 Readability Cleanup (PR #51)**: 9 findings establishing zero-allocation `rowReader` primitives and Unicode dash detection.
 - **Phase 2 Readability Cleanup (PR #52)**: 7 findings establishing ergonomic row parsers and date fallback hardening.
 - **Phase 3 Readability Cleanup (Pipeline & Quality Gates)**: 7 findings establishing the 4-stage pipeline, static strategy router, nil stream protection, and unwrapped context errors.
+- **Phase 4 Readability Cleanup (Benchmarks & Concurrency Hardening)**: 6 findings establishing benchmark concurrency safety (`b.Fatalf` in `RunParallel`), short-circuit fast-fail benchmarks, envelope completeness assertions, mock isolation, and 500-row streaming scaling.
 
 For the complete decision and remediation matrix:  
 👉 **[Complete Architectural Remediation Log](./architecture/remediation-log.md)**
@@ -157,18 +158,25 @@ All source adapters are validated against 5 automated local quality gates:
 # 1. Standard library isolation gate (100% standard library purity)
 go list -f '{{.ImportPath}} -> {{.Imports}}' ./internal/infra/sources/...
 
-# 2. Race detection and statement coverage gate (chase: 95.0%, fidelity: 91.8%, synthetic: 91.1%)
+# 2. Race detection and statement coverage gate (chase: 95.0%, fidelity: 91.8%, synthetic: 91.1%, 0 races)
 go test -v -race -cover ./internal/infra/sources/...
 
-# 3. Static analysis and linter gate (0 issues, zero waivers)
+# 3. Static analysis and linter gate (0 issues, zero waivers, cognitive complexity < 15)
 golangci-lint run ./internal/infra/sources/...
 
 # 4. CI automated test suite
 make test-ci
 
-# 5. Comparative memory allocation benchmark (rowReader vs direct baseline: 16 B/op, 0 from rowReader)
+# 5. Expanded benchmark suite (row allocation parity, fast-fails, and 500-row streaming scaling)
 go test -bench=. -benchmem ./internal/infra/sources/chase/...
 ```
+
+### Verified Benchmark Suite Summary:
+- **Zero-Allocation Row Parity**: `BenchmarkDirect_ParseRow` (407.3 ns/op) vs `BenchmarkRowReader_ParseRow` (413.0 ns/op) at identical allocations (16 B/op, 2 allocs/op solely from optional balance box; 0 B/op from `rowReader`).
+- **Pipeline Latency**: Single checking/card statement batches process in ~4.5–4.9 µs (~24.6 KB, ~40 allocs).
+- **Concurrent Scaling**: Parallel extraction runs at ~4.2 µs with zero data races under `-race` across 20 workers.
+- **Fast-Fail Interruption**: Pre-canceled contexts short-circuit in ~26.35 ns (32 B/op, 1 alloc); empty streams fail in ~548.4 ns.
+- **High-Volume Scaling**: 500-row statement batches parse in ~348.5 µs (~697 ns/row, ~617 B/row steady-state, ~3 allocs/row).
 
 For detailed benchmark analysis and gate specifications:  
 👉 **[Complete Verification Harness & Quality Gates Specification](./architecture/verification-and-quality.md)**
@@ -187,6 +195,7 @@ For detailed benchmark analysis and gate specifications:
 - [Phase 1 Review Findings & Primitives Cleanup](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase1/PHASE1-REVIEW-FINDINGS.md)
 - [Phase 2 Review Findings & Row Parser Ergonomics](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase2/PHASE2-REVIEW-FINDINGS.md)
 - [Phase 3 Review Findings & Strategy Router Pipeline](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase3/PHASE3-REVIEW-FINDINGS.md)
+- [Phase 4 Review Findings & Benchmark Hardening](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase4/PHASE4-REVIEW-FINDINGS.md)
 - [Pull Request #51: Chase Readability Cleanup Phase 1](https://github.com/ajponte/babylon_data_loader/pull/51)
 - [Pull Request #52: Chase Readability Cleanup Phase 2](https://github.com/ajponte/babylon_data_loader/pull/52)
 - [Phase 3 Plan: Storage Adapters & MongoDB Router](../../../agent-docs/hex-refactor/PHASE3-STORAGE-ADAPTERS.md)

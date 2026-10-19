@@ -107,3 +107,18 @@ During the Phase 3 refactor on branch `hex-phase2c-chase--readability-cleanup-ph
 | **F-05** | `Medium` | `extractor_test.go` | Missing explicit boundary test assertions in `TestChaseExtractor_Errors` for `model.ErrMissingAccountID`, `model.ErrMissingFileName`, and `model.ErrMissingIngestedAt`. | Added dedicated subtests for metadata validation error sentinels. |
 | **F-06** | `Medium` | `extractor.go` | `validateExtractParams` evaluated `meta.Validate()` and pointer checks before checking `ctx.Err()`, violating short-circuit ordering on canceled contexts. | Reordered checks to evaluate `ctx.Err()` first before any struct validations. |
 | **F-07** | `Low` | `extractor.go` | Package-level mutable global map `dialectRoutes` required `//nolint:gochecknoglobals,exhaustive`. | Replaced mutable map with pure static switch statement `resolveDialectRoute`, achieving compile-time immutability and 0 allocations. |
+
+---
+
+## 7. Phase 4 Chase Verification Benchmarks, Concurrency & Quality Gates Remediation Log
+
+During the Phase 4 verification and benchmark hardening on branch `hex-phase2c-chase--readability-cleanup-phase4` (synthesized in [`agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase4/PHASE4-REVIEW-FINDINGS.md`](../../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase4/PHASE4-REVIEW-FINDINGS.md)), 6 findings were remediated:
+
+| ID | Severity | Target File(s) | Architectural Impact Prior to Remediation | Implemented Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **F-01** | `High/Medium` | `extractor_test.go` | Calling `b.Fatalf` inside `b.RunParallel` worker closure violated Go testing invariants (`runtime.Goexit()` in worker goroutine), risking benchmark deadlocks or runner hangs. | Replaced `b.Fatalf` with `b.Errorf` and early `return` in `BenchmarkChaseExtractor_Extract_Parallel`. |
+| **F-02** | `Medium` | `extractor_test.go` | Extraction benchmark suite only profiled 3-row happy paths; missing benchmarks for short-circuit conditions (pre-canceled context and empty stream). | Added `BenchmarkChaseExtractor_Extract_PreCanceledContext` (~26.3 ns/op, 1 alloc) and `BenchmarkChaseExtractor_Extract_EmptyStream` (~548 ns/op, 6 allocs). |
+| **F-03** | `Medium` | `extractor_test.go` | `TestChaseExtractor_Extract_CheckingInline` and `CreditCardInline` verified record counts and payloads but omitted assertions for batch metadata envelope fields (`SourceFile`, `FileHash`, `IngestedAt`, `AccountID`). | Expanded inline tests to assert all 6 metadata envelope properties against input `meta`. |
+| **F-04** | `Medium` | `extractor_test.go` | 3-row fixtures profiled per-call dispatch latency but omitted steady-state streaming throughput, memory reuse, and GC behavior under high volume (500+ rows). | Implemented `generateSyntheticCheckingCSV` helper and `BenchmarkChaseExtractor_Extract_HighVolume_500Rows` (500 rows parsed in ~348 µs, ~697 ns/row, ~617 B/row steady-state). |
+| **F-05** | `Low` | `parser_test.go` | Inconsistent line number variable declaration between comparative benchmarks: `const lineNum = 42` in `BenchmarkDirect` vs `lineNum := 42` in `BenchmarkRowReader`. | Standardized `BenchmarkRowReader_ParseRow` to `const lineNum = 42`. |
+| **F-06** | `Low` | `extractor_test.go` | `mockClassifier.Classify` unconditionally returned a nil stream whenever `dialect == chase.DialectChecking`, conflating a valid domain enum with an error simulation condition. | Added dedicated `returnNilStream bool` field to `mockClassifier`, decoupling error injection from valid domain enums. |
