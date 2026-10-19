@@ -19,16 +19,35 @@ var (
 
 	// ErrMissingRequiredColumns indicates that required header columns are missing from the statement.
 	ErrMissingRequiredColumns = errors.New("chase CSV missing required header columns")
+
+	// ErrMalformedHeader indicates that the header row is structurally invalid, for example because
+	// a column contains an embedded line break produced by CR-only line endings.
+	ErrMalformedHeader = errors.New("chase CSV header is malformed")
+
+	// ErrDuplicateColumn indicates that a required column appears more than once in the header.
+	ErrDuplicateColumn = errors.New("chase CSV header contains a duplicate required column")
+
+	// ErrMalformedCSV indicates a CSV syntax error. It wraps the underlying *csv.ParseError,
+	// which carries the line and column of the failure.
+	ErrMalformedCSV = errors.New("chase CSV is malformed")
+
+	// ErrInvalidRow indicates that a data row was rejected. It wraps the row-level cause, which
+	// matches the domain sentinels (model.ErrInvalidAmount, model.ErrMissingDescription, ...)
+	// where one applies. Callers can use it to tell bad input data apart from I/O failures.
+	ErrInvalidRow = errors.New("chase CSV row is invalid")
 )
 
+var _ port.Extractor = (*Extractor)(nil)
+
 // Extractor implements port.Extractor for Chase checking and credit card statements.
+// The zero value and a nil *Extractor are usable and fall back to DefaultClassifier.
 type Extractor struct {
 	classifier Classifier
 }
 
 // NewExtractor constructs a new Chase Extractor.
 // If classifier is nil, DefaultClassifier is used.
-func NewExtractor(c Classifier) port.Extractor {
+func NewExtractor(c Classifier) *Extractor {
 	if c == nil {
 		c = NewDefaultClassifier()
 	}
@@ -41,6 +60,8 @@ func (e *Extractor) SourceType() string {
 }
 
 // Extract parses raw CSV data from r, classifies dialect, and returns an IngestionBatch.
+// A nil ctx is treated as context.Background(). This is the only place a nil context is
+// normalized, so classifiers and parsers always receive a non-nil context.
 func (e *Extractor) Extract(
 	ctx context.Context,
 	r io.Reader,
@@ -85,7 +106,7 @@ func (e *Extractor) classifyStream(ctx context.Context, r io.Reader) (DialectTyp
 		return DialectUnknown, nil, ctxErr
 	}
 
-	dialect, stream, err := e.classifier.Classify(ctx, r)
+	dialect, stream, err := e.classifierOrDefault().Classify(ctx, r)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return DialectUnknown, nil, ctxErr
@@ -106,8 +127,20 @@ func (e *Extractor) classifyStream(ctx context.Context, r io.Reader) (DialectTyp
 	return dialect, stream, nil
 }
 
+// classifierOrDefault returns the configured Classifier, falling back to DefaultClassifier so
+// that a nil or zero-value *Extractor does not panic.
+func (e *Extractor) classifierOrDefault() Classifier {
+	if e == nil || e.classifier == nil {
+		return &DefaultClassifier{}
+	}
+	return e.classifier
+}
+
 type dialectParser func(ctx context.Context, r io.Reader, meta model.FileMetadata) ([]model.ChaseTransaction, error)
 
+// dialectRoute pairs a dialect with its parser and destination. Both Chase dialects share one
+// datalake collection (model.DestChaseChecking == model.DestChaseCreditCard), so the dialect is
+// observable only through the payload fields each parser populates.
 type dialectRoute struct {
 	destination model.Destination
 	parser      dialectParser

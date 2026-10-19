@@ -153,18 +153,6 @@ func TestDefaultClassifier_Classify_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("nil context is safely handled", func(t *testing.T) {
-		t.Parallel()
-		var nilCtx context.Context
-		dialect, _, err := classifier.Classify(nilCtx, strings.NewReader("Details,Posting Date,Balance\n"))
-		if err != nil {
-			t.Fatalf("unexpected error with nil context: %v", err)
-		}
-		if dialect != chase.DialectChecking {
-			t.Errorf("expected dialect %q, got %q", chase.DialectChecking, dialect)
-		}
-	})
-
 	t.Run("context cancelled returns error", func(t *testing.T) {
 		t.Parallel()
 		canceledCtx, cancel := context.WithCancel(ctx)
@@ -216,4 +204,98 @@ func TestDefaultClassifier_Classify_CreditCardWithBalance(t *testing.T) {
 		t.Fatalf("unexpected Classify error: %v", err)
 	}
 	assertClassifyResult(t, dialect, chase.DialectCreditCard, reconstructedReader, input)
+}
+
+func TestDefaultClassifier_Classify_HeaderDetectionMatchesParser(t *testing.T) {
+	t.Parallel()
+	classifier := chase.NewDefaultClassifier()
+	const checkingHeader = "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n"
+
+	tests := []struct {
+		name            string
+		input           string
+		expectedDialect chase.DialectType
+	}{
+		{
+			name:            "comma-only leading row is skipped",
+			input:           ",,,,,,\n" + checkingHeader,
+			expectedDialect: chase.DialectChecking,
+		},
+		{
+			name:            "blank preamble beyond the initial 4 KiB peek",
+			input:           strings.Repeat("\n", 5000) + checkingHeader,
+			expectedDialect: chase.DialectChecking,
+		},
+		{
+			name:            "header straddling the 4 KiB peek boundary",
+			input:           strings.Repeat("\n", 4090) + checkingHeader,
+			expectedDialect: chase.DialectChecking,
+		},
+		{
+			name:            "preamble beyond the 64 KiB peek limit is unknown",
+			input:           strings.Repeat("\n", 70*1024) + checkingHeader,
+			expectedDialect: chase.DialectUnknown,
+		},
+		{
+			name:            "minimal three-column credit card header",
+			input:           "Post Date,Description,Amount\n01/03/2024,COFFEE,-4.50\n",
+			expectedDialect: chase.DialectCreditCard,
+		},
+		{
+			name:            "UTF-8 BOM before a quoted checking header",
+			input:           "\xef\xbb\xbf\"Details\",\"Posting Date\",\"Description\",\"Amount\"\n",
+			expectedDialect: chase.DialectChecking,
+		},
+		{
+			name:            "UTF-8 BOM before a quoted credit card header",
+			input:           "\xef\xbb\xbf\"Transaction Date\",\"Post Date\",\"Description\",\"Amount\"\n",
+			expectedDialect: chase.DialectCreditCard,
+		},
+		{
+			name:            "column names are matched exactly, not as substrings",
+			input:           "Description,Amount,Memo Line,Category Code\n",
+			expectedDialect: chase.DialectUnknown,
+		},
+		{
+			name:            "unterminated quoted header is unknown",
+			input:           "\"Details,Posting Date,Description,Amount\n",
+			expectedDialect: chase.DialectUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dialect, reconstructedReader, err := classifier.Classify(context.Background(), strings.NewReader(tt.input))
+			if err != nil {
+				t.Fatalf("unexpected Classify error: %v", err)
+			}
+			assertClassifyResult(t, dialect, tt.expectedDialect, reconstructedReader, tt.input)
+		})
+	}
+}
+
+func TestDefaultClassifier_Classify_ReadFailures(t *testing.T) {
+	t.Parallel()
+	classifier := chase.NewDefaultClassifier()
+
+	t.Run("peek I/O error is wrapped", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := classifier.Classify(context.Background(), &errReader{err: io.ErrUnexpectedEOF})
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("expected io.ErrUnexpectedEOF in chain, got: %v", err)
+		}
+	})
+
+	t.Run("cancellation during the peek is returned unwrapped", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cr := &cancelingReader{
+			r:      strings.NewReader("Details,Posting Date,Description,Amount\n"),
+			cancel: cancel,
+		}
+		_, _, err := classifier.Classify(ctx, cr)
+		assertStrictUnwrappedError(t, err, context.Canceled)
+	})
 }

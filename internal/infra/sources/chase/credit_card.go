@@ -81,7 +81,9 @@ func resolveCreditCardDate(rr rowReader) (time.Time, error) {
 		postDateStr = rr.get("transaction date", "trans date")
 	}
 	if isPlaceholderDate(postDateStr) {
-		return time.Time{}, fmt.Errorf("row %d: missing both post date and transaction date", rr.lineNum)
+		return time.Time{}, fmt.Errorf(
+			"row %d: missing both post date and transaction date: %w", rr.lineNum, model.ErrMissingPostingDate,
+		)
 	}
 	postingDate, err := parseDate(postDateStr)
 	if err != nil {

@@ -50,7 +50,7 @@ sequenceDiagram
 
     App->>Adapter: Extract(ctx, io.Reader, FileMetadata)
     Adapter->>Adapter: 1. Validate parameters & context short-circuit
-    Adapter->>Adapter: 2. In-stream non-destructive classification (4KB Peek)
+    Adapter->>Adapter: 2. In-stream non-destructive classification (bounded Peek)
     Adapter->>Engine: 3. Streaming deserialization, stack rowReader, & bounds safety
     Engine-->>Adapter: Yield typed domain records ([]Transaction / []Position)
     Adapter->>Batch: 4. Construct & validate canonical batch envelope
@@ -72,7 +72,7 @@ The ingestion adapter package layout in `babylon_data_loader` strictly separates
 | `internal/infra/sources/fidelity/` | `fidelity.Extractor` | Fidelity brokerage portfolio holdings extraction, UTF-8 BOM stripping, disclaimer filtering, and cash sweep normalization. | **[Fidelity Adapter Spec](./architecture/fidelity-adapter.md)** |
 | `internal/infra/sources/synthetic/` | `synthetic.Extractor` | In-memory deterministic fixture generation via `math/rand/v2` PCG generator for load testing and benchmark harnesses. | **[Synthetic Adapter Spec](./architecture/synthetic-adapter.md)** |
 | *(Cross-Cutting)* | Quality & Verification | Standard library isolation, race safety, comparative benchmarks, and cognitive complexity gates. | **[Verification & Quality Gates](./architecture/verification-and-quality.md)** |
-| *(Cross-Cutting)* | Remediation History | Formal audit trails and remediation logs across Phases 1, 2, and 3. | **[Remediation Log](./architecture/remediation-log.md)** |
+| *(Cross-Cutting)* | Remediation History | Formal audit trails and remediation logs across Phases 1 to 4 and the Round 3 review. | **[Remediation Log](./architecture/remediation-log.md)** |
 
 ---
 
@@ -83,12 +83,15 @@ The Chase adapter handles CSV exports from Chase Bank for checking, savings, and
 ### Key Architectural Invariants:
 1. **Declarative 4-Stage Pipeline**: `Extractor.Extract` coordinates execution across `validateExtractParams` -> `classifyStream` -> `parseDialect` -> `buildBatch`.
 2. **Pure Static Strategy Router**: `resolveDialectRoute` uses an immutable Go switch statement, eliminating mutable package globals and achieving compile-time safety with 0 allocations.
-3. **Pluggable Classifier Interface**: Non-destructive 4KB peeking (`bufio.Reader.Peek(4096)`) evaluates credit card markers (`category`, `memo`, `transaction date`) before checking balance markers.
+3. **Pluggable Classifier Interface**: Non-destructive bounded peeking (`bufio.Reader.Peek`, 4 KiB growing to at most 64 KiB past blank preambles) locates the header with the parser's own header detection (BOM skip, shared CSV reader, `isRowEmpty`). It then matches exact column names, evaluating credit card markers (`category`, `memo`, `transaction date`, `trans date`) before checking markers (`check or slip #`, `details` with a date or balance, `posting date` with `balance`). A bare `balance` column is not a checking marker.
 4. **Stack-Allocated `rowReader` Value Struct**: 40-byte value struct (`row []string` 24B, `colIndex map[string]int` 8B, `lineNum int` 8B) with uniform value receivers, yielding **0 B/op and 0 allocs/op**.
-5. **Tabular Missing-Value & Unicode Dash Detection (`isPlaceholderNumeric`)**: Centralized detection of missing tokens (`"na"`, `"n/a"`, `"#n/a"`, `"none"`, `"null"`, `"nil"`, `"--"`, `"---"`, `"-$"`) and Unicode typographic dashes (`\u2013`, `\u2014`, `\u2212`, `\u2015`).
-6. **Ergonomic Dialect Row Mappers**: `parseCheckingRow` and `parseCreditCardRow` use `rowReader`, reducing cognitive complexity to 2.
-7. **Pending Date Fallbacks (`resolveCreditCardDate`)**: Falls back from unsettled `"Post Date"` to `"Transaction Date"` for credit card rows.
-8. **Unwrapped Context Cancellation**: Raw `context.Canceled` and `context.DeadlineExceeded` are returned strictly unwrapped across pipeline stages and header/row parsing (`handleReadError`).
+5. **Tabular Missing-Value & Unicode Dash Detection (`isPlaceholderNumeric`)**: Centralized detection of missing tokens (`"na"`, `"n/a"`, `"#n/a"`, `"none"`, `"null"`, `"nil"`, `"--"`, `"---"`, `"-$"`) and Unicode typographic dashes (`isDashRune`: `\u2012`–`\u2015`, `\u2212`, `\ufe63`, `\uff0d`).
+6. **Strict Currency Grammar (`cleanNumeric`)**: Amounts and balances must match an optional sign or accounting parentheses, an optional `$`, commas only between three-digit groups, and at most two decimals. Unicode minus and dashes are normalized to `-` first. Inputs such as `12,34`, `1+2` and `0x1p4` are rejected, never silently re-valued.
+7. **Ergonomic Dialect Row Mappers**: `parseCheckingRow` and `parseCreditCardRow` use `rowReader`, reducing cognitive complexity to 2.
+8. **Pending Date Fallbacks (`resolveCreditCardDate`)**: Falls back from unsettled `"Post Date"` to `"Transaction Date"` for credit card rows.
+9. **Unwrapped Context Cancellation**: Raw `context.Canceled` and `context.DeadlineExceeded` are returned strictly unwrapped across pipeline stages and header/row parsing (`handleReadError`). A nil context is normalized once, in `Extract`.
+10. **Error Taxonomy**: Row rejections wrap `ErrInvalidRow` plus the matching domain sentinel (`model.ErrInvalidAmount`, `ErrInvalidBalance`, `ErrMissingDescription`, `ErrMissingPostingDate`). CSV syntax errors wrap `ErrMalformedCSV` and `*csv.ParseError`. Header defects return `ErrMalformedHeader` (CR-only line endings) or `ErrDuplicateColumn`. I/O failures match none of these.
+11. **Shared Destination**: `model.DestChaseChecking` and `model.DestChaseCreditCard` are the same collection (`"transactions_chase"`), so the dialect is carried only by the payload fields each parser populates.
 
 ```go
 // Primary interface implementation in internal/infra/sources/chase/extractor.go
@@ -96,7 +99,10 @@ type Extractor struct {
     classifier Classifier
 }
 
-func NewExtractor(c Classifier) port.Extractor
+// The zero value and a nil *Extractor fall back to DefaultClassifier.
+var _ port.Extractor = (*Extractor)(nil)
+
+func NewExtractor(c Classifier) *Extractor
 ```
 
 For the complete technical blueprint, dialect column mappings, and code listings:  
@@ -144,6 +150,7 @@ All architectural decisions, defect remediations, and code review hardening logs
 - **Phase 2 Readability Cleanup (PR #52)**: 7 findings establishing ergonomic row parsers and date fallback hardening.
 - **Phase 3 Readability Cleanup (Pipeline & Quality Gates)**: 7 findings establishing the 4-stage pipeline, static strategy router, nil stream protection, and unwrapped context errors.
 - **Phase 4 Readability Cleanup (Benchmarks & Concurrency Hardening)**: 6 findings establishing benchmark concurrency safety (`b.Fatalf` in `RunParallel`), short-circuit fast-fail benchmarks, envelope completeness assertions, mock isolation, and 500-row streaming scaling.
+- **Round 3 Chase Review (PR #43)**: 10 findings (R3-01 through R3-10) covering BOM and CR-only streams, a single header-detection path, strict currency parsing, the row and CSV error taxonomy, nil-safe extractors, and test fidelity.
 
 For the complete decision and remediation matrix:  
 👉 **[Complete Architectural Remediation Log](./architecture/remediation-log.md)**
@@ -158,7 +165,7 @@ All source adapters are validated against 5 automated local quality gates:
 # 1. Standard library isolation gate (100% standard library purity)
 go list -f '{{.ImportPath}} -> {{.Imports}}' ./internal/infra/sources/...
 
-# 2. Race detection and statement coverage gate (chase: 95.0%, fidelity: 91.8%, synthetic: 91.1%, 0 races)
+# 2. Race detection and statement coverage gate (chase: 97.9%, fidelity: 91.8%, synthetic: 91.1%, 0 races)
 go test -v -race -cover ./internal/infra/sources/...
 
 # 3. Static analysis and linter gate (0 issues, zero waivers, cognitive complexity < 15)
@@ -174,10 +181,10 @@ go test -bench=. -benchmem ./internal/infra/sources/chase/...
 ### Verified Benchmark Suite Summary:
 - **Zero-Allocation Row Parity**: `BenchmarkDirect_ParseRow` (402.3 ns/op) vs `BenchmarkRowReader_ParseRow` (441.2 ns/op) at identical allocations (16 B/op, 2 allocs/op solely from optional balance box; 0 B/op from `rowReader`).
 - **Multi-Core Row Parsing**: `BenchmarkDirect_ParseRow_Parallel` (82.51 ns/op) and `BenchmarkRowReader_ParseRow_Parallel` (85.63 ns/op) achieve ~5.1x multi-core scaling with 0 heap escapes.
-- **Pipeline Latency & Bandwidth**: Single checking/card batches process in 4.4–4.8 µs (49.8–63.6 MB/s, ~24.6 KB, 39–42 allocs).
-- **Concurrent Scaling**: Parallel extraction runs at 4.16 µs (62.03 MB/s) with zero data races under `-race` across 20 workers.
-- **Fast-Fail Interruption**: Pre-canceled contexts short-circuit in 26.27 ns sequentially (63.91 ns under parallel cancellation storm, 32 B/op, 1 alloc); empty streams fail in 543.7 ns.
-- **High-Volume Scaling (Sequential vs Parallel)**: 500-row statement batches process in 341.1 µs (83.18 MB/s, ~682 ns/row, ~617 B/row) sequentially and scale 2.2x to 153.8 µs (**184.40 MB/s**) under parallel worker pools.
+- **Pipeline Latency & Bandwidth** (re-measured after Round 3): Single checking/card batches process in ~5.0–5.4 µs (~43–55 MB/s, ~25.2 KB, 51–55 allocs). The classifier's shared CSV header detection adds a fixed ~13 allocs per file; per-row cost is unchanged.
+- **Concurrent Scaling**: Parallel extraction runs at ~4.9 µs (~53 MB/s) with zero data races under `-race` across 20 workers.
+- **Fast-Fail Interruption**: Pre-canceled contexts short-circuit in ~26.8 ns sequentially (~64 ns under parallel cancellation storm, 32 B/op, 1 alloc); empty streams are rejected by the classifier with `ErrUnknownDialect` in ~570 ns.
+- **High-Volume Scaling (Sequential vs Parallel)**: 500-row statement batches process in ~343 µs (~82.6 MB/s, ~686 ns/row) sequentially and scale 2.3x to ~149 µs (**~190 MB/s**) under parallel worker pools.
 
 For detailed benchmark analysis and gate specifications:  
 👉 **[Complete Verification Harness & Quality Gates Specification](./architecture/verification-and-quality.md)**
@@ -190,13 +197,7 @@ For detailed benchmark analysis and gate specifications:
 - [Phase 1 Specification: Domain Core & Port Contracts](./hexagonal-domain-core.md)
 - [Fidelity Portfolio Positions Ingestion Specification](./fidelity-portfolio-ingestion.md)
 - [MongoDB Atlas Datalake Specification](./mongodb-atlas-datalake.md)
-- [Hexagonal Architecture Refactoring Plan (Parent Strategy)](../../../agent-docs/hex-refactor/README.md)
-- [Phase 2 Implementation Plan: Ingestion Adapters & Dialects](../../../agent-docs/hex-refactor/PHASE2-INGESTION-ADAPTERS.md)
-- [Phase 2C Chase Review Findings & Hardening Synthesis](../../../agent-docs/reviews/hex-phase2c-chase/CHASE-REVIEW-FINDINGS.md)
-- [Phase 1 Review Findings & Primitives Cleanup](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase1/PHASE1-REVIEW-FINDINGS.md)
-- [Phase 2 Review Findings & Row Parser Ergonomics](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase2/PHASE2-REVIEW-FINDINGS.md)
-- [Phase 3 Review Findings & Strategy Router Pipeline](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase3/PHASE3-REVIEW-FINDINGS.md)
-- [Phase 4 Review Findings & Benchmark Hardening](../../../agent-docs/reviews/hex-phase2c-chase--readability-cleanup-phase4/PHASE4-REVIEW-FINDINGS.md)
+- [Architectural Decisions & Remediation Log](./architecture/remediation-log.md): summarizes every review round, including the Phase 2C Chase findings, the Phase 1 to 4 readability cleanups and Round 3. The detailed review write-ups live in the workspace-level `agent-docs/` directory, which is outside this repository.
 - [Pull Request #51: Chase Readability Cleanup Phase 1](https://github.com/ajponte/babylon_data_loader/pull/51)
 - [Pull Request #52: Chase Readability Cleanup Phase 2](https://github.com/ajponte/babylon_data_loader/pull/52)
-- [Phase 3 Plan: Storage Adapters & MongoDB Router](../../../agent-docs/hex-refactor/PHASE3-STORAGE-ADAPTERS.md)
+- [Pull Request #43: Phase 2C Chase Adapter](https://github.com/ajponte/babylon_data_loader/pull/43)

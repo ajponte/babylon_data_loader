@@ -1,6 +1,8 @@
 package chase
 
 import (
+	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -12,33 +14,58 @@ import (
 func TestCleanNumeric(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		name    string
+		input   string
+		want    string
+		wantNeg bool
+		wantOK  bool
 	}{
-		{name: "standard currency", input: "$1,234.56", want: "1234.56"},
-		{name: "number with comma", input: "1,234.56", want: "1234.56"},
-		{name: "plus sign currency", input: "+$500.00", want: "500.00"},
-		{name: "accounting parentheses", input: "($50.00)", want: "-50.00"},
-		{name: "outer dollar accounting parentheses", input: "$(45.67)", want: "-45.67"},
-		{name: "unicode non-breaking space", input: "$\u00a01,000.50", want: "1000.50"},
-		{name: "narrow non-breaking space", input: "$\u202f1,000.50", want: "1000.50"},
-		{name: "spaces and tabs", input: "$ 1 000 . 50 \t", want: "1000.50"},
-		{name: "empty string returns empty", input: "", want: ""},
-		{name: "single dash preserved without zero coercion", input: "-", want: "-"},
-		{name: "double dash preserved without zero coercion", input: "--", want: "--"},
-		{name: "currency with single dash", input: "$ -", want: "-"},
-		{name: "currency with multiple spaces and dash", input: "$   -", want: "-"},
-		{name: "n/a lowercase preserved", input: "n/a", want: "n/a"},
-		{name: "N/A uppercase preserved", input: "N/A", want: "N/A"},
+		{name: "standard currency", input: "$1,234.56", want: "1234.56", wantOK: true},
+		{name: "number with comma", input: "1,234.56", want: "1234.56", wantOK: true},
+		{name: "millions grouping", input: "1,234,567", want: "1234567", wantOK: true},
+		{name: "plus sign currency", input: "+$500.00", want: "500.00", wantOK: true},
+		{name: "accounting parentheses", input: "($50.00)", want: "50.00", wantNeg: true, wantOK: true},
+		{name: "outer dollar accounting parentheses", input: "$(45.67)", want: "45.67", wantNeg: true, wantOK: true},
+		{name: "unicode non-breaking space", input: "$\u00a01,000.50", want: "1000.50", wantOK: true},
+		{name: "narrow non-breaking space", input: "$\u202f1,000.50", want: "1000.50", wantOK: true},
+		{name: "spaces and tabs", input: "$ 1 000 . 50 \t", want: "1000.50", wantOK: true},
+		{name: "unicode minus sign", input: "\u22124.50", want: "4.50", wantNeg: true, wantOK: true},
+		{name: "en dash with dollar and grouping", input: "\u2013$1,234.00", want: "1234.00", wantNeg: true, wantOK: true},
+		{name: "em dash", input: "\u20144.50", want: "4.50", wantNeg: true, wantOK: true},
+		{name: "dollar before unicode minus", input: "$\u22124.50", want: "4.50", wantNeg: true, wantOK: true},
+		{name: "fullwidth hyphen-minus", input: "\uff0d4.50", want: "4.50", wantNeg: true, wantOK: true},
+		{name: "single decimal place", input: "4.5", want: "4.5", wantOK: true},
+		{name: "empty string rejected", input: "", wantOK: false},
+		{name: "single dash rejected without zero coercion", input: "-", wantOK: false},
+		{name: "double dash rejected without zero coercion", input: "--", wantOK: false},
+		{name: "currency with single dash rejected", input: "$ -", wantOK: false},
+		{name: "n/a rejected", input: "n/a", wantOK: false},
+		{name: "comma decimal separator rejected", input: "12,34", wantOK: false},
+		{name: "misplaced grouping rejected", input: "1,2,3", wantOK: false},
+		{name: "oversized leading group rejected", input: "1234,567", wantOK: false},
+		{name: "trailing comma rejected", input: "1,234,", wantOK: false},
+		{name: "interior plus rejected", input: "1+2", wantOK: false},
+		{name: "hex float rejected", input: "0x1p4", wantOK: false},
+		{name: "exponent rejected", input: "1e3", wantOK: false},
+		{name: "underscore separator rejected", input: "1_000", wantOK: false},
+		{name: "three decimal places rejected", input: "4.505", wantOK: false},
+		{name: "trailing dot rejected", input: "4.", wantOK: false},
+		{name: "leading dot rejected", input: ".50", wantOK: false},
+		{name: "trailing minus rejected", input: "4.50-", wantOK: false},
+		{name: "double sign rejected", input: "--4.50", wantOK: false},
+		{name: "sign inside parentheses rejected", input: "(-4.50)", wantOK: false},
+		{name: "embedded dollar rejected", input: "4$.50", wantOK: false},
+		{name: "NaN rejected", input: "NaN", wantOK: false},
+		{name: "Inf rejected", input: "+Inf", wantOK: false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := cleanNumeric(tc.input)
-			if got != tc.want {
-				t.Errorf("cleanNumeric(%q): expected %q, got %q", tc.input, tc.want, got)
+			got, neg, ok := cleanNumeric(tc.input)
+			if ok != tc.wantOK || got != tc.want || neg != tc.wantNeg {
+				t.Errorf("cleanNumeric(%q): expected (%q, %v, %v), got (%q, %v, %v)",
+					tc.input, tc.want, tc.wantNeg, tc.wantOK, got, neg, ok)
 			}
 		})
 	}
@@ -52,6 +79,9 @@ func assertAmountResult(t *testing.T, got float64, err error, want float64, want
 		}
 		if !strings.Contains(err.Error(), errSubstr) {
 			t.Errorf("expected error containing %q, got %q", errSubstr, err.Error())
+		}
+		if !errors.Is(err, model.ErrInvalidAmount) {
+			t.Errorf("expected errors.Is(err, model.ErrInvalidAmount), got %v", err)
 		}
 		return
 	}
@@ -83,11 +113,23 @@ func TestParseAmount(t *testing.T) {
 		{name: "N/A uppercase fails with invalid amount", raw: "N/A", wantErr: true, errSubstr: "invalid amount"},
 		{name: "n/a lowercase fails with invalid amount", raw: "n/a", wantErr: true, errSubstr: "invalid amount"},
 		{name: "alphabetic string error", raw: "not_a_number", wantErr: true, errSubstr: "invalid amount"},
-		{name: "non-finite NaN", raw: "NaN", wantErr: true, errSubstr: "non-finite number"},
-		{name: "non-finite lowercase nan", raw: "nan", wantErr: true, errSubstr: "non-finite number"},
-		{name: "non-finite positive Inf", raw: "+Inf", wantErr: true, errSubstr: "non-finite number"},
-		{name: "non-finite negative Inf", raw: "-Inf", wantErr: true, errSubstr: "non-finite number"},
-		{name: "non-finite Infinity", raw: "Infinity", wantErr: true, errSubstr: "non-finite number"},
+		{name: "non-finite NaN", raw: "NaN", wantErr: true, errSubstr: "invalid amount"},
+		{name: "non-finite lowercase nan", raw: "nan", wantErr: true, errSubstr: "invalid amount"},
+		{name: "non-finite positive Inf", raw: "+Inf", wantErr: true, errSubstr: "invalid amount"},
+		{name: "non-finite negative Inf", raw: "-Inf", wantErr: true, errSubstr: "invalid amount"},
+		{name: "non-finite Infinity", raw: "Infinity", wantErr: true, errSubstr: "invalid amount"},
+		{name: "out of range magnitude", raw: "1" + strings.Repeat("0", 400), wantErr: true, errSubstr: "invalid amount"},
+		{name: "comma decimal separator rejected", raw: "12,34", wantErr: true, errSubstr: `row 5: invalid amount "12,34"`},
+		{name: "misplaced grouping rejected", raw: "1,2,3", wantErr: true, errSubstr: "invalid amount"},
+		{name: "interior plus rejected", raw: "1+2", wantErr: true, errSubstr: `invalid amount "1+2"`},
+		{name: "hex float rejected", raw: "0x1p4", wantErr: true, errSubstr: `invalid amount "0x1p4"`},
+		{name: "exponent rejected", raw: "1e3", wantErr: true, errSubstr: "invalid amount"},
+		{name: "underscore separator rejected", raw: "1_000", wantErr: true, errSubstr: "invalid amount"},
+		{name: "trailing minus rejected", raw: "4.50-", wantErr: true, errSubstr: `row 5: invalid amount "4.50-"`},
+		{name: "unicode minus sign", raw: "\u22124.50", want: -4.50},
+		{name: "en dash with dollar and grouping", raw: "\u2013$1,234.00", want: -1234.00},
+		{name: "dollar before unicode minus", raw: "$\u22124.50", want: -4.50},
+		{name: "grouped thousands", raw: "$1,234,567.89", want: 1234567.89},
 	}
 
 	for _, tc := range tests {
@@ -110,30 +152,38 @@ func TestParseDescription(t *testing.T) {
 	}{
 		{name: "standard description", raw: "Starbucks Coffee", want: "Starbucks Coffee"},
 		{name: "trimmed description", raw: "   Amazon.com   ", want: "Amazon.com"},
-		{name: "empty description", raw: "", wantErr: true, errSubstr: "transaction description is required"},
-		{name: "all whitespace description", raw: "   \t   ", wantErr: true, errSubstr: "transaction description is required"},
+		{name: "empty description", raw: "", wantErr: true, errSubstr: "row 10: description is required"},
+		{name: "all whitespace description", raw: "   \t   ", wantErr: true, errSubstr: "row 10: description is required"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := parseDescription(tc.raw, 10)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
-				}
-				if !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("expected error containing %q, got %q", tc.errSubstr, err.Error())
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("expected %q, got %q", tc.want, got)
-			}
+			assertDescriptionResult(t, got, err, tc.want, tc.wantErr, tc.errSubstr)
 		})
+	}
+}
+
+func assertDescriptionResult(t *testing.T, got string, err error, want string, wantErr bool, errSubstr string) {
+	t.Helper()
+	if wantErr {
+		if err == nil {
+			t.Fatalf("expected error containing %q, got nil", errSubstr)
+		}
+		if !strings.Contains(err.Error(), errSubstr) {
+			t.Errorf("expected error containing %q, got %q", errSubstr, err.Error())
+		}
+		if !errors.Is(err, model.ErrMissingDescription) {
+			t.Errorf("expected errors.Is(err, model.ErrMissingDescription), got %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != want {
+		t.Errorf("expected %q, got %q", want, got)
 	}
 }
 
@@ -145,6 +195,9 @@ func assertBalanceResult(t *testing.T, bal *float64, err error, wantVal float64,
 		}
 		if !strings.Contains(err.Error(), errSubstr) {
 			t.Errorf("expected error containing %q, got %q", errSubstr, err.Error())
+		}
+		if !errors.Is(err, model.ErrInvalidBalance) {
+			t.Errorf("expected errors.Is(err, model.ErrInvalidBalance), got %v", err)
 		}
 		return
 	}
@@ -189,8 +242,13 @@ func TestParseBalance(t *testing.T) {
 		{name: "N/A uppercase is nil", raw: "N/A", wantNil: true},
 		{name: "N/A with whitespace is nil", raw: " N/A ", wantNil: true},
 		{name: "syntax error balance", raw: "corrupted_val", wantErr: true, errSubstr: "invalid balance"},
-		{name: "non-finite NaN", raw: "NaN", wantErr: true, errSubstr: "non-finite number"},
-		{name: "non-finite Inf", raw: "+Inf", wantErr: true, errSubstr: "non-finite number"},
+		{name: "non-finite NaN", raw: "NaN", wantErr: true, errSubstr: "invalid balance"},
+		{name: "non-finite Inf", raw: "+Inf", wantErr: true, errSubstr: "invalid balance"},
+		{name: "underscore separator rejected", raw: "1_000", wantErr: true, errSubstr: `row 12: invalid balance "1_000"`},
+		{name: "comma decimal separator rejected", raw: "12,34", wantErr: true, errSubstr: "invalid balance"},
+		{name: "unicode minus sign", raw: "\u2212200.00", wantVal: -200.00},
+		{name: "unicode minus placeholder is nil", raw: "\u2212", wantNil: true},
+		{name: "currency unicode dash placeholder is nil", raw: "$ \u2014", wantNil: true},
 	}
 
 	for _, tc := range tests {
@@ -450,8 +508,8 @@ func testRowReaderParseDescription(t *testing.T, rr rowReader, lineNum int) {
 
 	emptyRR := newRowReader([]string{""}, map[string]int{"description": 0}, lineNum)
 	_, err = emptyRR.parseDescription("description")
-	if err == nil || !strings.Contains(err.Error(), "row 12: transaction description is required") {
-		t.Errorf("expected required error for row 12, got: %v", err)
+	if !errors.Is(err, model.ErrMissingDescription) || !strings.Contains(err.Error(), "row 12:") {
+		t.Errorf("expected ErrMissingDescription for row 12, got: %v", err)
 	}
 }
 
@@ -464,8 +522,8 @@ func testRowReaderParseAmount(t *testing.T, rr rowReader, lineNum int) {
 
 	nanRR := newRowReader([]string{"NaN"}, map[string]int{"amount": 0}, lineNum)
 	_, err = nanRR.parseAmount("amount")
-	if err == nil || !strings.Contains(err.Error(), "non-finite number") {
-		t.Errorf("expected non-finite error, got: %v", err)
+	if !errors.Is(err, model.ErrInvalidAmount) || !strings.Contains(err.Error(), "row 12:") {
+		t.Errorf("expected ErrInvalidAmount for row 12, got: %v", err)
 	}
 }
 
@@ -490,8 +548,8 @@ func testRowReaderParseBalance(t *testing.T, rr rowReader, lineNum int) {
 
 	invalidRR := newRowReader([]string{"corrupt"}, map[string]int{"balance": 0}, lineNum)
 	_, err = invalidRR.parseBalance("balance")
-	if err == nil || !strings.Contains(err.Error(), "invalid balance") {
-		t.Errorf("expected invalid balance error, got: %v", err)
+	if !errors.Is(err, model.ErrInvalidBalance) || !strings.Contains(err.Error(), "invalid balance") {
+		t.Errorf("expected ErrInvalidBalance, got: %v", err)
 	}
 }
 
@@ -507,8 +565,8 @@ func testRowReaderParseDate(t *testing.T, rr rowReader, lineNum int) {
 
 	emptyRR := newRowReader([]string{""}, map[string]int{"posting date": 0}, lineNum)
 	_, err = emptyRR.parseDate("posting date")
-	if err == nil || !strings.Contains(err.Error(), "row 12: transaction date is required") {
-		t.Errorf("expected required error for row 12, got: %v", err)
+	if !errors.Is(err, model.ErrMissingPostingDate) || !strings.Contains(err.Error(), "row 12:") {
+		t.Errorf("expected ErrMissingPostingDate for row 12, got: %v", err)
 	}
 
 	invalidRR := newRowReader([]string{"invalid-date"}, map[string]int{"posting date": 0}, lineNum)
@@ -611,22 +669,23 @@ func TestRowReader_ZeroValueAndNegativeBounds(t *testing.T) {
 func TestCleanNumeric_CRLFAndFigureSpace(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		input string
-		want  string
+		name    string
+		input   string
+		want    string
+		wantNeg bool
 	}{
-		{name: "CRLF carriage returns", input: "\r-100.50\r", want: "-100.50"},
+		{name: "CRLF carriage returns", input: "\r-100.50\r", want: "100.50", wantNeg: true},
 		{name: "figure space tabular alignment", input: "1\u2007234.56", want: "1234.56"},
 		{name: "mixed tabs, spaces, and CR", input: " \t\r 45.20 \r ", want: "45.20"},
-		{name: "accounting negative with CRLF", input: " ($50.00) \r", want: "-50.00"},
+		{name: "accounting negative with CRLF", input: " ($50.00) \r", want: "50.00", wantNeg: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := cleanNumeric(tc.input)
-			if got != tc.want {
-				t.Errorf("cleanNumeric(%q): expected %q, got %q", tc.input, tc.want, got)
+			got, neg, ok := cleanNumeric(tc.input)
+			if !ok || got != tc.want || neg != tc.wantNeg {
+				t.Errorf("cleanNumeric(%q): expected (%q, %v, true), got (%q, %v, %v)", tc.input, tc.want, tc.wantNeg, got, neg, ok)
 			}
 		})
 	}
@@ -941,6 +1000,7 @@ func TestResolveCreditCardDate(t *testing.T) {
 		wantDate  string
 		wantErr   bool
 		errSubstr string
+		wantIs    error
 	}{
 		{
 			name:     "post date present and valid",
@@ -966,6 +1026,7 @@ func TestResolveCreditCardDate(t *testing.T) {
 			colIndex:  map[string]int{"post date": 0, "transaction date": 1},
 			wantErr:   true,
 			errSubstr: "row 7: missing both post date and transaction date",
+			wantIs:    model.ErrMissingPostingDate,
 		},
 		{
 			name:      "corrupted date returns parse error with line number",
@@ -984,6 +1045,9 @@ func TestResolveCreditCardDate(t *testing.T) {
 			if tc.wantErr {
 				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
 					t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
+				}
+				if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+					t.Errorf("expected errors.Is(err, %v), got: %v", tc.wantIs, err)
 				}
 				return
 			}
@@ -1198,4 +1262,44 @@ func TestParseCreditCardRow(t *testing.T) {
 		t.Parallel()
 		testParseCreditCardRowValidationError(t, colIndex)
 	})
+}
+
+func TestParseChaseRecords_CancellationBetweenRows(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	csvData := "Details,Posting Date,Description,Amount\n" +
+		"DEBIT,10/15/2026,ROW 1,-10.00\n" +
+		"DEBIT,10/16/2026,ROW 2,-20.00\n" +
+		"DEBIT,10/17/2026,ROW 3,-30.00\n"
+	meta := model.FileMetadata{
+		FileName:   "cancel.csv",
+		AccountID:  "acc-cancel",
+		IngestedAt: time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC),
+	}
+	required := [][]string{{"posting date"}, {"description"}, {"amount"}}
+
+	calls := 0
+	cancelAfterFirstRow := func(
+		row []string,
+		colIndex map[string]int,
+		lineNum int,
+		fm model.FileMetadata,
+	) (model.ChaseTransaction, error) {
+		calls++
+		if calls == 1 {
+			cancel()
+		}
+		return parseCheckingRow(row, colIndex, lineNum, fm)
+	}
+
+	_, err := parseChaseRecords(ctx, strings.NewReader(csvData), meta, "checking", required, cancelAfterFirstRow)
+	//nolint:errorlint // intentional direct equality check to ensure error is strictly unwrapped root sentinel
+	if err != context.Canceled {
+		t.Fatalf("expected strictly unwrapped context.Canceled, got: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected the row loop to stop after 1 row, parsed %d", calls)
+	}
 }
