@@ -1133,3 +1133,67 @@ func TestChaseExtractor_ClassifierAndRoutingEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func BenchmarkChaseExtractor_Extract_Checking(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	ctx := context.Background()
+	meta := testFileMetadata("chk-bench", "checking.csv")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		batch, err := extractor.Extract(ctx, strings.NewReader(mockCheckingCSVFixture), meta)
+		if err != nil || batch == nil {
+			b.Fatalf("unexpected extract error: %v", err)
+		}
+	}
+}
+
+func BenchmarkChaseExtractor_Extract_CreditCard(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	ctx := context.Background()
+	meta := testFileMetadata("card-bench", "credit_card.csv")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		batch, err := extractor.Extract(ctx, strings.NewReader(mockCreditCardCSVFixture), meta)
+		if err != nil || batch == nil {
+			b.Fatalf("unexpected extract error: %v", err)
+		}
+	}
+}
+
+func BenchmarkChaseExtractor_Extract_Parallel(b *testing.B) {
+	extractor := chase.NewExtractor(nil)
+	ctx := context.Background()
+	metaChk := testFileMetadata("chk-bench-p", "checking.csv")
+	metaCC := testFileMetadata("card-bench-p", "credit_card.csv")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		var i int
+		for pb.Next() {
+			var (
+				csvData string
+				meta    model.FileMetadata
+			)
+			if i%2 == 0 {
+				csvData = mockCheckingCSVFixture
+				meta = metaChk
+			} else {
+				csvData = mockCreditCardCSVFixture
+				meta = metaCC
+			}
+			i++
+			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err != nil || batch == nil {
+				b.Fatalf("unexpected extract error in parallel: %v", err)
+			}
+		}
+	})
+}

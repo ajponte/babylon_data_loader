@@ -685,6 +685,10 @@ func BenchmarkDirect_ParseRow(b *testing.B) {
 		if dateStr == "" {
 			b.Fatal("unexpected empty date")
 		}
+		postingDate, err := parseDate(dateStr)
+		if err != nil || postingDate.IsZero() {
+			b.Fatalf("unexpected date error: %v", err)
+		}
 
 		desc, err := parseDescription(getFieldValue(row, colIndex, "description"), lineNum)
 		if err != nil || desc == "" {
@@ -739,9 +743,9 @@ func BenchmarkRowReader_ParseRow(b *testing.B) {
 	for range b.N {
 		rr := newRowReader(row, colIndex, lineNum)
 
-		dateStr := rr.get("posting date", "post date")
-		if dateStr == "" {
-			b.Fatal("unexpected empty date")
+		postingDate, err := rr.parseDate("posting date", "post date")
+		if err != nil || postingDate.IsZero() {
+			b.Fatalf("unexpected date error: %v", err)
 		}
 
 		desc, err := rr.parseDescription("description")
