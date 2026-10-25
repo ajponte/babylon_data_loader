@@ -140,6 +140,8 @@ type collectionIndexes struct {
 func indexCatalog() []collectionIndexes {
 	return []collectionIndexes{
 		{collection: dataSyncCollection, indexes: dataSyncIndexes()},
+		{collection: chaseCollection, indexes: chaseIndexes()},
+		{collection: fidelityCollection, indexes: fidelityIndexes()},
 	}
 }
 
