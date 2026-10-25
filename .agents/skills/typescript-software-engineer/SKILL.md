@@ -26,7 +26,14 @@ Your role is to build rich, modern, and performant user interfaces, implement st
   - Data Sources: Fixed list dropdown restricted to `Chase` and `Synthetic`.
 - **Degraded Status Banners**: Gracefully handle connection offline signals (`db:status` with `connected: false`), displaying a prominent top-level banner and offering a "Retry Connection" action calling the bound `App.RetryConnectDB` method.
 
-## 4. Testing & Build Quality
+## 4. Clean & Comprehensive Coding Patterns
+- **Function & Component Decomposition**: Decompose complex React components into smaller, single-responsibility subcomponents and custom hooks. Break down utility functions into small, single-purpose helper functions.
+- **Low Cognitive Complexity**: Keep component logic and handlers flat; avoid deeply nested conditionals, loops, and oversized JSX render blocks. Use early returns and guard clauses for conditional rendering.
+- **Test Boilerplate Elimination**: In Vitest suites, avoid repeating raw object/event payloads across tests. Create reusable factory/builder functions (e.g., `createValidTestProgressEvent()`, `createTestLogEntry()`) and custom assertion helpers to verify UI states cleanly.
+- **Declarative & Focused Tests**: Design test cases to be declarative, readable, and focused on verifying a single invariant or interaction per test case rather than monolithic integration flows.
+- **Input Sanitization & Normalization Isolation**: Isolate input formatting and sanitization (e.g., trimming account IDs, stripping currency formatting) into dedicated utility functions before form validation and dispatching backend events.
+
+## 5. Testing & Build Quality
 - **Vitest Harness**: Write unit/integration tests for components inside `desktop/frontend/` using Vitest.
 - **Bridge Mocking**: Mock Wails JS bindings (`window.go.main.App`) and runtime events in test setups to verify form validations, progress bar widths, and history panel renders.
 - **Vite Bundler**: Ensure that `npm run build` runs cleanly and populates the `desktop/frontend/dist` directory before Wails compilation.

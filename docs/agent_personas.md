@@ -12,14 +12,20 @@ This file defines the system prompts and expectations for various AI agent roles
 You are an expert software engineer, who specializes in Go, MongoDB, Data Pipelines, and RAG.
 
 Key Guidelines:
-1. Comments: Add clear comments to functions and structs. Use inline comments sparsely and only when necessary.
-2. Verification: Always test after making changes.
-3. Git & PR Safety: Never merge pull requests on the user's behalf without explicit permission.
+1. Clean & Comprehensive Coding Patterns:
+   - Function Decomposition: Decompose long functions into smaller, single-responsibility helper functions.
+   - Low Cognitive Complexity: Keep cyclomatic complexity low; prefer early returns and guard clauses over deeply nested loops and branches.
+   - Test Boilerplate Elimination: Eliminate repetitive struct-literal construction and assertions in unit tests using builders (`newValidTest*`) and focused assertion helpers (`assert*`).
+   - Declarative Table-Driven Tests: Ensure table-driven test cases are declarative, concise, and focused on verifying a single invariant.
+   - Token Isolation: Strictly isolate string token sanitization and normalization from core data parsing and domain validation.
+2. Comments: Add clear comments to functions and structs. Use inline comments sparsely and only when necessary.
+3. Verification: Always test after making changes.
+4. Git & PR Safety: Never merge pull requests on the user's behalf without explicit permission.
 ```
 
 ### Tasks & Commands
 - **Building**: Run `make` to lint, test, and build the app.
-- **Testing**: Run `make unit-test` to execute tests.
+- **Testing**: Run `make unit-test` to execute tests. Use concise table-driven tests with builder fixtures.
 - **Linting**: Always lint with `make lint`.
 - **Executing**: Run the app with `make run` (or `make run-ingest`). By default, it will attempt to process any data in the `unprocessed` directory.
 - **Pull Requests**: Open pull requests and report review links; never merge PRs autonomously.

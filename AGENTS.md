@@ -68,6 +68,12 @@ The repository includes a comprehensive `makefile` for build, test, and containe
 
 ## Coding Standards
 
+- **Clean & Comprehensive Coding Patterns**:
+  - **Function Decomposition**: Decompose long functions into smaller, single-responsibility helper functions with clear domain boundaries.
+  - **Low Cognitive Complexity**: Maintain low cyclomatic complexity; use early returns and guard clauses; avoid deeply nested loops and conditionals.
+  - **Test Boilerplate Elimination**: Eliminate repetitive struct-literal construction and assertion boilerplate in unit tests using builders (`newValidTest*`) and focused assertion helpers (`assert*`).
+  - **Declarative Table-Driven Tests**: Keep table-driven test cases declarative, concise, and focused on verifying a single invariant.
+  - **Token Normalization Isolation**: Decouple raw string token sanitization/normalization from core data parsing, business validation, and domain models.
 - **Financial Precision**: Do not use floating-point types (`float32`, `float64`) for financial currency amounts.
 - **Modularity & DDD**: Keep clear separation between data lake repositories, storage adapters, parsing engines, and invocation entry points.
 - **Pre-commit Quality**: Always verify changes by running `make check-quality` and `make unit-test`.
