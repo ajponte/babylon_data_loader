@@ -121,6 +121,8 @@ The Fidelity adapter transforms brokerage portfolio holdings exports into strong
 4. **Cash Sweep Normalization**: Normalizes non-standard markers (`"**"`, `"FCASH"`, `"CORE"`) to `"CASH"`, while preserving valid mutual fund tickers with descriptions containing `"Total"` (e.g. `VTI`, `BND`, `TTE`).
 5. **Mandatory Schema Signatures**: Requires both a symbol alias (`"symbol"` / `"ticker"`) and a valuation alias (`"current value"`, `"market value"`, `"current balance"`) before parsing.
 6. **Single-Account Batch Inference**: Automatically infers batch `AccountID` when homogeneous accounts are present.
+7. **Full Legacy Field Parity & Performance Metric Extraction**: Extracts all 8 optional legacy portfolio columns (`LastPriceChange`, `TodaysGainLossDollar`, `TodaysGainLossPct`, `TotalGainLossDollar`, `TotalGainLossPct`, `PercentOfAccount`, `AverageCostBasis`, and `Type`). Percentage columns are parsed via `parsePercent` (pre-checking placeholders before `%` stripping, handling accounting parentheses `"(0.44%)"`, and rejecting embedded/duplicate `%`), while all 7 numeric performance fields enforce IEEE 754 finiteness (`model.ErrInvalidPerformanceMetric`).
+8. **Domain Parameter Object Architecture (`holdingIdentity`, `positionMetrics`)**: Decouples row identity resolution (`resolveIdentity` -> `holdingIdentity`) from short-circuiting numeric extraction (`metricRowReader.readCore` -> `coreMetrics` and `metricRowReader.readPerformance` -> `performanceMetrics`), applying metrics to `model.FidelityPosition` via `positionMetrics.applyTo`.
 
 For the complete technical blueprint and disclaimer filtering rules:  
 👉 **[Complete Fidelity Adapter Architecture Specification](./architecture/fidelity-adapter.md)**
