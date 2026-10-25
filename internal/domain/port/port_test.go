@@ -72,6 +72,36 @@ func (m *mockNotifier) NotifyProgress(
 	m.totals = append(m.totals, total)
 }
 
+// mockObjectStore implements port.ObjectStore for testing contract compliance.
+type mockObjectStore struct {
+	body       io.ReadCloser
+	getErr     error
+	archiveErr error
+	lastGet    string
+	lastSrc    string
+	lastDest   string
+}
+
+func (m *mockObjectStore) DownloadStream(
+	_ context.Context,
+	key string,
+) (io.ReadCloser, error) {
+	m.lastGet = key
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	return m.body, nil
+}
+
+func (m *mockObjectStore) ArchiveFile(
+	_ context.Context,
+	srcKey, destKey string,
+) error {
+	m.lastSrc = srcKey
+	m.lastDest = destKey
+	return m.archiveErr
+}
+
 func TestPortContracts_Extractor(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
@@ -169,5 +199,45 @@ func TestPortContracts_ProgressNotifier(t *testing.T) {
 	}
 	if notifier.currents[1] != 50 || notifier.totals[1] != 100 {
 		t.Errorf("unexpected progress at step 1: %d/%d", notifier.currents[1], notifier.totals[1])
+	}
+}
+
+func TestPortContracts_ObjectStore(t *testing.T) {
+	ctx := context.Background()
+	content := "statement-date,amount,memo\n2026-01-15,100.00,test"
+	body := io.NopCloser(strings.NewReader(content))
+
+	mock := &mockObjectStore{
+		body: body,
+	}
+	var store port.ObjectStore = mock
+
+	rc, err := store.DownloadStream(ctx, "unprocessed/data.csv")
+	if err != nil {
+		t.Fatalf("unexpected DownloadStream error: %v", err)
+	}
+	defer rc.Close()
+
+	if mock.lastGet != "unprocessed/data.csv" {
+		t.Errorf("expected lastGet 'unprocessed/data.csv', got %q", mock.lastGet)
+	}
+
+	data, readErr := io.ReadAll(rc)
+	if readErr != nil {
+		t.Fatalf("unexpected read error: %v", readErr)
+	}
+	if string(data) != content {
+		t.Errorf("expected content %q, got %q", content, string(data))
+	}
+
+	if archiveErr := store.ArchiveFile(ctx, "unprocessed/data.csv", "archive/data.csv"); archiveErr != nil {
+		t.Fatalf("unexpected ArchiveFile error: %v", archiveErr)
+	}
+	if mock.lastSrc != "unprocessed/data.csv" || mock.lastDest != "archive/data.csv" {
+		t.Errorf("expected archive keys unprocessed/data.csv -> archive/data.csv, got %s -> %s", mock.lastSrc, mock.lastDest)
+	}
+
+	if port.ErrObjectNotFound == nil || port.ErrObjectNotFound.Error() != "object not found" {
+		t.Errorf("expected port.ErrObjectNotFound to have message 'object not found'")
 	}
 }

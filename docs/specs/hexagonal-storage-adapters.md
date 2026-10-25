@@ -57,12 +57,36 @@ The MongoDB persistence adapter [`Repository`](../../internal/infra/storage/mong
    - Concurrent callers synchronize safely via the mutex, ensuring indexes are created exactly once under concurrent traffic (`TestEnsureIndexes_ConcurrentCallsCreateOnce`).
    - Public `EnsureIndexes(ctx)` iterates the catalog in deterministic slice order to ensure upfront initialization when desired.
 
+### 2.2 S3 Client Architecture & Driver Seams
+
+Authoritative implementation reference: [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go).
+
+The AWS S3 datalake storage adapter [`Client`](../../internal/infra/storage/s3/client.go) implements [`port.ObjectStore`](../../internal/domain/port/object_store.go) (`var _ port.ObjectStore = (*Client)(nil)`), isolating AWS SDK dependencies behind a mockable interface seam:
+
+1. **Configuration & Constructors**:
+   - `Config` specifies:
+     - `Bucket` (string, required): target S3 datalake bucket name.
+     - `Region` (string, optional): explicit AWS region. When omitted or empty, constructor falls back to standard AWS SDK default configuration credentials and region resolution chain.
+   - `NewClient(api ObjectAPI, bucket string) (*Client, error)`: constructor accepting an explicit `ObjectAPI` driver implementation and bucket string. Validates that `api` is non-nil (`ErrNilAPI`) and `bucket` is non-empty after trimming whitespace (`ErrMissingBucket`).
+   - `NewClientFromConfig(ctx context.Context, cfg Config) (*Client, error)`: constructs a production client using `awsconfig.LoadDefaultConfig(ctx, optFns...)` with optional region overrides, instantiating the SDK client via `awss3.NewFromConfig(awsCfg)`. Validates `cfg.Bucket` before attempting configuration loading.
+2. **Mockable `ObjectAPI` Driver Seam**:
+   - To achieve 100% hermetic unit testing without real AWS network calls, live cloud infrastructure, or external credentials in CI (`make test-ci`), driver interactions are decoupled via the `ObjectAPI` interface:
+     ```go
+     type ObjectAPI interface {
+         GetObject(ctx context.Context, in *awss3.GetObjectInput, optFns ...func(*awss3.Options)) (*awss3.GetObjectOutput, error)
+         CopyObject(ctx context.Context, in *awss3.CopyObjectInput, optFns ...func(*awss3.Options)) (*awss3.CopyObjectOutput, error)
+         DeleteObject(ctx context.Context, in *awss3.DeleteObjectInput, optFns ...func(*awss3.Options)) (*awss3.DeleteObjectOutput, error)
+     }
+     ```
+   - Production instances bind standard `*awss3.Client` (which satisfies `ObjectAPI` natively).
+   - Test suites instantiate `Client` via `NewClient` using test double `fakeObjectAPI` ([`client_test.go`](../../internal/infra/storage/s3/client_test.go)), intercepting requests, capturing parameter payloads, and injecting deterministic error responses.
+
 ---
 
 ## 3. Decision Record (M0 Decisions)
 
 > [!NOTE]
-> **Milestone Status (Phase 3C)**: Milestone 1 (M1 - Contract Frozen) DTO mappers and Milestone 2 (Phase 3C - Repository skeleton & dataSync audit sink) are fully implemented and verified with 87.9% statement test coverage across [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/). See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
+> **Milestone Status (Phase 3D)**: Milestone 1 (M1 - Contract Frozen DTO mappers), Milestone 2 (Phase 3C - Repository skeleton & dataSync audit sink), and Milestone 3 (Phase 3D - S3 Object Store adapter) are fully implemented and verified with 96.2% statement test coverage in [`internal/infra/storage/s3/`](../../internal/infra/storage/s3/) and 87.9% in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/). See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
 
 ### 3.1 User Decisions (D1–D8, A1)
 
@@ -260,6 +284,25 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
 2. Queries `dataSync` sorted by `syncedAt: -1`.
 3. Normalizes legacy dual fields where canonical fields are absent (`sync_timestamp` -> `SyncedAt`, `collection_name` -> `CollectionName`, `records_uploaded` -> `RecordCount`/`UpsertedCount`).
 
+### 5.4 S3 Object Store Contract (`port.ObjectStore`)
+
+Authoritative implementation references: [`internal/domain/port/object_store.go`](../../internal/domain/port/object_store.go) and [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go).
+
+The datalake object store adapter provides streaming raw statement retrieval and transactional-safe post-processing archiving:
+
+#### `DownloadStream(ctx context.Context, key string) (io.ReadCloser, error)`
+1. **Key Validation**: Rejects empty or whitespace-only keys with sentinel `s3.ErrMissingKey` without invoking SDK calls.
+2. **Context Propagation**: Passes caller context directly to `api.GetObject`, ensuring client cancellations or execution timeouts abort active network transfers.
+3. **Streaming Download Semantics**: Returns unbuffered `io.ReadCloser` (`out.Body`) directly to the caller. Unlike legacy [`storage/s3.go`](../../storage/s3.go) (which wrote downloaded objects to temporary local disk files via `os.Create` / `io.Copy`), the hexagonal adapter streams raw bytes directly into memory buffers or stream parsers. This eliminates local disk allocations, filesystem contention, and temp-file leakage in serverless/container environments. Caller owns closing the returned reader.
+4. **Hermetic Error Classification**: Translates AWS SDK `*types.NoSuchKey`, `*types.NotFound`, and coded error strings `"NoSuchKey"` / `"NotFound"` into wrapped sentinel `port.ErrObjectNotFound`. Transient or network failures wrap the underlying driver error.
+
+#### `ArchiveFile(ctx context.Context, srcKey, destKey string) error`
+1. **Key Validation**: Rejects empty or whitespace-only `srcKey` or `destKey` with `s3.ErrMissingKey`.
+2. **URL-Escaped `CopySource` Parity**: Computes `CopySource` as `<bucket>/<url.PathEscape(segment)>...` where leading slashes are stripped and each path segment is escaped individually. This guarantees bit-for-bit parity with legacy [`storage/s3.go`](../../storage/s3.go) across keys with spaces (`bank report.csv` -> `bank%20report.csv`), unicode characters (`résumé.csv` -> `r%C3%A9sum%C3%A9.csv`), and percent literals (`100%real.csv` -> `100%25real.csv`).
+3. **Strict Copy-Then-Delete Ordering**: Executes `CopyObject` first and verifies clean completion before calling `DeleteObject`. If `CopyObject` fails or encounters an error, the source object is **never deleted**, preserving datalake durability and preventing catastrophic data loss.
+4. **Non-Atomic Idempotence & Safe Retries**: While S3 lacks multi-operation transactional atomicity, `ArchiveFile` is idempotent and safe for retries: `CopyObject` unconditionally overwrites destination keys, and `DeleteObject` is idempotent in S3. If copy succeeds but delete fails (e.g., delete permission denial), the delete error is surfaced immediately to the caller for operational triage.
+5. **Driver Error Normalization**: If `CopyObject` fails due to a missing source (`*types.NoSuchKey`, `*types.NotFound`, or error codes `"NoSuchKey"` / `"NotFound"`), it is classified as `port.ErrObjectNotFound`. Error classification avoids direct dependencies on `smithy-go` types by using duck-typed interfaces (`type coder interface{ ErrorCode() string }`).
+
 ---
 
 ## 6. Error Taxonomy
@@ -270,7 +313,10 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
   - `mongo.ErrDuplicateKey`: Unique compound index violation (MongoDB code 11000).
   - `mongo.ErrMissingURI`: Constructor error when configuration URI is empty.
 - **Object Store Sentinels**:
-  - `port.ErrObjectNotFound`: Target S3 key does not exist.
+  - `port.ErrObjectNotFound`: Target S3 source key does not exist. Classified from `*types.NoSuchKey`, `*types.NotFound`, and duck-typed error codes `"NoSuchKey"` / `"NotFound"`.
+  - `s3.ErrMissingBucket`: Constructor error when configuration bucket is empty or whitespace-only.
+  - `s3.ErrMissingKey`: Operation error when source or destination key is empty or whitespace-only.
+  - `s3.ErrNilAPI`: Constructor error when provided `ObjectAPI` interface implementation is nil.
 
 ---
 
@@ -279,6 +325,7 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
 1. **2E Fidelity Placeholder Superset**: Accepts extended placeholder tokens (`-`, `pending`, `unknown`, accounting parens) mapping to `0.0` or `""`.
 2. **2F Strict Transaction Date Rejection**: Rejects unparseable non-placeholder dates with `ErrInvalidRow` instead of silently storing null.
 3. **`source.s3Uri` Deferred**: New records omit `source.s3Uri` until Phase 4 supplies it from entrypoint metadata.
+4. **S3 Streaming Download vs. Disk Spooling**: Legacy [`storage/s3.go`](../../storage/s3.go) forced S3 object downloads into local disk files via `os.Create` and `io.Copy`. The hexagonal adapter [`s3.Client`](../../internal/infra/storage/s3/client.go) returns an unbuffered `io.ReadCloser` stream directly to the caller (`port.ObjectStore.DownloadStream`), eliminating disk I/O bottlenecks and temporary file leakage in serverless execution environments.
 
 ---
 
@@ -292,11 +339,11 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
 ## 9. Implementation Milestones & Verification
 
 | Milestone | Phase | Description | Status | Verification Criteria |
-| :--- | :--- | :--- | :---: | :--- |
+| :--- | :--- | :--- | :--- | :--- |
 | **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
 | **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
 | **M2** | Phase 3C | Repository skeleton, index lifecycle, and `dataSync` audit sink in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go) (records write keys / `SaveBatch` scheduled for Phase 3E/3F). | **Complete** | 87.9% statement test coverage in [`internal/infra/storage/mongo/audit_test.go`](../../internal/infra/storage/mongo/audit_test.go); hermetic driver mock verification, credential leak defense, and race-free concurrent index creation verified. |
-| **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore`. | *Planned* | Hermetic S3 API mocks and streaming download validation. |
+| **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go). | **Complete** | 96.2% statement test coverage in [`internal/infra/storage/s3/client_test.go`](../../internal/infra/storage/s3/client_test.go); hermetic S3 API mocks, streaming download, URL-escaping parity, and copy-then-delete ordering verified. |
 | **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
 
 ### 9.1 Phase 3B Verification & Test Coverage Evidence
@@ -320,4 +367,17 @@ Key verified invariants include:
 - **Audit Sink Parity & Dual-Field Output**: `TestSyncLogDoc_LegacyBSONParity` and `TestLogSync_WritesDualFields` assert exact BSON field types and desktop compatibility dual fields (`collection_name`, `sync_timestamp`, and conditional `records_uploaded`).
 - **Strict Domain Validation & Zero Defaulting**: `TestLogSync_RejectsZeroSyncedAt` and `TestLogSync_RejectsNilAndInvalid` verify that nil logs and zero `SyncedAt` timestamps are rejected with sentinel errors (`model.ErrMissingSyncTime`, `model.ErrNilSyncLog`) without synthesizing or defaulting timestamps.
 - **Context Cancellation & Input Immutability**: `TestLogSync_CancelledContext` and `TestLogSync_DoesNotMutateInput` verify context cancellation short-circuits execution and caller domain objects remain strictly immutable.
+
+### 9.3 Phase 3D Verification & Test Coverage Evidence
+
+Phase 3D implements the AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go). It achieves **96.2% statement test coverage** across `internal/infra/storage/s3` (`go test -cover -race ./internal/infra/storage/s3/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
+
+Key verified invariants include:
+- **Hermetic Mock Seam (`fakeObjectAPI`)**: All operations (`GetObject`, `CopyObject`, `DeleteObject`) execute against the mockable `ObjectAPI` seam with 0 AWS network calls and 0 AWS credentials required (`TestNewClient_Validation`, `TestDownloadStream_ContextPropagated`).
+- **Unbuffered Streaming Download**: `TestDownloadStream_ReturnsBodyUnbuffered` verifies that `DownloadStream` returns the S3 body `io.ReadCloser` directly without spooling to local disk or buffering in memory.
+- **Strict Copy-Then-Delete Ordering**: `TestArchiveFile_CopyThenDelete` asserts exact call sequence `[CopyObject, DeleteObject]`. `TestArchiveFile_NoDeleteWhenCopyFails` proves that if `CopyObject` encounters an error, `DeleteObject` is never invoked, preventing data loss.
+- **Delete Failure Propagation**: `TestArchiveFile_DeleteFailureSurfaced` validates that when `CopyObject` succeeds but `DeleteObject` fails, the error is surfaced to caller for retry handling.
+- **Bit-for-Bit URL-Escaped `CopySource` Parity**: `TestArchiveFile_CopySourceEscaping_LegacyParity` table-driven test verifies segment-by-segment escaping (`url.PathEscape`) matching legacy [`storage/s3.go`](../../storage/s3.go) across spaces, plus signs, percent signs, unicode characters, leading slashes, and nested directories.
+- **Hermetic Error Classification**: `TestDownloadStream_NoSuchKey` and `TestArchiveFile_SourceMissing` assert that `*types.NoSuchKey`, `*types.NotFound`, and coded error strings `"NoSuchKey"` / `"NotFound"` map to sentinel `port.ErrObjectNotFound` without importing smithy-go.
+- **Layer Isolation & Architectural Invariants**: Clean `depguard` linting confirms that `internal/infra/storage/s3` only imports allowed packages (`internal/domain/port`, standard library, and approved AWS SDK packages), maintaining strict hexagonal isolation and unwired adapter status until Phase 4.
 
