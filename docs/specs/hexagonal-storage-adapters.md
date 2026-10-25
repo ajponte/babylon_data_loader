@@ -119,6 +119,8 @@ The AWS S3 datalake storage adapter [`Client`](../../internal/infra/storage/s3/c
 
 ### 4.1 Index Catalog
 
+Authoritative implementation references: [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go).
+
 | Collection | Index Name | Keys (Ordered) | Unique | Sparse | Upsert Filter |
 | :--- | :--- | :--- | :---: | :---: | :--- |
 | `transactions_chase` | `idx_chase_account_posting_date` | `{ accountId: 1, postingDate: -1 }` | no | no | — |
@@ -252,6 +254,23 @@ Implemented in [`internal/infra/storage/mongo/audit.go`](../../internal/infra/st
 #### Dotted `$set` Invariant
 To prevent overwriting unmapped legacy lineage attributes (such as historical `source.s3Uri`), `$set` updates flatten the `source` struct to dotted field paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`).
 
+### 4.3 Record Write Keys, Upsert Filters, Flattened Dotted `$set` Builder & Batch Router
+
+Authoritative implementation reference: [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go).
+
+1. **Upsert Filter Builders**:
+   - `chaseFilter(d chaseDoc) bson.D`: Returns 5-field filter matching the unique compound index keys: `{accountId, postingDate, description, amount, source.rowNumber}`. Value types match stored BSON types (string, UTC BSON Date, string, float64, int64).
+   - `fidelityFilter(d fidelityDoc) bson.D`: Returns 3-field filter matching the unique compound index keys: `{accountNumber, symbol, asOfDate}`. Value types match stored BSON types (string, string, UTC BSON Date).
+2. **Flattened Dotted `$set` Builder (`setDocument`)**:
+   - Marshals the persistence DTO to BSON, decodes into `bson.D`, and flattens embedded `source` subdocument elements into dotted paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`).
+   - `source.s3Uri` is omitted when empty due to `lineageDoc.S3URI` `omitempty` tag (decision E6), preserving any existing historical values in MongoDB Atlas.
+   - Restored A1 fields (2E zero-value numeric fields `0.0`, empty string `""`, and 2F `transactionDate` for credit card) are preserved in `$set`.
+   - Wraps the flattened document in `bson.D{{Key: "$set", Value: flattened}}`.
+3. **Destination Router & Write Planner**:
+   - `collectionFor(dest model.Destination) (string, error)`: Maps destinations to target collection names. `DestChaseChecking` and `DestChaseCreditCard` share the identical underlying string value (`"transactions_chase"`); matching `DestChaseChecking` avoids Go duplicate-case compile errors while covering both destinations.
+   - `buildWritePlan(batch *model.IngestionBatch) (writePlan, error)`: Routes batches into collection names and unordered `mongodrv.UpdateOneModel` slices with `Upsert = true`.
+   - Zero `AsOfDate` guard on Fidelity batches returns `model.ErrMissingAsOfDate` (defense-in-depth for decision D2). Empty batches (`RecordCount == 0`) return a valid plan with 0 models and nil error.
+
 ---
 
 ## 5. Storage Adapter Contracts
@@ -342,7 +361,7 @@ The datalake object store adapter provides streaming raw statement retrieval and
 | :--- | :--- | :--- | :--- | :--- |
 | **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
 | **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
-| **M2** | Phase 3C | Repository skeleton, index lifecycle, and `dataSync` audit sink in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go) (records write keys / `SaveBatch` scheduled for Phase 3E/3F). | **Complete** | 87.9% statement test coverage in [`internal/infra/storage/mongo/audit_test.go`](../../internal/infra/storage/mongo/audit_test.go); hermetic driver mock verification, credential leak defense, and race-free concurrent index creation verified. |
+| **M2** | Phase 3C / 3E | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, and batch router in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go), [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), and [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go) (`SaveBatch` driver execution scheduled for Phase 3F). | **Complete** | 89.3% statement test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/); legacy index parity, upsert filters equal to unique keys, flattened lineage, and pure batch routing verified. |
 | **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go). | **Complete** | 96.2% statement test coverage in [`internal/infra/storage/s3/client_test.go`](../../internal/infra/storage/s3/client_test.go); hermetic S3 API mocks, streaming download, URL-escaping parity, and copy-then-delete ordering verified. |
 | **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
 
@@ -380,4 +399,16 @@ Key verified invariants include:
 - **Bit-for-Bit URL-Escaped `CopySource` Parity**: `TestArchiveFile_CopySourceEscaping_LegacyParity` table-driven test verifies segment-by-segment escaping (`url.PathEscape`) matching legacy [`storage/s3.go`](../../storage/s3.go) across spaces, plus signs, percent signs, unicode characters, leading slashes, and nested directories.
 - **Hermetic Error Classification**: `TestDownloadStream_NoSuchKey` and `TestArchiveFile_SourceMissing` assert that `*types.NoSuchKey`, `*types.NotFound`, and coded error strings `"NoSuchKey"` / `"NotFound"` map to sentinel `port.ErrObjectNotFound` without importing smithy-go.
 - **Layer Isolation & Architectural Invariants**: Clean `depguard` linting confirms that `internal/infra/storage/s3` only imports allowed packages (`internal/domain/port`, standard library, and approved AWS SDK packages), maintaining strict hexagonal isolation and unwired adapter status until Phase 4.
+
+### 9.4 Phase 3E Verification & Test Coverage Evidence
+
+Phase 3E implements the record write keys, legacy index catalog registration, unique upsert filters, flattened dotted `$set` builder, and batch write planner in [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go). It achieves **89.3% statement test coverage** across `internal/infra/storage/mongo` (`go test -cover -race ./internal/infra/storage/mongo/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
+
+Key verified invariants include:
+- **Legacy Index Catalog Parity**: `TestIndexCatalog_LegacyParity` and `TestIndexCatalog_RegisteredInRepository` verify that `chaseIndexes()` and `fidelityIndexes()` match Atlas indexes byte-for-byte in names, key order, sort direction, unique constraints, and sparse options. Indexes are ensured in deterministic order (`dataSync`, `transactions_chase`, `positions_fidelity`), and `transactions_synthetic` has zero index specifications (decision D1).
+- **Upsert Filter Invariant**: `TestUpsertFilter_ChaseLegacyParity`, `TestUpsertFilter_FidelityLegacyParity`, and `TestUpsertFilter_EqualsUniqueIndexKeys` prove that for all collections, the upsert filter keys match the unique compound index keys in order and data types (UTC dates, float64 amounts, int64 row numbers).
+- **Dotted `$set` Lineage Preservation**: `TestSetDocument_FlattensSourceLineage` and `TestSetDocument_OmitsS3URIPlaceholder` verify that lineage fields are flattened to dotted paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`) with no top-level `source` object and no empty `source.s3Uri`, preserving historical unmapped lineage in MongoDB Atlas (decision E6).
+- **Restored A1 Fields**: `TestSetDocument_IncludesRestoredA1Fields` verifies that all eight restored 2E fields appear in Fidelity `$set` updates (even when zero), and 2F `transactionDate` is present for credit cards and omitted for checking.
+- **Pure Batch Router & Write Planner**: `TestCollectionFor_AllDestinations`, `TestBuildWritePlan_PayloadMismatch`, `TestBuildWritePlan_SyntheticUsesChaseShape`, `TestBuildWritePlan_UpsertModels`, `TestBuildWritePlan_FidelityMissingAsOfDate`, and `TestBuildWritePlan_EmptyPayload` verify destination mapping without duplicate switch cases, payload type assertion guards, synthetic document routing with Chase shape (decision D4), zero `AsOfDate` sentinel error enforcement (decision D2), and empty batch handling with zero allocations.
+
 

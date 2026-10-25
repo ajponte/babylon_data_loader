@@ -18,6 +18,8 @@ import (
 )
 
 type fakeCollection struct {
+	name         string
+	db           *fakeDatabase
 	mu           sync.Mutex
 	insertedDocs []any
 	createdIndex [][]mongodrv.IndexModel
@@ -39,6 +41,11 @@ func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.Ins
 
 func (f *fakeCollection) CreateIndexes(_ context.Context, models []mongodrv.IndexModel) error {
 	atomic.AddInt32(&f.idxCalls, 1)
+	if f.db != nil {
+		f.db.mu.Lock()
+		f.db.order = append(f.db.order, f.name)
+		f.db.mu.Unlock()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failIdxCount > 0 {
@@ -50,12 +57,35 @@ func (f *fakeCollection) CreateIndexes(_ context.Context, models []mongodrv.Inde
 }
 
 type fakeDatabase struct {
-	coll *fakeCollection
+	mu          sync.Mutex
+	collections map[string]*fakeCollection
+	order       []string
 }
 
-func newFakeDatabase() *fakeDatabase                   { return &fakeDatabase{coll: &fakeCollection{}} }
-func (f *fakeDatabase) Collection(_ string) collection { return f.coll }
-func (f *fakeDatabase) dataSyncColl() *fakeCollection  { return f.coll }
+func newFakeDatabase() *fakeDatabase {
+	return &fakeDatabase{
+		collections: make(map[string]*fakeCollection),
+	}
+}
+
+func (f *fakeDatabase) Collection(name string) collection {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	coll, ok := f.collections[name]
+	if !ok {
+		coll = &fakeCollection{name: name, db: f}
+		f.collections[name] = coll
+	}
+	return coll
+}
+
+func (f *fakeDatabase) dataSyncColl() *fakeCollection {
+	return f.Collection(dataSyncCollection).(*fakeCollection)
+}
+
+func (f *fakeDatabase) collectionColl(name string) *fakeCollection {
+	return f.Collection(name).(*fakeCollection)
+}
 
 func goldenSyncLogSuccessFields() []bsonFieldExpectation {
 	return []bsonFieldExpectation{
