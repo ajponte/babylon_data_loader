@@ -17,7 +17,10 @@ type bsonFieldExpectation struct {
 	typ bsontype.Type
 }
 
-// goldenChaseCCFields transcribed from legacy datalake/model/chase_transaction.go.
+// Golden schema expectations cite canonical specification docs/specs/hexagonal-storage-adapters.md §4.1/§4.2.
+
+// goldenChaseCCFields transcribed from legacy datalake/model/chase_transaction.go,
+// adhering to docs/specs/hexagonal-storage-adapters.md §4.2 (chaseDoc schema).
 func goldenChaseCCFields() []bsonFieldExpectation {
 	return []bsonFieldExpectation{
 		{"accountId", bson.TypeString},
@@ -36,14 +39,24 @@ func goldenChaseCCFields() []bsonFieldExpectation {
 	}
 }
 
-// goldenChaseCheckingFields transcribed from legacy datalake/model/chase_transaction.go.
-// It matches Chase CC fields with transactionDate omitted.
-func goldenChaseCheckingFields() []bsonFieldExpectation {
-	cc := goldenChaseCCFields()
-	return append(cc[:2:2], cc[3:]...)
+func filterExpectationsExcluding(fields []bsonFieldExpectation, excludeKey string) []bsonFieldExpectation {
+	filtered := make([]bsonFieldExpectation, 0, len(fields))
+	for _, f := range fields {
+		if f.key != excludeKey {
+			filtered = append(filtered, f)
+		}
+	}
+	return filtered
 }
 
-// goldenSourceFields transcribed from legacy datalake/model/fidelity_position.go and datalake/lineage.go.
+// goldenChaseCheckingFields defines the canonical Chase Checking BSON document field order and types,
+// adhering to docs/specs/hexagonal-storage-adapters.md §4.2 (chaseDoc schema, transactionDate omitted).
+func goldenChaseCheckingFields() []bsonFieldExpectation {
+	return filterExpectationsExcluding(goldenChaseCCFields(), "transactionDate")
+}
+
+// goldenSourceFields transcribed from legacy datalake/model/fidelity_position.go and datalake/lineage.go,
+// adhering to docs/specs/hexagonal-storage-adapters.md §4.2 (lineageDoc schema).
 func goldenSourceFields() []bsonFieldExpectation {
 	return []bsonFieldExpectation{
 		{"fileName", bson.TypeString},
@@ -53,7 +66,8 @@ func goldenSourceFields() []bsonFieldExpectation {
 	}
 }
 
-// goldenFidelityFields transcribed from legacy datalake/model/fidelity_position.go.
+// goldenFidelityFields transcribed from legacy datalake/model/fidelity_position.go,
+// adhering to docs/specs/hexagonal-storage-adapters.md §4.2 (fidelityDoc schema).
 func goldenFidelityFields() []bsonFieldExpectation {
 	return []bsonFieldExpectation{
 		{"accountNumber", bson.TypeString},
@@ -118,6 +132,19 @@ func newValidFidelityPosition() model.FidelityPosition {
 	}
 }
 
+func newZeroLegacyFidelityPosition() model.FidelityPosition {
+	pos := newValidFidelityPosition()
+	pos.LastPriceChange = 0.0
+	pos.TodaysGainLossDollar = 0.0
+	pos.TodaysGainLossPct = 0.0
+	pos.TotalGainLossDollar = 0.0
+	pos.TotalGainLossPct = 0.0
+	pos.PercentOfAccount = 0.0
+	pos.AverageCostBasis = 0.0
+	pos.Type = ""
+	return pos
+}
+
 func mustMarshal(t *testing.T, doc any) []byte {
 	t.Helper()
 	b, err := bson.Marshal(doc)
@@ -180,6 +207,70 @@ func collectKeys(t *testing.T, raw []byte) []string {
 	return keys
 }
 
+func assertRawDouble(t *testing.T, rawDoc bson.Raw, field string, want float64) {
+	t.Helper()
+	val, err := rawDoc.LookupErr(field)
+	if err != nil {
+		t.Errorf("missing field %q: %v", field, err)
+		return
+	}
+	if val.Type != bson.TypeDouble {
+		t.Errorf("field %q type mismatch: got %s, want %s", field, val.Type, bson.TypeDouble)
+		return
+	}
+	if got := val.Double(); got != want {
+		t.Errorf("field %q value mismatch: got %v, want %v", field, got, want)
+	}
+}
+
+func assertRawString(t *testing.T, rawDoc bson.Raw, field string, want string) {
+	t.Helper()
+	val, err := rawDoc.LookupErr(field)
+	if err != nil {
+		t.Errorf("missing field %q: %v", field, err)
+		return
+	}
+	if val.Type != bson.TypeString {
+		t.Errorf("field %q type mismatch: got %s, want %s", field, val.Type, bson.TypeString)
+		return
+	}
+	if got := val.StringValue(); got != want {
+		t.Errorf("field %q value mismatch: got %q, want %q", field, got, want)
+	}
+}
+
+func assertRawInt64(t *testing.T, rawDoc bson.Raw, field string, want int64) {
+	t.Helper()
+	val, err := rawDoc.LookupErr(field)
+	if err != nil {
+		t.Errorf("missing field %q: %v", field, err)
+		return
+	}
+	if val.Type != bson.TypeInt64 {
+		t.Errorf("field %q type mismatch: got %s, want %s", field, val.Type, bson.TypeInt64)
+		return
+	}
+	if got := val.Int64(); got != want {
+		t.Errorf("field %q value mismatch: got %d, want %d", field, got, want)
+	}
+}
+
+func assertRawDateTime(t *testing.T, rawDoc bson.Raw, field string, want time.Time) {
+	t.Helper()
+	val, err := rawDoc.LookupErr(field)
+	if err != nil {
+		t.Errorf("missing field %q: %v", field, err)
+		return
+	}
+	if val.Type != bson.TypeDateTime {
+		t.Errorf("field %q type mismatch: got %s, want %s", field, val.Type, bson.TypeDateTime)
+		return
+	}
+	if got := val.DateTime(); got != want.UnixMilli() {
+		t.Errorf("field %q value mismatch: got %d ms (%v), want %d ms (%v)", field, got, time.UnixMilli(got), want.UnixMilli(), want)
+	}
+}
+
 // 1. TestChaseDoc_LegacyBSONParity asserts full chaseDoc parity against golden legacy literals.
 func TestChaseDoc_LegacyBSONParity(t *testing.T) {
 	tests := []struct {
@@ -198,17 +289,33 @@ func TestChaseDoc_LegacyBSONParity(t *testing.T) {
 			assertDocFields(t, raw, tc.wantDoc)
 			assertSourceFields(t, raw, goldenSourceFields())
 
-			sourceDoc := bson.Raw(raw).Lookup("source").Document()
-			rowNum := sourceDoc.Lookup("rowNumber")
-			if rowNum.Type != bson.TypeInt64 || rowNum.Int64() != 42 {
-				t.Errorf("expected source.rowNumber Int64(42), got %s(%v)", rowNum.Type, rowNum)
+			rawDoc := bson.Raw(raw)
+			assertRawString(t, rawDoc, "accountId", tc.tx.AccountID)
+			assertRawDateTime(t, rawDoc, "postingDate", tc.tx.PostingDate)
+			assertRawString(t, rawDoc, "description", tc.tx.Description)
+			assertRawDouble(t, rawDoc, "amount", tc.tx.Amount)
+			assertRawString(t, rawDoc, "transactionType", tc.tx.Type)
+			if tc.tx.Balance != nil {
+				assertRawDouble(t, rawDoc, "balance", *tc.tx.Balance)
 			}
+			assertRawString(t, rawDoc, "category", tc.tx.Category)
+			assertRawString(t, rawDoc, "details", tc.tx.Details)
+			assertRawString(t, rawDoc, "checkOrSlipNum", tc.tx.CheckOrSlipNum)
+			assertRawString(t, rawDoc, "memo", tc.tx.Memo)
+			assertRawString(t, rawDoc, "dataSource", "chase")
 
-			_, lookupErr := bson.Raw(raw).LookupErr("transactionDate")
-			if tc.hasTxDate && lookupErr != nil {
-				t.Errorf("expected transactionDate to be present")
-			} else if !tc.hasTxDate && lookupErr == nil {
-				t.Errorf("expected transactionDate to be omitted")
+			sourceDoc := rawDoc.Lookup("source").Document()
+			assertRawString(t, sourceDoc, "fileName", tc.tx.Lineage.FileName)
+			assertRawInt64(t, sourceDoc, "rowNumber", int64(tc.tx.Lineage.RowNumber))
+			assertRawDateTime(t, sourceDoc, "ingestedAt", tc.tx.Lineage.IngestedAt)
+			assertRawString(t, sourceDoc, "sha256", tc.tx.Lineage.FileHash)
+
+			if tc.hasTxDate {
+				assertRawDateTime(t, rawDoc, "transactionDate", *tc.tx.TransactionDate)
+			} else {
+				if _, lookupErr := rawDoc.LookupErr("transactionDate"); lookupErr == nil {
+					t.Errorf("expected transactionDate to be omitted")
+				}
 			}
 		})
 	}
@@ -216,27 +323,43 @@ func TestChaseDoc_LegacyBSONParity(t *testing.T) {
 
 // 2. TestFidelityDoc_LegacyBSONParity verifies exact field order, names, and types against legacy table.
 func TestFidelityDoc_LegacyBSONParity(t *testing.T) {
-	raw := mustMarshal(t, toFidelityDoc(newValidFidelityPosition()))
+	pos := newValidFidelityPosition()
+	raw := mustMarshal(t, toFidelityDoc(pos))
 	assertDocFields(t, raw, goldenFidelityFields())
 	assertSourceFields(t, raw, goldenSourceFields())
 
 	rawDoc := bson.Raw(raw)
-	if asOf := rawDoc.Lookup("asOfDate"); asOf.Type != bson.TypeDateTime {
-		t.Errorf("expected asOfDate DateTime, got %s", asOf.Type)
-	}
-	if cost := rawDoc.Lookup("costBasisTotal"); cost.Type != bson.TypeDouble {
-		t.Errorf("expected costBasisTotal Double, got %s", cost.Type)
-	}
+	// Value-level parity assertions (F-01) verifying all string, date, and distinct float64 fields
+	// (specifically all 8 distinct Phase 2E performance fields) match input values with no swapped fields.
+	assertRawString(t, rawDoc, "accountNumber", pos.AccountID)
+	assertRawString(t, rawDoc, "accountName", pos.AccountName)
+	assertRawString(t, rawDoc, "symbol", pos.Symbol)
+	assertRawString(t, rawDoc, "description", pos.Description)
+	assertRawDouble(t, rawDoc, "quantity", pos.Quantity)
+	assertRawDouble(t, rawDoc, "lastPrice", pos.LastPrice)
+	assertRawDouble(t, rawDoc, "lastPriceChange", pos.LastPriceChange)
+	assertRawDouble(t, rawDoc, "currentValue", pos.CurrentValue)
+	assertRawDouble(t, rawDoc, "todaysGainLossDollar", pos.TodaysGainLossDollar)
+	assertRawDouble(t, rawDoc, "todaysGainLossPct", pos.TodaysGainLossPct)
+	assertRawDouble(t, rawDoc, "totalGainLossDollar", pos.TotalGainLossDollar)
+	assertRawDouble(t, rawDoc, "totalGainLossPct", pos.TotalGainLossPct)
+	assertRawDouble(t, rawDoc, "percentOfAccount", pos.PercentOfAccount)
+	assertRawDouble(t, rawDoc, "costBasisTotal", pos.CostBasis)
+	assertRawDouble(t, rawDoc, "averageCostBasis", pos.AverageCostBasis)
+	assertRawString(t, rawDoc, "type", pos.Type)
+	assertRawDateTime(t, rawDoc, "asOfDate", pos.AsOfDate)
+	assertRawString(t, rawDoc, "dataSource", "fidelity")
+
+	sourceDoc := rawDoc.Lookup("source").Document()
+	assertRawString(t, sourceDoc, "fileName", pos.Lineage.FileName)
+	assertRawInt64(t, sourceDoc, "rowNumber", int64(pos.Lineage.RowNumber))
+	assertRawDateTime(t, sourceDoc, "ingestedAt", pos.Lineage.IngestedAt)
+	assertRawString(t, sourceDoc, "sha256", pos.Lineage.FileHash)
 }
 
 // 3. TestFidelityDoc_ZeroLegacyFieldsEmitted asserts zero 2E fields (0.0 doubles and "" string) are emitted.
 func TestFidelityDoc_ZeroLegacyFieldsEmitted(t *testing.T) {
-	pos := newValidFidelityPosition()
-	pos.LastPriceChange, pos.TodaysGainLossDollar = 0.0, 0.0
-	pos.TodaysGainLossPct, pos.TotalGainLossDollar = 0.0, 0.0
-	pos.TotalGainLossPct, pos.PercentOfAccount = 0.0, 0.0
-	pos.AverageCostBasis, pos.Type = 0.0, ""
-
+	pos := newZeroLegacyFidelityPosition()
 	rawDoc := bson.Raw(mustMarshal(t, toFidelityDoc(pos)))
 	zeroDoubleFields := []string{
 		"lastPriceChange", "todaysGainLossDollar", "todaysGainLossPct",
@@ -278,6 +401,25 @@ func TestChaseDoc_TransactionDateUTCAndNotAliased(t *testing.T) {
 	*tx.TransactionDate = txDate.Add(48 * time.Hour)
 	if doc.TransactionDate.Equal(*tx.TransactionDate) || !doc.TransactionDate.Equal(originalTxDate) {
 		t.Errorf("DTO TransactionDate was mutated via aliased input pointer")
+	}
+}
+
+// 4b. TestChaseDoc_BalanceNotAliased asserts Balance pointer independence between domain entity and DTO.
+func TestChaseDoc_BalanceNotAliased(t *testing.T) {
+	bal := 1234.56
+	origBal := bal
+	tx := newValidChaseCC()
+	tx.Balance = &bal
+
+	doc := toChaseDoc(tx, dataSourceChase)
+	if doc.Balance == nil || *doc.Balance != origBal {
+		t.Fatalf("expected balance %f, got %v", origBal, doc.Balance)
+	}
+
+	// Mutate input pointer and ensure DTO remains unaffected.
+	*tx.Balance = 9999.99
+	if *doc.Balance == *tx.Balance || *doc.Balance != origBal {
+		t.Errorf("DTO Balance was mutated via aliased input pointer: got %f, want %f", *doc.Balance, origBal)
 	}
 }
 
@@ -324,6 +466,11 @@ func TestSyntheticDoc_UsesChaseShape(t *testing.T) {
 		if _, lookupErr := rawDoc.LookupErr(key); lookupErr == nil {
 			t.Errorf("legacy PascalCase key %q should not be present in synthetic doc", key)
 		}
+	}
+
+	// Explicitly assert transactionDate is omitted in synthetic transactions (F-04).
+	if _, lookupErr := rawDoc.LookupErr("transactionDate"); lookupErr == nil {
+		t.Errorf("expected transactionDate to be omitted in synthetic doc, but was present")
 	}
 
 	assertDocFields(t, raw, goldenChaseCheckingFields())
@@ -396,34 +543,75 @@ func TestDocs_KeySetEqualsLegacyStruct(t *testing.T) {
 	}
 }
 
-// 9. TestDocs_TimesNormalizedToUTC verifies non-UTC timestamps are converted to UTC instants.
+// 9. TestDocs_TimesNormalizedToUTC verifies non-UTC timestamps are converted to UTC instants
+// and sub-millisecond nanoseconds serialize without shifting date or hour.
 func TestDocs_TimesNormalizedToUTC(t *testing.T) {
-	jst := time.FixedZone("JST", 9*3600)
-	cst := time.FixedZone("CST", -6*3600)
-	postingTime := time.Date(2026, 10, 15, 9, 0, 0, 0, jst)
-	txTime := time.Date(2026, 10, 14, 18, 0, 0, 0, cst)
-	ingestedTime := time.Date(2026, 10, 15, 12, 0, 0, 0, jst)
-	asOfTime := time.Date(2026, 10, 15, 23, 0, 0, 0, cst)
+	t.Run("ZoneConversionToUTC", func(t *testing.T) {
+		jst := time.FixedZone("JST", 9*3600)
+		cst := time.FixedZone("CST", -6*3600)
+		postingTime := time.Date(2026, 10, 15, 9, 0, 0, 0, jst)
+		txTime := time.Date(2026, 10, 14, 18, 0, 0, 0, cst)
+		ingestedTime := time.Date(2026, 10, 15, 12, 0, 0, 0, jst)
+		asOfTime := time.Date(2026, 10, 15, 23, 0, 0, 0, cst)
 
-	tx := newValidChaseCC()
-	tx.PostingDate, tx.TransactionDate, tx.Lineage.IngestedAt = postingTime, &txTime, ingestedTime
-	chaseResult := toChaseDoc(tx, dataSourceChase)
+		tx := newValidChaseCC()
+		tx.PostingDate, tx.TransactionDate, tx.Lineage.IngestedAt = postingTime, &txTime, ingestedTime
+		chaseResult := toChaseDoc(tx, dataSourceChase)
 
-	assertUTC := func(name string, got time.Time, want time.Time) {
-		t.Helper()
-		if got.Location() != time.UTC || !got.Equal(want) {
-			t.Errorf("%s: got %v (loc %v), want %v", name, got, got.Location(), want)
+		assertUTC := func(name string, got time.Time, want time.Time) {
+			t.Helper()
+			if got.Location() != time.UTC || !got.Equal(want) {
+				t.Errorf("%s: got %v (loc %v), want %v", name, got, got.Location(), want)
+			}
 		}
-	}
-	assertUTC("PostingDate", chaseResult.PostingDate, postingTime)
-	assertUTC("TransactionDate", *chaseResult.TransactionDate, txTime)
-	assertUTC("Source.IngestedAt", chaseResult.Source.IngestedAt, ingestedTime)
+		assertUTC("PostingDate", chaseResult.PostingDate, postingTime)
+		assertUTC("TransactionDate", *chaseResult.TransactionDate, txTime)
+		assertUTC("Source.IngestedAt", chaseResult.Source.IngestedAt, ingestedTime)
 
-	pos := newValidFidelityPosition()
-	pos.AsOfDate, pos.Lineage.IngestedAt = asOfTime, ingestedTime
-	fidResult := toFidelityDoc(pos)
-	assertUTC("AsOfDate", fidResult.AsOfDate, asOfTime)
-	assertUTC("Fidelity Source.IngestedAt", fidResult.Source.IngestedAt, ingestedTime)
+		pos := newValidFidelityPosition()
+		pos.AsOfDate, pos.Lineage.IngestedAt = asOfTime, ingestedTime
+		fidResult := toFidelityDoc(pos)
+		assertUTC("AsOfDate", fidResult.AsOfDate, asOfTime)
+		assertUTC("Fidelity Source.IngestedAt", fidResult.Source.IngestedAt, ingestedTime)
+	})
+
+	t.Run("SubMillisecondNanosecondsExactMilliseconds", func(t *testing.T) {
+		// Timestamp with sub-millisecond nanoseconds (500ms + 123456ns = 500,123,456ns).
+		subMilliTime := time.Date(2026, 10, 15, 14, 30, 0, 500_123_456, time.UTC)
+		tx := newValidChaseCC()
+		tx.PostingDate = subMilliTime
+		tx.TransactionDate = &subMilliTime
+		tx.Lineage.IngestedAt = subMilliTime
+
+		raw := mustMarshal(t, toChaseDoc(tx, dataSourceChase))
+		rawDoc := bson.Raw(raw)
+
+		expectedMillis := subMilliTime.UnixMilli()
+		expectedTime := time.UnixMilli(expectedMillis).UTC()
+
+		verifyBSONDateTime := func(field string, dt int64) {
+			t.Helper()
+			if dt != expectedMillis {
+				t.Errorf("%s: expected %d ms, got %d ms", field, expectedMillis, dt)
+			}
+			gotTime := time.UnixMilli(dt).UTC()
+			if gotTime.Year() != subMilliTime.Year() || gotTime.Month() != subMilliTime.Month() ||
+				gotTime.Day() != subMilliTime.Day() || gotTime.Hour() != subMilliTime.Hour() ||
+				gotTime.Minute() != subMilliTime.Minute() || gotTime.Second() != subMilliTime.Second() {
+				t.Errorf("%s: date/hour shifted: got %v, want %v", field, gotTime, expectedTime)
+			}
+		}
+
+		verifyBSONDateTime("postingDate", rawDoc.Lookup("postingDate").DateTime())
+		verifyBSONDateTime("transactionDate", rawDoc.Lookup("transactionDate").DateTime())
+		sourceDoc := rawDoc.Lookup("source").Document()
+		verifyBSONDateTime("source.ingestedAt", sourceDoc.Lookup("ingestedAt").DateTime())
+
+		pos := newValidFidelityPosition()
+		pos.AsOfDate = subMilliTime
+		fidRaw := mustMarshal(t, toFidelityDoc(pos))
+		verifyBSONDateTime("asOfDate", bson.Raw(fidRaw).Lookup("asOfDate").DateTime())
+	})
 }
 
 // 10. TestMapper_PureNoMutation asserts inputs are never mutated and mappers are deterministic.
