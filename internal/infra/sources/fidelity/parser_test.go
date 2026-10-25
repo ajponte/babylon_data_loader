@@ -587,3 +587,305 @@ func TestFindColumn(t *testing.T) {
 		}
 	})
 }
+
+func sampleLegacy16ColIndex() map[string]int {
+	return map[string]int{
+		"account number":            0,
+		"account name":              1,
+		"symbol":                    2,
+		"description":               3,
+		"quantity":                  4,
+		"last price":                5,
+		"last price change":         6,
+		"current value":             7,
+		"today's gain/loss dollar":  8,
+		"today's gain/loss percent": 9,
+		"total gain/loss dollar":    10,
+		"total gain/loss percent":   11,
+		"percent of account":        12,
+		"cost basis total":          13,
+		"average cost basis":        14,
+		"type":                      15,
+	}
+}
+
+func TestParsePercent(t *testing.T) {
+	tests := []struct {
+		name      string
+		val       string
+		want      float64
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "positive percent with plus sign", val: "+0.84%", want: 0.84},
+		{name: "negative percent with minus sign", val: "-0.44%", want: -0.44},
+		{name: "standard unsigned percent", val: "52.21%", want: 52.21},
+		{name: "thousands comma and plus sign", val: "+1,250.00%", want: 1250.00},
+		{name: "surrounding and inner whitespace before percent sign", val: " 25.00 % ", want: 25.00},
+		{name: "empty string defaults to zero", val: "", want: 0.0},
+		{name: "single dash defaults to zero", val: "-", want: 0.0},
+		{name: "double dash defaults to zero", val: "--", want: 0.0},
+		{name: "lowercase n/a defaults to zero", val: "n/a", want: 0.0},
+		{name: "uppercase N/A defaults to zero", val: "N/A", want: 0.0},
+		{name: "bare percent sign rejected", val: "%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "single dash with percent sign rejected", val: "-%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "double dash with percent sign rejected", val: "--%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "plus sign with percent sign rejected", val: "+%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "N/A with percent sign rejected", val: "N/A%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "alphabetic string with percent sign rejected", val: "abc%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "NaN with percent sign rejected", val: "NaN%", wantErr: true, errSubstr: "non-finite float value"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runParsePercentCase(t, tc.val, tc.want, tc.wantErr, tc.errSubstr)
+		})
+	}
+}
+
+func runParsePercentCase(t *testing.T, val string, want float64, wantErr bool, errSubstr string) {
+	t.Helper()
+	got, err := parsePercent(val)
+	if wantErr {
+		if err == nil {
+			t.Fatalf("expected error for %q, got nil", val)
+		}
+		if errSubstr != "" && !strings.Contains(err.Error(), errSubstr) {
+			t.Errorf("expected error containing %q, got %q", errSubstr, err.Error())
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error for %q: %v", val, err)
+	}
+	if math.Abs(got-want) > 1e-6 {
+		t.Errorf("parsePercent(%q): expected %f, got %f", val, want, got)
+	}
+}
+
+type legacyFieldExpectation struct {
+	lastPriceChange      float64
+	todaysGainLossDollar float64
+	todaysGainLossPct    float64
+	totalGainLossDollar  float64
+	totalGainLossPct     float64
+	percentOfAccount     float64
+	averageCostBasis     float64
+	posType              string
+}
+
+func assertLegacyParityFields(t *testing.T, got model.FidelityPosition, want legacyFieldExpectation) {
+	t.Helper()
+	if math.Abs(got.LastPriceChange-want.lastPriceChange) > 1e-6 {
+		t.Errorf("LastPriceChange: expected %f, got %f", want.lastPriceChange, got.LastPriceChange)
+	}
+	if math.Abs(got.TodaysGainLossDollar-want.todaysGainLossDollar) > 1e-6 {
+		t.Errorf("TodaysGainLossDollar: expected %f, got %f", want.todaysGainLossDollar, got.TodaysGainLossDollar)
+	}
+	if math.Abs(got.TodaysGainLossPct-want.todaysGainLossPct) > 1e-6 {
+		t.Errorf("TodaysGainLossPct: expected %f, got %f", want.todaysGainLossPct, got.TodaysGainLossPct)
+	}
+	if math.Abs(got.TotalGainLossDollar-want.totalGainLossDollar) > 1e-6 {
+		t.Errorf("TotalGainLossDollar: expected %f, got %f", want.totalGainLossDollar, got.TotalGainLossDollar)
+	}
+	if math.Abs(got.TotalGainLossPct-want.totalGainLossPct) > 1e-6 {
+		t.Errorf("TotalGainLossPct: expected %f, got %f", want.totalGainLossPct, got.TotalGainLossPct)
+	}
+	if math.Abs(got.PercentOfAccount-want.percentOfAccount) > 1e-6 {
+		t.Errorf("PercentOfAccount: expected %f, got %f", want.percentOfAccount, got.PercentOfAccount)
+	}
+	if math.Abs(got.AverageCostBasis-want.averageCostBasis) > 1e-6 {
+		t.Errorf("AverageCostBasis: expected %f, got %f", want.averageCostBasis, got.AverageCostBasis)
+	}
+	if got.Type != want.posType {
+		t.Errorf("Type: expected %q, got %q", want.posType, got.Type)
+	}
+}
+
+func TestRowParser_LegacyFieldParity_Fixture(t *testing.T) {
+	parser := newRowParser(sampleLegacy16ColIndex(), sampleTestMeta())
+
+	// Golden values verified against legacy datalake/model/fidelity_parser.go:133-167 (MapRawRecordToFidelityPosition).
+	tests := []struct {
+		name string
+		row  []string
+		want legacyFieldExpectation
+	}{
+		{
+			name: "FSKAX positive daily and total gain/loss metrics (datalake/model/fidelity_parser.go:140-160)",
+			row: []string{
+				"SYNTH-ROTH-101", "ROTH IRA", "FSKAX", "FIDELITY TOTAL MARKET INDEX",
+				"45.250", "$150.00", "+$1.25", "$6787.50",
+				"+$56.56", "+0.84%", "+$787.50", "+13.13%",
+				"52.21%", "$6000.00", "$132.59", "Cash",
+			},
+			want: legacyFieldExpectation{
+				lastPriceChange:      1.25,
+				todaysGainLossDollar: 56.56,
+				todaysGainLossPct:    0.84,
+				totalGainLossDollar:  787.50,
+				totalGainLossPct:     13.13,
+				percentOfAccount:     52.21,
+				averageCostBasis:     132.59,
+				posType:              "Cash",
+			},
+		},
+		{
+			name: "FXAIX negative daily gain/loss and positive total gain/loss (datalake/model/fidelity_parser.go:140-160)",
+			row: []string{
+				"SYNTH-401K-202", "TRADITIONAL 401K", "FXAIX", "FIDELITY 500 INDEX",
+				"25.500", "$180.20", "-$0.80", "$4595.10",
+				"-$20.40", "-0.44%", "+$595.10", "+14.88%",
+				"100.00%", "$4000.00", "$156.86", "Cash",
+			},
+			want: legacyFieldExpectation{
+				lastPriceChange:      -0.80,
+				todaysGainLossDollar: -20.40,
+				todaysGainLossPct:    -0.44,
+				totalGainLossDollar:  595.10,
+				totalGainLossPct:     14.88,
+				percentOfAccount:     100.00,
+				averageCostBasis:     156.86,
+				posType:              "Cash",
+			},
+		},
+		{
+			name: "SPAXX** money market row with blank performance columns (datalake/model/fidelity_parser.go:140-160)",
+			row: []string{
+				"SYNTH-ROTH-101", "ROTH IRA", "SPAXX**", "HELD IN MONEY MARKET",
+				"", "", "", "$3250.00",
+				"", "", "", "",
+				"25.00%", "", "", "Cash",
+			},
+			want: legacyFieldExpectation{
+				lastPriceChange:      0.0,
+				todaysGainLossDollar: 0.0,
+				todaysGainLossPct:    0.0,
+				totalGainLossDollar:  0.0,
+				totalGainLossPct:     0.0,
+				percentOfAccount:     25.00,
+				averageCostBasis:     0.0,
+				posType:              "Cash",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pos, ok, err := parser.parse(tc.row, 2)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			if !ok {
+				t.Fatalf("expected ok=true, got false")
+			}
+			assertLegacyParityFields(t, pos, tc.want)
+		})
+	}
+}
+
+func TestRowParser_LegacyFields_PlaceholdersAreZero(t *testing.T) {
+	parser := newRowParser(sampleLegacy16ColIndex(), sampleTestMeta())
+
+	// SYNTH-TAX-303 ** row with "--" placeholders across performance and cost columns.
+	row := []string{
+		"SYNTH-TAX-303", "INDIVIDUAL TOD", "**", "",
+		"--", "--", "--", "$0.00",
+		"--", "", "--", "--",
+		"--", "--", "--", "",
+	}
+
+	pos, ok, err := parser.parse(row, 6)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true for SYNTH-TAX-303 cash placeholder row, got false")
+	}
+	if pos.Symbol != "CASH" {
+		t.Errorf("expected normalized symbol 'CASH', got %q", pos.Symbol)
+	}
+	assertLegacyParityFields(t, pos, legacyFieldExpectation{})
+}
+
+func TestRowParser_LegacyFields_AbsentColumnsAreZero(t *testing.T) {
+	// 8-column header lacking all 8 legacy performance/allocation/type columns.
+	parser := newRowParser(sampleTestColIndex(), sampleTestMeta())
+	row := []string{"ACCT-1", "Individual", "AAPL", "Apple Inc.", "10", "$150.00", "$1,500.00", "$1,200.00"}
+
+	pos, ok, err := parser.parse(row, 3)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true, got false")
+	}
+	assertLegacyParityFields(t, pos, legacyFieldExpectation{})
+}
+
+func TestRowParser_LegacyFields_InvalidValueFailsRow(t *testing.T) {
+	parser := newRowParser(sampleLegacy16ColIndex(), sampleTestMeta())
+
+	validBaseRow := func() []string {
+		return []string{
+			"SYNTH-ROTH-101", "ROTH IRA", "FSKAX", "FIDELITY TOTAL MARKET INDEX",
+			"45.250", "$150.00", "+$1.25", "$6787.50",
+			"+$56.56", "+0.84%", "+$787.50", "+13.13%",
+			"52.21%", "$6000.00", "$132.59", "Cash",
+		}
+	}
+
+	tests := []struct {
+		name      string
+		colIdx    int
+		badVal    string
+		errSubstr string
+	}{
+		{name: "invalid last price change", colIdx: 6, badVal: "bad_chg", errSubstr: "row 9 last price change"},
+		{name: "invalid todays gain/loss dollar", colIdx: 8, badVal: "bad_td_dlr", errSubstr: "row 9 todays gain/loss dollar"},
+		{name: "invalid todays gain/loss percent", colIdx: 9, badVal: "bad_td_pct%", errSubstr: "row 9 todays gain/loss percent"},
+		{name: "invalid total gain/loss dollar", colIdx: 10, badVal: "bad_tot_dlr", errSubstr: "row 9 total gain/loss dollar"},
+		{name: "invalid total gain/loss percent", colIdx: 11, badVal: "--%", errSubstr: "row 9 total gain/loss percent"},
+		{name: "invalid percent of account", colIdx: 12, badVal: "%", errSubstr: "row 9 percent of account"},
+		{name: "invalid average cost basis", colIdx: 14, badVal: "bad_avg_cost", errSubstr: "row 9 average cost basis"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := validBaseRow()
+			row[tc.colIdx] = tc.badVal
+
+			_, ok, err := parser.parse(row, 9)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
+			}
+			if ok {
+				t.Errorf("expected ok=false on error, got true")
+			}
+			if !strings.Contains(err.Error(), tc.errSubstr) {
+				t.Errorf("expected error containing %q, got %q", tc.errSubstr, err.Error())
+			}
+		})
+	}
+}
+
+func TestRowParser_LegacyFields_TypeTrimmedVerbatim(t *testing.T) {
+	parser := newRowParser(sampleLegacy16ColIndex(), sampleTestMeta())
+	row := []string{
+		"SYNTH-ROTH-101", "ROTH IRA", "FSKAX", "FIDELITY TOTAL MARKET INDEX",
+		"45.250", "$150.00", "+$1.25", "$6787.50",
+		"+$56.56", "+0.84%", "+$787.50", "+13.13%",
+		"52.21%", "$6000.00", "$132.59", "  Margin  ",
+	}
+
+	pos, ok, err := parser.parse(row, 4)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true, got false")
+	}
+	if pos.Type != "Margin" {
+		t.Errorf("expected Type 'Margin' (trimmed verbatim without case folding), got %q", pos.Type)
+	}
+}

@@ -10,10 +10,17 @@ import (
 )
 
 type positionMetrics struct {
-	quantity     float64
-	lastPrice    float64
-	currentValue float64
-	costBasis    float64
+	quantity             float64
+	lastPrice            float64
+	currentValue         float64
+	costBasis            float64
+	lastPriceChange      float64
+	todaysGainLossDollar float64
+	todaysGainLossPct    float64
+	totalGainLossDollar  float64
+	totalGainLossPct     float64
+	percentOfAccount     float64
+	averageCostBasis     float64
 }
 
 type rowParser struct {
@@ -45,8 +52,9 @@ func (p *rowParser) parse(row []string, lineNum int) (model.FidelityPosition, bo
 
 	accountID := p.resolveAccountID(row)
 	accountName := p.getString(row, "account name", "account nickname")
+	posType := p.getString(row, "type")
 
-	pos, err := p.buildPosition(lineNum, accountID, accountName, symbol, description, metrics)
+	pos, err := p.buildPosition(lineNum, accountID, accountName, symbol, description, posType, metrics)
 	if err != nil {
 		return model.FidelityPosition{}, false, err
 	}
@@ -79,6 +87,17 @@ func (p *rowParser) resolveHolding(row []string) (string, string, bool) {
 }
 
 func (p *rowParser) parseMetrics(row []string, lineNum int) (positionMetrics, error) {
+	m, err := p.parseCoreMetrics(row, lineNum)
+	if err != nil {
+		return positionMetrics{}, err
+	}
+	if perfErr := p.parsePerformanceMetrics(row, lineNum, &m); perfErr != nil {
+		return positionMetrics{}, perfErr
+	}
+	return m, nil
+}
+
+func (p *rowParser) parseCoreMetrics(row []string, lineNum int) (positionMetrics, error) {
 	qty, err := parseQuantity(p.getString(row, "quantity", "shares", "qty"))
 	if err != nil {
 		return positionMetrics{}, fmt.Errorf("row %d quantity: %w", lineNum, err)
@@ -107,12 +126,43 @@ func (p *rowParser) parseMetrics(row []string, lineNum int) (positionMetrics, er
 	}, nil
 }
 
+func (p *rowParser) parsePerformanceMetrics(row []string, lineNum int, m *positionMetrics) error {
+	var err error
+	if m.lastPriceChange, err = parseCurrency(p.getString(row, "last price change")); err != nil {
+		return fmt.Errorf("row %d last price change: %w", lineNum, err)
+	}
+	if m.todaysGainLossDollar, err = parseCurrency(
+		p.getString(row, "today's gain/loss dollar", "todays gain/loss dollar"),
+	); err != nil {
+		return fmt.Errorf("row %d todays gain/loss dollar: %w", lineNum, err)
+	}
+	if m.todaysGainLossPct, err = parsePercent(
+		p.getString(row, "today's gain/loss percent", "todays gain/loss percent"),
+	); err != nil {
+		return fmt.Errorf("row %d todays gain/loss percent: %w", lineNum, err)
+	}
+	if m.totalGainLossDollar, err = parseCurrency(p.getString(row, "total gain/loss dollar")); err != nil {
+		return fmt.Errorf("row %d total gain/loss dollar: %w", lineNum, err)
+	}
+	if m.totalGainLossPct, err = parsePercent(p.getString(row, "total gain/loss percent")); err != nil {
+		return fmt.Errorf("row %d total gain/loss percent: %w", lineNum, err)
+	}
+	if m.percentOfAccount, err = parsePercent(p.getString(row, "percent of account")); err != nil {
+		return fmt.Errorf("row %d percent of account: %w", lineNum, err)
+	}
+	if m.averageCostBasis, err = parseCurrency(p.getString(row, "average cost basis")); err != nil {
+		return fmt.Errorf("row %d average cost basis: %w", lineNum, err)
+	}
+	return nil
+}
+
 func (p *rowParser) buildPosition(
 	lineNum int,
 	accountID string,
 	accountName string,
 	symbol string,
 	description string,
+	posType string,
 	m positionMetrics,
 ) (model.FidelityPosition, error) {
 	pos := model.FidelityPosition{
@@ -122,14 +172,22 @@ func (p *rowParser) buildPosition(
 			RowNumber:  lineNum,
 			IngestedAt: p.meta.IngestedAt,
 		},
-		AccountID:    accountID,
-		AccountName:  accountName,
-		Symbol:       symbol,
-		Description:  description,
-		Quantity:     m.quantity,
-		LastPrice:    m.lastPrice,
-		CurrentValue: m.currentValue,
-		CostBasis:    m.costBasis,
+		AccountID:            accountID,
+		AccountName:          accountName,
+		Symbol:               symbol,
+		Description:          description,
+		Quantity:             m.quantity,
+		LastPrice:            m.lastPrice,
+		CurrentValue:         m.currentValue,
+		CostBasis:            m.costBasis,
+		LastPriceChange:      m.lastPriceChange,
+		TodaysGainLossDollar: m.todaysGainLossDollar,
+		TodaysGainLossPct:    m.todaysGainLossPct,
+		TotalGainLossDollar:  m.totalGainLossDollar,
+		TotalGainLossPct:     m.totalGainLossPct,
+		PercentOfAccount:     m.percentOfAccount,
+		AverageCostBasis:     m.averageCostBasis,
+		Type:                 posType,
 	}
 
 	if valErr := pos.Validate(); valErr != nil {
@@ -251,6 +309,18 @@ func parseCurrency(val string) (float64, error) {
 
 func parseQuantity(val string) (float64, error) {
 	return parseFinancialNumber(val, false, "quantity")
+}
+
+func parsePercent(val string) (float64, error) {
+	trimmed := strings.TrimSpace(val)
+	if isNumericDefaultZero(trimmed) {
+		return 0.0, nil
+	}
+	withoutPct := strings.TrimSpace(strings.ReplaceAll(trimmed, "%", ""))
+	if isNumericDefaultZero(withoutPct) {
+		return 0.0, fmt.Errorf("invalid percent value %q: empty or placeholder percentage", val)
+	}
+	return parseFinancialNumber(withoutPct, false, "percent")
 }
 
 func parseFinancialNumber(val string, stripDollar bool, fieldName string) (float64, error) {
