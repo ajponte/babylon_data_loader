@@ -589,24 +589,24 @@ func TestFindColumn(t *testing.T) {
 }
 
 func sampleLegacy16ColIndex() map[string]int {
-	return map[string]int{
-		"account number":            0,
-		"account name":              1,
-		"symbol":                    2,
-		"description":               3,
-		"quantity":                  4,
-		"last price":                5,
-		"last price change":         6,
-		"current value":             7,
-		"today's gain/loss dollar":  8,
-		"today's gain/loss percent": 9,
-		"total gain/loss dollar":    10,
-		"total gain/loss percent":   11,
-		"percent of account":        12,
-		"cost basis total":          13,
-		"average cost basis":        14,
-		"type":                      15,
-	}
+	return buildColumnIndex([]string{
+		"Account number",
+		"Account name",
+		"Symbol",
+		"Description",
+		"Quantity",
+		"Last price",
+		"Last price change",
+		"Current value",
+		"Today's gain/loss dollar",
+		"Today's gain/loss percent",
+		"Total gain/loss dollar",
+		"Total gain/loss percent",
+		"Percent of account",
+		"Cost basis total",
+		"Average cost basis",
+		"Type",
+	})
 }
 
 func TestParsePercent(t *testing.T) {
@@ -622,18 +622,32 @@ func TestParsePercent(t *testing.T) {
 		{name: "standard unsigned percent", val: "52.21%", want: 52.21},
 		{name: "thousands comma and plus sign", val: "+1,250.00%", want: 1250.00},
 		{name: "surrounding and inner whitespace before percent sign", val: " 25.00 % ", want: 25.00},
+		{name: "accounting negative parentheses with inner percent", val: "(0.44%)", want: -0.44},
+		{name: "spaced accounting negative parentheses with inner percent", val: " ( 12.50% ) ", want: -12.50},
+		{name: "unicode non-breaking spaces", val: "\u00a0+0.84\u202f%\u00a0", want: 0.84},
 		{name: "empty string defaults to zero", val: "", want: 0.0},
 		{name: "single dash defaults to zero", val: "-", want: 0.0},
 		{name: "double dash defaults to zero", val: "--", want: 0.0},
 		{name: "lowercase n/a defaults to zero", val: "n/a", want: 0.0},
 		{name: "uppercase N/A defaults to zero", val: "N/A", want: 0.0},
+		{name: "unknown placeholder defaults to zero", val: "unknown", want: 0.0},
+		{name: "pending placeholder defaults to zero", val: "Pending", want: 0.0},
 		{name: "bare percent sign rejected", val: "%", wantErr: true, errSubstr: "invalid percent value"},
 		{name: "single dash with percent sign rejected", val: "-%", wantErr: true, errSubstr: "invalid percent value"},
 		{name: "double dash with percent sign rejected", val: "--%", wantErr: true, errSubstr: "invalid percent value"},
 		{name: "plus sign with percent sign rejected", val: "+%", wantErr: true, errSubstr: "invalid percent value"},
 		{name: "N/A with percent sign rejected", val: "N/A%", wantErr: true, errSubstr: "invalid percent value"},
-		{name: "alphabetic string with percent sign rejected", val: "abc%", wantErr: true, errSubstr: "invalid percent value"},
-		{name: "NaN with percent sign rejected", val: "NaN%", wantErr: true, errSubstr: "non-finite float value"},
+		{name: "unknown with percent sign rejected", val: "unknown%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "pending with percent sign rejected", val: "pending%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "empty accounting parentheses with percent rejected", val: "(%)", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "dash accounting parentheses with percent rejected", val: "(-%)", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "double percent suffix rejected", val: "25%%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "double bare percent signs rejected", val: "%%", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "embedded percent sign rejected", val: "12%34", wantErr: true, errSubstr: "invalid percent value"},
+		{name: "alphabetic string with percent preserves raw token in error", val: "abc%", wantErr: true, errSubstr: `"abc%"`},
+		{name: "NaN with percent preserves raw token in error", val: "NaN%", wantErr: true, errSubstr: `"NaN%"`},
+		{name: "positive Inf with percent rejected", val: "+Inf%", wantErr: true, errSubstr: "non-finite float value"},
+		{name: "negative Inf with percent rejected", val: "-Inf%", wantErr: true, errSubstr: "non-finite float value"},
 	}
 
 	for _, tc := range tests {
@@ -887,5 +901,31 @@ func TestRowParser_LegacyFields_TypeTrimmedVerbatim(t *testing.T) {
 	}
 	if pos.Type != "Margin" {
 		t.Errorf("expected Type 'Margin' (trimmed verbatim without case folding), got %q", pos.Type)
+	}
+}
+
+func TestRowParser_LegacyFields_ApostropheFreeHeaderAliases(t *testing.T) {
+	colIndex := buildColumnIndex([]string{
+		"Account number",
+		"Symbol",
+		"Current value",
+		"Todays gain/loss dollar",
+		"Todays gain/loss percent",
+	})
+	parser := newRowParser(colIndex, sampleTestMeta())
+	row := []string{"SYNTH-ROTH-101", "FSKAX", "$6787.50", "+$56.56", "+0.84%"}
+
+	pos, ok, err := parser.parse(row, 2)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true, got false")
+	}
+	if math.Abs(pos.TodaysGainLossDollar-56.56) > 1e-6 {
+		t.Errorf("TodaysGainLossDollar: expected 56.56, got %f", pos.TodaysGainLossDollar)
+	}
+	if math.Abs(pos.TodaysGainLossPct-0.84) > 1e-6 {
+		t.Errorf("TodaysGainLossPct: expected 0.84, got %f", pos.TodaysGainLossPct)
 	}
 }

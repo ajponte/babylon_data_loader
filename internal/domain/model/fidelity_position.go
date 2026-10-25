@@ -56,6 +56,16 @@ func (p *FidelityPosition) Validate() error {
 	if p == nil {
 		return ErrNilFidelityPosition
 	}
+	if err := p.validateIdentity(); err != nil {
+		return err
+	}
+	if err := p.validateCoreMetrics(); err != nil {
+		return err
+	}
+	return p.validatePerformanceMetrics()
+}
+
+func (p *FidelityPosition) validateIdentity() error {
 	if err := p.Lineage.Validate(); err != nil {
 		return err
 	}
@@ -65,6 +75,10 @@ func (p *FidelityPosition) Validate() error {
 	if p.Symbol == "" {
 		return ErrMissingSymbol
 	}
+	return nil
+}
+
+func (p *FidelityPosition) validateCoreMetrics() error {
 	if !isFinite(p.Quantity) {
 		return ErrInvalidQuantity
 	}
@@ -80,7 +94,7 @@ func (p *FidelityPosition) Validate() error {
 	if !isFinite(p.CostBasis) {
 		return ErrInvalidCostBasis
 	}
-	return p.validatePerformanceMetrics()
+	return nil
 }
 
 func (p *FidelityPosition) validatePerformanceMetrics() error {
