@@ -32,6 +32,9 @@ type ChaseTransaction struct {
 	CheckOrSlipNum string
 	Category       string
 	Memo           string
+	// TransactionDate is the credit card "Transaction Date" (purchase date) at UTC midnight.
+	// It is nil for checking, synthetic rows, and placeholder values (matching legacy omitempty).
+	TransactionDate *time.Time
 }
 
 // Validate validates the essential fields of a ChaseTransaction.

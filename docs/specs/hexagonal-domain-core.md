@@ -279,17 +279,18 @@ Represents a normalized transaction record from Chase Checking, Savings, or Cred
 
 ```go
 type ChaseTransaction struct {
-    Lineage        SourceLineage
-    AccountID      string
-    PostingDate    time.Time
-    Description    string
-    Details        string
-    Amount         float64
-    Type           string
-    Balance        *float64
-    CheckOrSlipNum string
-    Category       string
-    Memo           string
+    Lineage         SourceLineage
+    AccountID       string
+    PostingDate     time.Time
+    Description     string
+    Details         string
+    Amount          float64
+    Type            string
+    Balance         *float64
+    TransactionDate *time.Time // Credit card purchase date at UTC midnight (nil for checking, synthetic, or placeholders).
+    CheckOrSlipNum  string
+    Category        string
+    Memo            string
 }
 ```
 
@@ -303,6 +304,7 @@ type ChaseTransaction struct {
 | `Amount` | `float64` | Required | Finite number: `!math.IsNaN(v) && !math.IsInf(v, 0)` | Net transaction value (negative for debits, positive for credits). |
 | `Type` | `string` | Optional | Any string | Transaction classification (`DEBIT`, `CREDIT`, `DSLIP`). |
 | `Balance` | `*float64` | Optional | If non-nil: finite (`!math.IsNaN(*v) && !math.IsInf(*v, 0)`) | Running account balance (nil for credit cards). |
+| `TransactionDate` | `*time.Time` | Optional | If non-nil: UTC midnight | Credit card purchase date from `"Transaction Date"` / `"Trans Date"` (nil for checking/synthetic). |
 | `CheckOrSlipNum` | `string` | Optional | Any string | Check serial number or deposit slip identifier. |
 | `Category` | `string` | Optional | Any string | Bank-assigned expense category (e.g., `Groceries`). |
 | `Memo` | `string` | Optional | Any string | Statement memo or extended note. |

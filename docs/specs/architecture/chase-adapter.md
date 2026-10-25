@@ -484,18 +484,24 @@ func parseCreditCardRow(
 		return model.ChaseTransaction{}, err
 	}
 
+	txDate, err := resolveTransactionDate(rr)
+	if err != nil {
+		return model.ChaseTransaction{}, err
+	}
+
 	tx := model.ChaseTransaction{
-		Lineage:        buildLineage(meta, lineNum),
-		AccountID:      meta.AccountID,
-		PostingDate:    postingDate,
-		Description:    desc,
-		Details:        "",
-		Amount:         amount,
-		Type:           firstNonEmpty(rr.get("type"), "Sale"),
-		Balance:        balance,
-		CheckOrSlipNum: "",
-		Category:       rr.get("category"),
-		Memo:           rr.get("memo"),
+		Lineage:         buildLineage(meta, lineNum),
+		AccountID:       meta.AccountID,
+		PostingDate:     postingDate,
+		Description:     desc,
+		Details:         "",
+		Amount:          amount,
+		Type:            firstNonEmpty(rr.get("type"), "Sale"),
+		Balance:         balance,
+		TransactionDate: txDate,
+		CheckOrSlipNum:  "",
+		Category:        rr.get("category"),
+		Memo:            rr.get("memo"),
 	}
 
 	if valErr := tx.Validate(); valErr != nil {
@@ -503,6 +509,19 @@ func parseCreditCardRow(
 	}
 
 	return tx, nil
+}
+
+func resolveTransactionDate(rr rowReader) (*time.Time, error) {
+	raw := rr.get("transaction date", "trans date")
+	if isPlaceholderDate(raw) {
+		return nil, nil
+	}
+	parsed, err := parseDate(raw)
+	if err != nil {
+		return nil, fmt.Errorf("row %d: transaction date: %w", rr.lineNum, err)
+	}
+	utcMidnight := parsed.UTC()
+	return &utcMidnight, nil
 }
 
 func resolveCreditCardDate(rr rowReader) (time.Time, error) {
