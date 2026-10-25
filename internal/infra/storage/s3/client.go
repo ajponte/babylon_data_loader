@@ -82,11 +82,7 @@ func NewClientFromConfig(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, ErrMissingBucket
 	}
 
-	var optFns []func(*awsconfig.LoadOptions) error
-	if region := strings.TrimSpace(cfg.Region); region != "" {
-		optFns = append(optFns, awsconfig.WithRegion(region))
-	}
-
+	optFns := buildAWSConfigOptions(cfg.Region)
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, optFns...)
 	if err != nil {
 		return nil, fmt.Errorf("s3: load aws config: %w", err)
@@ -95,7 +91,21 @@ func NewClientFromConfig(ctx context.Context, cfg Config) (*Client, error) {
 	return NewClient(awss3.NewFromConfig(awsCfg), trimmedBucket)
 }
 
-// DownloadStream opens an object for streaming from S3. The caller is responsible for closing the returned ReadCloser.
+// buildAWSConfigOptions constructs optional configuration loaders for the AWS SDK.
+func buildAWSConfigOptions(region string) []func(*awsconfig.LoadOptions) error {
+	trimmed := strings.TrimSpace(region)
+	if trimmed == "" {
+		return nil
+	}
+	return []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(trimmed),
+	}
+}
+
+// DownloadStream opens an object for streaming from S3.
+// Invariant: The returned io.ReadCloser is an unbuffered stream body; the caller owns closing it.
+// Note on key handling: The raw key string is preserved as-is without trimming leading slashes,
+// ensuring S3 prefix-exactness matching the caller's request, unlike ArchiveFile which normalizes keys.
 func (c *Client) DownloadStream(ctx context.Context, key string) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -109,31 +119,54 @@ func (c *Client) DownloadStream(ctx context.Context, key string) (io.ReadCloser,
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		if isNotFound(err) {
-			return nil, fmt.Errorf("s3: get %s/%s: %w", c.bucket, key, port.ErrObjectNotFound)
-		}
-		return nil, fmt.Errorf("s3: get %s/%s: %w", c.bucket, key, err)
+		return nil, c.wrapGetError(key, err)
 	}
 
 	return out.Body, nil
 }
 
+// wrapGetError maps GetObject errors to domain port errors or contextual wrapped errors.
+func (c *Client) wrapGetError(key string, err error) error {
+	if isNotFound(err) {
+		return fmt.Errorf("s3: get %s/%s: %w", c.bucket, key, port.ErrObjectNotFound)
+	}
+	return fmt.Errorf("s3: get %s/%s: %w", c.bucket, key, err)
+}
+
 // ArchiveFile copies srcKey to destKey within the configured bucket and then deletes srcKey.
-// It is non-atomic. If copying fails, the source file is never deleted.
+// Invariant: Durability is preserved because this is a non-atomic two-phase operation (copy-then-delete);
+// if the copy step fails for any reason, the source object is never deleted.
 func (c *Client) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	src, dest, err := validateArchiveKeys(srcKey, destKey)
+	if err != nil {
+		return err
+	}
+	if err = c.copyObject(ctx, src, dest); err != nil {
+		return err
+	}
+	return c.deleteObject(ctx, src)
+}
 
+// validateArchiveKeys cleans and validates the source and destination keys.
+// Invariant: Prevents destructive self-overwrite and data loss by rejecting identical normalized keys.
+// Leading slashes are trimmed because S3 CopySource requires a canonical bucket/key format.
+func validateArchiveKeys(srcKey, destKey string) (string, string, error) {
 	src := cleanKey(srcKey)
 	dest := cleanKey(destKey)
 	if src == "" || dest == "" {
-		return ErrMissingKey
+		return "", "", ErrMissingKey
 	}
 	if src == dest {
-		return ErrSameSourceAndDestination
+		return "", "", ErrSameSourceAndDestination
 	}
+	return src, dest, nil
+}
 
+// copyObject executes the S3 CopyObject API call and maps errors to domain errors.
+func (c *Client) copyObject(ctx context.Context, src, dest string) error {
 	copySource := buildCopySource(c.bucket, src)
 	_, err := c.api.CopyObject(ctx, &awss3.CopyObjectInput{
 		Bucket:     aws.String(c.bucket),
@@ -142,19 +175,22 @@ func (c *Client) ArchiveFile(ctx context.Context, srcKey, destKey string) error 
 	})
 	if err != nil {
 		if isNotFound(err) {
-			return fmt.Errorf("s3: archive copy %s: %w", srcKey, port.ErrObjectNotFound)
+			return fmt.Errorf("s3: archive copy %s: %w", src, port.ErrObjectNotFound)
 		}
-		return fmt.Errorf("s3: archive copy %s to %s: %w", srcKey, destKey, err)
+		return fmt.Errorf("s3: archive copy %s to %s: %w", src, dest, err)
 	}
+	return nil
+}
 
-	_, err = c.api.DeleteObject(ctx, &awss3.DeleteObjectInput{
+// deleteObject executes the S3 DeleteObject API call and wraps delete errors.
+func (c *Client) deleteObject(ctx context.Context, src string) error {
+	_, err := c.api.DeleteObject(ctx, &awss3.DeleteObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(src),
 	})
 	if err != nil {
-		return fmt.Errorf("s3: archive delete %s: %w", srcKey, err)
+		return fmt.Errorf("s3: archive delete %s: %w", src, err)
 	}
-
 	return nil
 }
 
@@ -170,6 +206,9 @@ func buildCopySource(bucket, key string) string {
 	return bucket + "/" + strings.Join(parts, "/")
 }
 
+// isNotFound identifies missing-object S3 errors.
+// Invariant: Uses duck-typing (ErrorCode interface) alongside types.NoSuchKey and types.NotFound
+// to inspect errors without requiring a direct dependency on internal smithy-go error types.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
