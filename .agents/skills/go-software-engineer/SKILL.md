@@ -33,7 +33,16 @@ Structure your data pipeline modifications using **DDD** patterns to maintain hi
 - **Standard Library First**: Prefer the Go standard library unless third-party dependencies are required and already present in `go.mod`.
 - **Formatting**: Always format code using standard `gofmt` or `goimports`.
 
-## 5. Project Structure
+## 5. Clean & Comprehensive Coding Patterns
+- **Function Decomposition**: Decompose long functions into smaller, single-responsibility helper functions. Each function must have a singular, well-defined purpose, keeping cognitive load low and readability high.
+- **Low Cognitive Complexity**: Maintain low cyclomatic complexity across all packages. Avoid deeply nested loops and branches; employ early returns and guard clauses (`if err != nil { return ... }`).
+- **Test Boilerplate Elimination**: Eliminate repetitive struct-literal construction and verbose assertions in unit tests:
+  - Extract test entity builders (e.g., `newValidTestTransaction()`, `newTestBatch()`) that provide sensible defaults and allow overriding specific fields.
+  - Implement focused assertion helpers (e.g., `assertTransactionEqual(t, want, got)`, `assertHasValidationErr(t, err, expectedCode)`) to keep test bodies concise and expressive.
+- **Declarative Table-Driven Tests**: Keep table-driven test cases (`[]struct{ name string; ... }`) concise, readable, and focused on verifying a single invariant or failure mode per test case rather than monolithic scenarios.
+- **Token Sanitization & Normalization Isolation**: Decouple raw string token sanitization/normalization (e.g., stripping whitespace, currency symbols, commas, or control characters) from core data parsing, validation rules, and domain entity mapping. Clean tokens in dedicated sanitizers prior to semantic validation.
+
+## 6. Project Structure
 The project layout is structured as follows:
 - `datalake/`: Client and core interfaces for the ingestion data lake.
 - `csv/`: CSV parsing package.
@@ -44,7 +53,7 @@ The project layout is structured as follows:
 - `main.go`: Application entry point.
 - `makefile`: GNU Make targets for automation.
 
-## 6. Automation Commands
+## 7. Automation Commands
 Run these commands from the repository root:
 - **Build & Check**: `make` (runs formatting, lint, unit tests, and build)
 - **Format Check**: `make fmt`
@@ -53,7 +62,7 @@ Run these commands from the repository root:
 - **Generate Synthetic Data**: `make run-generate-mongo` (populates database with mock data)
 - **Run Ingestion**: `make run-ingest`
 
-## 7. Security & Financial PII Rules
+## 8. Security & Financial PII Rules
 - **Confidentiality**: Financial datasets contain highly sensitive Personally Identifiable Information (PII). Do not print, log, or record raw PII (such as full customer names, credit card numbers, bank account/routing numbers, or raw transaction details).
 - **Masking & Hashing**: If identifier fields must be tracked or referenced in logs, they must be masked or securely hashed.
 - **Mock Data**: Always use the synthetic data generator (`make run-generate-mongo` or `make run-generate`) for local runs and QA. Never commit or ingest real bank files or database dumps in development.

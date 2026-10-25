@@ -28,6 +28,10 @@ SYNTH-TAX-303,INDIVIDUAL TOD,**,,--,--,--,$0.00,--,,--,--,--,--,--,,
 "Date downloaded Sep-25-2026 9:50 p.m ET"
 `
 
+func withFooter(csvData string) string {
+	return csvData + "\n\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n"
+}
+
 func TestFidelityExtractor_SourceType(t *testing.T) {
 	extractor := fidelity.NewExtractor()
 	if extractor.SourceType() != "fidelity" {
@@ -108,78 +112,90 @@ func assertHolding(
 }
 
 func TestFidelityExtractor_Errors(t *testing.T) {
-	ctx := context.Background()
+	baseCtx := context.Background()
+	canceledCtx, cancel := context.WithCancel(baseCtx)
+	cancel()
+
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	validMeta := model.FileMetadata{
+		FileName:   "test.csv",
+		AccountID:  "acc-1",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name        string
+		ctx         context.Context
+		reader      io.Reader
+		meta        model.FileMetadata
+		wantErr     bool
+		expectedIs  error
+		wantRecords int
+	}{
+		{
+			name:   "invalid metadata missing account ID",
+			ctx:    baseCtx,
+			reader: strings.NewReader(""),
+			meta: model.FileMetadata{
+				FileName:   "test.csv",
+				IngestedAt: now,
+			},
+			wantErr: true,
+		},
+		{
+			name:       "nil reader returns ErrNilReader",
+			ctx:        baseCtx,
+			reader:     nil,
+			meta:       validMeta,
+			wantErr:    true,
+			expectedIs: fidelity.ErrNilReader,
+		},
+		{
+			name:    "nil context returns error",
+			ctx:     nil,
+			reader:  strings.NewReader(""),
+			meta:    validMeta,
+			wantErr: true,
+		},
+		{
+			name:       "cancelled context returns context.Canceled",
+			ctx:        canceledCtx,
+			reader:     strings.NewReader("Account number,Symbol\n"),
+			meta:       validMeta,
+			wantErr:    true,
+			expectedIs: context.Canceled,
+		},
+		{
+			name:        "empty stream returns empty batch without error",
+			ctx:         baseCtx,
+			reader:      strings.NewReader(""),
+			meta:        validMeta,
+			wantErr:     false,
+			wantRecords: 0,
+		},
+	}
+
 	extractor := fidelity.NewExtractor()
-
-	t.Run("invalid metadata", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(ctx, strings.NewReader(""), meta)
-		if err == nil {
-			t.Error("expected error with missing account ID in metadata")
-		}
-	})
-
-	t.Run("nil reader", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(ctx, nil, meta)
-		if err == nil {
-			t.Error("expected error with nil reader")
-		}
-		if !errors.Is(err, fidelity.ErrNilReader) {
-			t.Errorf("expected ErrNilReader, got %v", err)
-		}
-	})
-
-	t.Run("nil context", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		var nilCtx context.Context
-		_, err := extractor.Extract(nilCtx, strings.NewReader(""), meta)
-		if err == nil {
-			t.Error("expected error with nil context")
-		}
-	})
-
-	t.Run("context cancelled", func(t *testing.T) {
-		canceledCtx, cancel := context.WithCancel(ctx)
-		cancel()
-
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(canceledCtx, strings.NewReader("Account number,Symbol\n"), meta)
-		if err == nil {
-			t.Error("expected error with cancelled context")
-		}
-	})
-
-	t.Run("empty stream", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "empty.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		batch, err := extractor.Extract(ctx, strings.NewReader(""), meta)
-		if err != nil {
-			t.Fatalf("unexpected error on empty stream: %v", err)
-		}
-		if batch.RecordCount != 0 {
-			t.Errorf("expected 0 records for empty stream, got %d", batch.RecordCount)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			batch, err := extractor.Extract(tc.ctx, tc.reader, tc.meta)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.name)
+				}
+				if tc.expectedIs != nil && !errors.Is(err, tc.expectedIs) {
+					t.Errorf("expected errors.Is(err, %v), got %v", tc.expectedIs, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.name, err)
+			}
+			if batch.RecordCount != tc.wantRecords {
+				t.Errorf("expected %d records, got %d", tc.wantRecords, batch.RecordCount)
+			}
+		})
+	}
 }
 
 func TestFidelityExtractor_RejectArbitraryCSV(t *testing.T) {
@@ -231,7 +247,7 @@ Account Total,,,,,,$8475.00,
 "The data and information is proprietary",,,,,,,
 `
 	extractor := fidelity.NewExtractor()
-	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	batch, err := extractor.Extract(ctx, strings.NewReader(withFooter(csvData)), meta)
 	if err != nil {
 		t.Fatalf("unexpected Extract error: %v", err)
 	}
@@ -254,8 +270,14 @@ Account Total,,,,,,$8475.00,
 	}
 }
 
+type cashNormalizationTestCase struct {
+	name         string
+	csvRow       string
+	expectKept   bool
+	expectSymbol string
+}
+
 func TestFidelityExtractor_CashSymbolNormalization(t *testing.T) {
-	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
 		FileName:   "cash_normalization.csv",
@@ -264,12 +286,7 @@ func TestFidelityExtractor_CashSymbolNormalization(t *testing.T) {
 		IngestedAt: now,
 	}
 
-	tests := []struct {
-		name         string
-		csvRow       string
-		expectKept   bool
-		expectSymbol string
-	}{
+	tests := []cashNormalizationTestCase{
 		{
 			name:         "asterisks with empty description normalized to CASH",
 			csvRow:       "FID-1,Taxable,**,,0.00,0.00,$250.00,$250.00",
@@ -315,34 +332,41 @@ func TestFidelityExtractor_CashSymbolNormalization(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			csvData := "Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\n" +
-				tc.csvRow + "\n"
-
-			extractor := fidelity.NewExtractor()
-			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
-			if err != nil {
-				t.Fatalf("unexpected Extract error: %v", err)
-			}
-
-			positions, err := batch.AsFidelityPositions()
-			if err != nil {
-				t.Fatalf("failed to cast payload: %v", err)
-			}
-
-			if !tc.expectKept {
-				if len(positions) != 0 {
-					t.Fatalf("expected 0 positions, got %d", len(positions))
-				}
-				return
-			}
-
-			if len(positions) != 1 {
-				t.Fatalf("expected 1 position, got %d", len(positions))
-			}
-			if positions[0].Symbol != tc.expectSymbol {
-				t.Errorf("expected symbol %q, got %q", tc.expectSymbol, positions[0].Symbol)
-			}
+			runCashNormalizationCase(t, meta, tc)
 		})
+	}
+}
+
+func runCashNormalizationCase(t *testing.T, meta model.FileMetadata, tc cashNormalizationTestCase) {
+	t.Helper()
+	csvData := withFooter(
+		"Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\n" +
+			tc.csvRow + "\n",
+	)
+
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast payload: %v", err)
+	}
+
+	if !tc.expectKept {
+		if len(positions) != 0 {
+			t.Fatalf("expected 0 positions, got %d", len(positions))
+		}
+		return
+	}
+
+	if len(positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(positions))
+	}
+	if positions[0].Symbol != tc.expectSymbol {
+		t.Errorf("expected symbol %q, got %q", tc.expectSymbol, positions[0].Symbol)
 	}
 }
 
@@ -358,9 +382,9 @@ func TestFidelityExtractor_BOMHandling(t *testing.T) {
 
 	t.Run("valid UTF-8 BOM prefix stripped", func(t *testing.T) {
 		bomPrefix := "\xef\xbb\xbf"
-		csvData := bomPrefix + `Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
+		csvData := withFooter(bomPrefix + `Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
 FID-BOM,Individual,MSFT,MICROSOFT CORP,5,400.00,$2000.00,$1800.00
-`
+`)
 		extractor := fidelity.NewExtractor()
 		batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 		if err != nil {
@@ -504,10 +528,10 @@ func runAccountingTestCase(
 		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 	}
 
-	csvData := fmt.Sprintf(
+	csvData := withFooter(fmt.Sprintf(
 		"Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\nFID-ACCT,Individual,XYZ,XYZ HOLDINGS,%s,%s,%s,%s\n",
 		quoteCSV(tc.qtyStr), quoteCSV(tc.priceStr), quoteCSV(tc.valStr), quoteCSV(tc.costBasisStr),
-	)
+	))
 
 	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 	if tc.expectErr {
@@ -574,7 +598,7 @@ Total Market Value,,,,,,$1400.00,
 Account Total,,,,,,$1400.00,
 `
 	extractor := fidelity.NewExtractor()
-	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	batch, err := extractor.Extract(ctx, strings.NewReader(withFooter(csvData)), meta)
 	if err != nil {
 		t.Fatalf("unexpected Extract error with trailing disclaimers: %v", err)
 	}
@@ -605,10 +629,10 @@ func TestFidelityExtractor_SingleAccountInference(t *testing.T) {
 			IngestedAt: now,
 		}
 
-		csvData := `Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
+		csvData := withFooter(`Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
 FID-EXPLICIT-999,Brokerage,NVDA,NVIDIA CORP,10,130.00,$1300.00,$1000.00
 FID-EXPLICIT-999,Brokerage,AMZN,AMAZON.COM,5,180.00,$900.00,$800.00
-`
+`)
 		batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 		if err != nil {
 			t.Fatalf("unexpected Extract error: %v", err)
@@ -627,10 +651,10 @@ FID-EXPLICIT-999,Brokerage,AMZN,AMAZON.COM,5,180.00,$900.00,$800.00
 			IngestedAt: now,
 		}
 
-		csvData := `Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
+		csvData := withFooter(`Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total
 ACC-111,Brokerage,NVDA,NVIDIA CORP,10,130.00,$1300.00,$1000.00
 ACC-222,Brokerage,AMZN,AMAZON.COM,5,180.00,$900.00,$800.00
-`
+`)
 		batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 		if err != nil {
 			t.Fatalf("unexpected Extract error: %v", err)
@@ -695,6 +719,22 @@ func TestFidelityExtractor_SentinelErrors(t *testing.T) {
 		_, err := extractor.Extract(ctx, strings.NewReader(invalidCSV), meta)
 		if !errors.Is(err, fidelity.ErrMissingRequiredColumns) {
 			t.Errorf("expected errors.Is(err, fidelity.ErrMissingRequiredColumns) == true, got %v", err)
+		}
+	})
+
+	t.Run("ErrMissingAsOfDate verification", func(t *testing.T) {
+		missingFooterCSV := "Account number,Symbol,Current value\nFID-1,AAPL,$1500.00\n"
+		_, err := extractor.Extract(ctx, strings.NewReader(missingFooterCSV), meta)
+		if !errors.Is(err, model.ErrMissingAsOfDate) {
+			t.Errorf("expected errors.Is(err, model.ErrMissingAsOfDate) == true, got %v", err)
+		}
+	})
+
+	t.Run("ErrInvalidDateDownloaded verification", func(t *testing.T) {
+		invalidFooterCSV := "Account number,Symbol,Current value\nFID-1,AAPL,$1500.00\n\"Date downloaded MALFORMED\"\n"
+		_, err := extractor.Extract(ctx, strings.NewReader(invalidFooterCSV), meta)
+		if !errors.Is(err, fidelity.ErrInvalidDateDownloaded) {
+			t.Errorf("expected errors.Is(err, fidelity.ErrInvalidDateDownloaded) == true, got %v", err)
 		}
 	})
 }
@@ -804,10 +844,10 @@ func TestFidelityExtractor_AccountIDPlaceholders(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			csvData := fmt.Sprintf(
+			csvData := withFooter(fmt.Sprintf(
 				"Account number,Symbol,Current value\n%s,AAPL,1500.00\n",
 				tc.rawAccount,
-			)
+			))
 			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 			if err != nil {
 				t.Fatalf("unexpected Extract error for %s: %v", tc.name, err)
@@ -851,10 +891,10 @@ func TestFidelityExtractor_DirectCashTickers(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			csvData := fmt.Sprintf(
+			csvData := withFooter(fmt.Sprintf(
 				"Account number,Symbol,Description,Current value\nFID-1,%s,%s,1000.00\n",
 				tc.symbol, tc.description,
-			)
+			))
 			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 			if err != nil {
 				t.Fatalf("unexpected Extract error for %s: %v", tc.name, err)
@@ -930,7 +970,7 @@ func TestFidelityExtractor_LeadingBlankLines(t *testing.T) {
 		IngestedAt: now,
 	}
 
-	csvData := "\n   \n\n\t\nAccount number,Symbol,Current value\nFID-1,AAPL,1500.00\n"
+	csvData := withFooter("\n   \n\n\t\nAccount number,Symbol,Current value\nFID-1,AAPL,1500.00\n")
 	extractor := fidelity.NewExtractor()
 	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
 	if err != nil {
@@ -945,6 +985,570 @@ func TestFidelityExtractor_LeadingBlankLines(t *testing.T) {
 	}
 	if len(positions) != 1 || positions[0].Symbol != "AAPL" {
 		t.Errorf("expected position AAPL, got %+v", positions)
+	}
+}
+
+func TestParseDateDownloaded_LegacyParity(t *testing.T) {
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "date_parity.csv",
+		FileHash:   "hash_date_parity",
+		AccountID:  "FID-DATE",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name        string
+		footerRow   string
+		expectedUTC time.Time
+	}{
+		{
+			name:        "summer EDT (-04:00) rolls into next UTC day",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 p.m ET"`,
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "winter EST (-05:00) rolls into next UTC day",
+			footerRow:   `"Date downloaded Jan-15-2026 9:50 p.m ET"`,
+			expectedUTC: time.Date(2026, time.January, 16, 2, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "single-digit day with a.m. and trailing period",
+			footerRow:   `"Date downloaded Sep-5-2026 9:50 a.m. ET"`,
+			expectedUTC: time.Date(2026, time.September, 5, 13, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "p.m. with trailing period",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 p.m. ET"`,
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "unquoted footer line with a.m without period",
+			footerRow:   `Date downloaded Jan-05-2026 8:15 a.m ET`,
+			expectedUTC: time.Date(2026, time.January, 5, 13, 15, 0, 0, time.UTC),
+		},
+		{
+			name:        "no ET suffix defaults to UTC",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 p.m"`,
+			expectedUTC: time.Date(2026, time.September, 25, 21, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "12:00 a.m. midnight boundary in EDT",
+			footerRow:   `"Date downloaded Sep-25-2026 12:00 a.m. ET"`,
+			expectedUTC: time.Date(2026, time.September, 25, 4, 0, 0, 0, time.UTC),
+		},
+		{
+			name:        "12:00 p.m. noon boundary in EDT",
+			footerRow:   `"Date downloaded Sep-25-2026 12:00 p.m. ET"`,
+			expectedUTC: time.Date(2026, time.September, 25, 16, 0, 0, 0, time.UTC),
+		},
+		{
+			name:        "uppercase PM without periods",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 PM ET"`,
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "uppercase AM without periods",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 AM ET"`,
+			expectedUTC: time.Date(2026, time.September, 25, 13, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "uppercase dotted P.M. and A.M.",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 P.M. ET"`,
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "uppercase single-dot A.M without trailing period",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 A.M ET"`,
+			expectedUTC: time.Date(2026, time.September, 25, 13, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "lowercase pm and am without periods",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 pm ET"`,
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "explicit EDT suffix",
+			footerRow:   `"Date downloaded Sep-25-2026 9:50 p.m. EDT"`,
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "explicit EST suffix",
+			footerRow:   `"Date downloaded Jan-15-2026 9:50 p.m. EST"`,
+			expectedUTC: time.Date(2026, time.January, 16, 2, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "case-varied prefix with tabs and multiple internal spaces",
+			footerRow:   "\"Date Downloaded\tSep-25-2026   9:50  p.m.  ET\"",
+			expectedUTC: time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "valid leap day Feb-29-2024",
+			footerRow:   `"Date downloaded Feb-29-2024 9:50 p.m. ET"`,
+			expectedUTC: time.Date(2024, time.March, 1, 2, 50, 0, 0, time.UTC),
+		},
+		{
+			name:        "US DST spring-forward day before transition (1:15 a.m. EST -05:00)",
+			footerRow:   `"Date downloaded Mar-08-2026 1:15 a.m. ET"`,
+			expectedUTC: time.Date(2026, time.March, 8, 6, 15, 0, 0, time.UTC),
+		},
+		{
+			name:        "US DST spring-forward day after transition (3:15 a.m. EDT -04:00)",
+			footerRow:   `"Date downloaded Mar-08-2026 3:15 a.m. ET"`,
+			expectedUTC: time.Date(2026, time.March, 8, 7, 15, 0, 0, time.UTC),
+		},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertExtractedFooterDate(t, extractor, meta, tc.footerRow, tc.expectedUTC)
+		})
+	}
+}
+
+func assertExtractedFooterDate(
+	t *testing.T,
+	extractor port.Extractor,
+	meta model.FileMetadata,
+	footerRow string,
+	expectedUTC time.Time,
+) {
+	t.Helper()
+	csvData := "Account number,Symbol,Current value\nFID-DATE,AAPL,$1500.00\n" + footerRow + "\n"
+	batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(positions))
+	}
+	got := positions[0].AsOfDate
+	if !got.Equal(expectedUTC) {
+		t.Errorf("expected AsOfDate %v, got %v", expectedUTC, got)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("expected AsOfDate location UTC, got %v", got.Location())
+	}
+}
+
+func TestParseDateDownloaded_Invalid(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "date_invalid.csv",
+		FileHash:   "hash_date_invalid",
+		AccountID:  "FID-DATE",
+		IngestedAt: now,
+	}
+
+	invalidFooters := []struct {
+		name      string
+		footerRow string
+		wantInErr string
+	}{
+		{
+			name:      "non-date text",
+			footerRow: `"Date downloaded not-a-date"`,
+			wantInErr: "not-a-date",
+		},
+		{
+			name:      "ISO-8601 format instead of Fidelity format",
+			footerRow: `"Date downloaded 2026-09-25 21:50 ET"`,
+			wantInErr: "2026-09-25 21:50",
+		},
+		{
+			name:      "out-of-range day 32",
+			footerRow: `"Date downloaded Sep-32-2026 9:50 p.m ET"`,
+			wantInErr: "Sep-32-2026",
+		},
+		{
+			name:      "invalid Feb 29 on non-leap year 2026",
+			footerRow: `"Date downloaded Feb-29-2026 9:50 p.m. ET"`,
+			wantInErr: "Feb-29-2026",
+		},
+		{
+			name:      "single-digit day with invalid meridiem wraps specific errSingle",
+			footerRow: `"Date downloaded Sep-5-2026 9:50 BAD ET"`,
+			wantInErr: "BAD",
+		},
+		{
+			name:      "truncated footer with trailing space only",
+			footerRow: `"Date downloaded "`,
+			wantInErr: "empty or missing date",
+		},
+		{
+			name:      "bare Date downloaded keyword with no date",
+			footerRow: `"Date downloaded"`,
+			wantInErr: "empty or missing date",
+		},
+		{
+			name:      "only timezone suffix after prefix",
+			footerRow: `"Date downloaded ET"`,
+			wantInErr: "empty date",
+		},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range invalidFooters {
+		t.Run(tc.name, func(t *testing.T) {
+			csvData := "Account number,Symbol,Current value\nFID-DATE,AAPL,$1500.00\n" + tc.footerRow + "\n"
+			_, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+			if err == nil {
+				t.Fatalf("expected error for malformed footer %s, got nil", tc.footerRow)
+			}
+			if !errors.Is(err, fidelity.ErrInvalidDateDownloaded) {
+				t.Errorf("expected errors.Is(err, fidelity.ErrInvalidDateDownloaded) for %s, got: %v", tc.name, err)
+			}
+			if tc.wantInErr != "" && !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("expected error to contain %q, got: %v", tc.wantInErr, err)
+			}
+		})
+	}
+}
+
+func TestFidelityExtractor_AsOfDate_StampedOnAllPositions(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "Portfolio_Positions_Synthetic.csv",
+		FileHash:   "hash_fid_synthetic",
+		AccountID:  "SYNTH-DEFAULT",
+		IngestedAt: now,
+	}
+
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(ctx, strings.NewReader(mockPortfolioPositionsFixture), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	if len(positions) != 5 {
+		t.Fatalf("expected 5 positions, got %d", len(positions))
+	}
+
+	expectedAsOf := time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC)
+	for i, pos := range positions {
+		if pos.AsOfDate.IsZero() {
+			t.Errorf("position %d (%s) has zero AsOfDate", i, pos.Symbol)
+		}
+		if !pos.AsOfDate.Equal(expectedAsOf) {
+			t.Errorf("position %d (%s): expected AsOfDate %v, got %v", i, pos.Symbol, expectedAsOf, pos.AsOfDate)
+		}
+		if pos.AsOfDate.Location() != time.UTC {
+			t.Errorf("position %d (%s): expected UTC location, got %v", i, pos.Symbol, pos.AsOfDate.Location())
+		}
+	}
+}
+
+func TestFidelityExtractor_AsOfDate_MissingFooter(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "missing_footer.csv",
+		FileHash:   "hash_missing_footer",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	csvData := "Account number,Symbol,Current value\nFID-1,AAPL,$1500.00\n"
+	extractor := fidelity.NewExtractor()
+	_, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err == nil {
+		t.Fatal("expected error when positions exist without Date downloaded footer, got nil")
+	}
+	if !errors.Is(err, model.ErrMissingAsOfDate) {
+		t.Errorf("expected errors.Is(err, model.ErrMissingAsOfDate), got: %v", err)
+	}
+}
+
+func TestFidelityExtractor_AsOfDate_HeaderOnlyNoFooter(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "header_only_no_footer.csv",
+		FileHash:   "hash_header_only_no_footer",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name        string
+		csvData     string
+		expectedErr error
+	}{
+		{
+			name:        "header only with 0 subsequent rows and no footer",
+			csvData:     "Account number,Symbol,Current value\n",
+			expectedErr: nil,
+		},
+		{
+			name:        "single disclaimer row with no footer",
+			csvData:     "Account number,Symbol,Current value\n\"The data and information is proprietary\",,\n",
+			expectedErr: nil,
+		},
+		{
+			name: "multiple disclaimers, Account Total summary row, blank rows, 0 positions, no footer",
+			csvData: "Account number,Symbol,Current value\n" +
+				"\n" +
+				"Account Total,,$0.00\n" +
+				"\"The data and information is proprietary\",,\n" +
+				"\"Brokerage services are provided by Fidelity\",,\n" +
+				"\"Please note quotes are delayed\",,\n",
+			expectedErr: nil,
+		},
+		{
+			name: "0 positions with valid Date downloaded footer succeeds",
+			csvData: "Account number,Symbol,Current value\n" +
+				"\"The data and information is proprietary\",,\n" +
+				"\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n",
+			expectedErr: nil,
+		},
+		{
+			name: "0 positions with malformed Date downloaded footer fails",
+			csvData: "Account number,Symbol,Current value\n" +
+				"\"The data and information is proprietary\",,\n" +
+				"\"Date downloaded MALFORMED\"\n",
+			expectedErr: fidelity.ErrInvalidDateDownloaded,
+		},
+		{
+			name: "0 positions with truncated Date downloaded footer fails",
+			csvData: "Account number,Symbol,Current value\n" +
+				"\"Date downloaded \"\n",
+			expectedErr: fidelity.ErrInvalidDateDownloaded,
+		},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runZeroPositionFooterCase(t, extractor, ctx, meta, tc.csvData, tc.expectedErr)
+		})
+	}
+}
+
+func runZeroPositionFooterCase(
+	t *testing.T,
+	extractor port.Extractor,
+	ctx context.Context,
+	meta model.FileMetadata,
+	csvData string,
+	expectedErr error,
+) {
+	t.Helper()
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if expectedErr != nil {
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("expected errors.Is(err, %v), got: %v", expectedErr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("expected zero-position CSV to succeed, got: %v", err)
+	}
+	if batch.RecordCount != 0 {
+		t.Errorf("expected RecordCount == 0, got %d", batch.RecordCount)
+	}
+}
+
+func TestFidelityExtractor_AsOfDate_UnparseableFooter(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "unparseable_footer.csv",
+		FileHash:   "hash_unparseable_footer",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	csvData := "Account number,Symbol,Current value\nFID-1,AAPL,$1500.00\n\"Date downloaded MALFORMED_DATE_STRING\"\n"
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err == nil {
+		t.Fatal("expected error for unparseable footer, got nil")
+	}
+	if batch != nil {
+		t.Errorf("expected nil batch on footer parse error, got %+v", batch)
+	}
+	if !errors.Is(err, fidelity.ErrInvalidDateDownloaded) {
+		t.Errorf("expected errors.Is(err, fidelity.ErrInvalidDateDownloaded) == true, got: %v", err)
+	}
+	if errors.Is(err, model.ErrMissingAsOfDate) {
+		t.Errorf("expected errors.Is(err, model.ErrMissingAsOfDate) == false, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "row 3 date downloaded footer") {
+		t.Errorf("expected error to contain 1-based row context 'row 3 date downloaded footer', got: %v", err)
+	}
+}
+
+func TestFidelityExtractor_AsOfDate_FooterNotAPosition(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "footer_not_position.csv",
+		FileHash:   "hash_footer_not_pos",
+		AccountID:  "FID-1",
+		IngestedAt: now,
+	}
+
+	csvData := `Account number,Symbol,Current value
+FID-1,AAPL,$1500.00
+FID-1,MSFT,$2000.00
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+"Date downloaded Jan-15-2026 9:50 p.m ET"
+`
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+	if batch.RecordCount != 2 {
+		t.Fatalf("expected RecordCount == 2 (footers excluded), got %d", batch.RecordCount)
+	}
+
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	expectedFirstFooter := time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC)
+	for i, pos := range positions {
+		if !pos.AsOfDate.Equal(expectedFirstFooter) {
+			t.Errorf("position %d: expected first footer date %v, got %v", i, expectedFirstFooter, pos.AsOfDate)
+		}
+	}
+}
+
+type structuralOrderingCase struct {
+	name        string
+	csvData     string
+	wantCount   int
+	wantAsOfUTC time.Time
+	wantErr     error
+}
+
+func TestFidelityExtractor_AsOfDate_StructuralOrderingAndColumnPlacement(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	meta := model.FileMetadata{
+		FileName:   "structural_ordering.csv",
+		FileHash:   "hash_structural_ordering",
+		AccountID:  "FID-STRUCT",
+		IngestedAt: now,
+	}
+	expectedSep26 := time.Date(2026, time.September, 26, 1, 50, 0, 0, time.UTC)
+
+	tests := []structuralOrderingCase{
+		{
+			name: "footer above position rows",
+			csvData: `Account number,Symbol,Current value
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+FID-1,AAPL,$1500.00
+FID-1,MSFT,$2000.00
+`,
+			wantCount:   2,
+			wantAsOfUTC: expectedSep26,
+		},
+		{
+			name: "multi-account export with footer interleaved between accounts and followed by totals and disclaimers",
+			csvData: `Account number,Symbol,Description,Current value
+FID-ROTH,AAPL,APPLE INC,$1500.00
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+FID-401K,FXAIX,FIDELITY 500 INDEX,$4500.00
+Account Total,,,$6000.00
+"Brokerage services are provided by Fidelity Brokerage Services LLC."
+"*"
+`,
+			wantCount:   2,
+			wantAsOfUTC: expectedSep26,
+		},
+		{
+			name: "footer in non-zero column index preceded by empty CSV cells",
+			csvData: `Account number,Symbol,Description,Current value
+FID-1,AAPL,APPLE INC,$1500.00
+,,"Date downloaded Sep-25-2026 9:50 p.m ET",
+`,
+			wantCount:   1,
+			wantAsOfUTC: expectedSep26,
+		},
+		{
+			name: "unquoted comma-split footer across multiple CSV columns",
+			csvData: `Account number,Symbol,Description,Current value
+FID-1,AAPL,APPLE INC,$1500.00
+Date downloaded, Sep-25-2026, 9:50 p.m ET,
+`,
+			wantCount:   1,
+			wantAsOfUTC: expectedSep26,
+		},
+		{
+			name: "valid first footer followed by malformed second footer succeeds (first footer wins)",
+			csvData: `Account number,Symbol,Current value
+FID-1,AAPL,$1500.00
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+"Date downloaded CORRUPT_SECOND_FOOTER"
+`,
+			wantCount:   1,
+			wantAsOfUTC: expectedSep26,
+		},
+		{
+			name: "malformed first footer followed by valid second footer fails with ErrInvalidDateDownloaded",
+			csvData: `Account number,Symbol,Current value
+FID-1,AAPL,$1500.00
+"Date downloaded CORRUPT_FIRST_FOOTER"
+"Date downloaded Sep-25-2026 9:50 p.m ET"
+`,
+			wantErr: fidelity.ErrInvalidDateDownloaded,
+		},
+	}
+
+	extractor := fidelity.NewExtractor()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runStructuralOrderingCase(t, extractor, ctx, meta, tc)
+		})
+	}
+}
+
+func runStructuralOrderingCase(
+	t *testing.T,
+	extractor port.Extractor,
+	ctx context.Context,
+	meta model.FileMetadata,
+	tc structuralOrderingCase,
+) {
+	t.Helper()
+	batch, err := extractor.Extract(ctx, strings.NewReader(tc.csvData), meta)
+	if tc.wantErr != nil {
+		if !errors.Is(err, tc.wantErr) {
+			t.Fatalf("expected errors.Is(err, %v), got: %v", tc.wantErr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+	if batch.RecordCount != tc.wantCount {
+		t.Fatalf("expected RecordCount == %d, got %d", tc.wantCount, batch.RecordCount)
+	}
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	for i, pos := range positions {
+		if !pos.AsOfDate.Equal(tc.wantAsOfUTC) {
+			t.Errorf("position %d (%s): expected AsOfDate %v, got %v", i, pos.Symbol, tc.wantAsOfUTC, pos.AsOfDate)
+		}
 	}
 }
 
@@ -972,4 +1576,73 @@ func (r *midStreamCancelReader) Read(p []byte) (int, error) {
 	chunk := r.chunks[r.index]
 	r.index++
 	return copy(p, chunk), nil
+}
+
+func generateSyntheticFidelityCSV(rows int) string {
+	var sb strings.Builder
+	sb.WriteString(
+		"Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\n",
+	)
+	for i := range rows {
+		fmt.Fprintf(
+			&sb,
+			"FID-BENCH-%d,INDIVIDUAL,SYM%d,SYNTHETIC HOLDING %d,%d.25,$150.00,$%d.00,$%d.00\n",
+			(i%5)+1,
+			i,
+			i,
+			(i%100)+1,
+			((i%100)+1)*150,
+			((i%100)+1)*120,
+		)
+	}
+	sb.WriteString(
+		"\"The data and information in this spreadsheet is provided to you solely for your use.\"\n",
+	)
+	sb.WriteString("\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n")
+	return sb.String()
+}
+
+func BenchmarkFidelityExtractor_Extract_Fixture(b *testing.B) {
+	extractor := fidelity.NewExtractor()
+	ctx := context.Background()
+	meta := model.FileMetadata{
+		FileName:   "Portfolio_Positions_Synthetic.csv",
+		FileHash:   "hash_fid_bench_fixture",
+		AccountID:  "SYNTH-DEFAULT",
+		IngestedAt: time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC),
+	}
+
+	b.SetBytes(int64(len(mockPortfolioPositionsFixture)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		batch, err := extractor.Extract(ctx, strings.NewReader(mockPortfolioPositionsFixture), meta)
+		if err != nil || batch == nil || batch.RecordCount != 5 {
+			b.Fatalf("unexpected extract error in fixture benchmark: %v", err)
+		}
+	}
+}
+
+func BenchmarkFidelityExtractor_Extract_HighVolume_500Rows(b *testing.B) {
+	extractor := fidelity.NewExtractor()
+	ctx := context.Background()
+	meta := model.FileMetadata{
+		FileName:   "Portfolio_Positions_500.csv",
+		FileHash:   "hash_fid_bench_500",
+		AccountID:  "FID-BENCH-DEFAULT",
+		IngestedAt: time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC),
+	}
+	csvData := generateSyntheticFidelityCSV(500)
+
+	b.SetBytes(int64(len(csvData)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
+		if err != nil || batch == nil || batch.RecordCount != 500 {
+			b.Fatalf("unexpected extract error in high volume benchmark: %v", err)
+		}
+	}
 }
