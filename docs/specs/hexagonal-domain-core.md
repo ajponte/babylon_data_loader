@@ -324,6 +324,16 @@ type FidelityPosition struct {
     CurrentValue float64
     CostBasis    float64
     AsOfDate     time.Time // UTC instant parsed from the "Date downloaded" footer.
+
+    // Legacy-parity fields (A1, Option C). Placeholders ("--", "") parse to zero, as in legacy.
+    LastPriceChange      float64 // Per-unit dollar change.
+    TodaysGainLossDollar float64 // Today's gain/loss in dollars.
+    TodaysGainLossPct    float64 // Percentage points: "+0.84%" -> 0.84 (not 0.0084).
+    TotalGainLossDollar  float64 // Total gain/loss in dollars.
+    TotalGainLossPct     float64 // Percentage points.
+    PercentOfAccount     float64 // Percentage points.
+    AverageCostBasis     float64 // Per-unit cost basis in dollars.
+    Type                 string  // Raw Fidelity "Type" column, trimmed (e.g. "Cash", "Margin").
 }
 ```
 
@@ -339,6 +349,20 @@ type FidelityPosition struct {
 | `CurrentValue` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidCurrentValue`) | Aggregate market value (`Quantity * LastPrice`). |
 | `CostBasis` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidCostBasis`) | Total purchase cost basis (`0.0` for gifts/cash). |
 | `AsOfDate` | `time.Time` | Batch-stamped by extractor (`ErrMissingAsOfDate` if missing on non-empty batch) | UTC snapshot timestamp parsed from the `"Date downloaded"` statement footer. |
+| `LastPriceChange` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Per-unit dollar price change (`0.0` when placeholder). |
+| `TodaysGainLossDollar` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Today's gain or loss in dollars (`0.0` when placeholder). |
+| `TodaysGainLossPct` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Today's gain or loss in percentage points (e.g. `"+0.84%"` -> `0.84`). |
+| `TotalGainLossDollar` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Cumulative gain or loss in dollars (`0.0` when placeholder). |
+| `TotalGainLossPct` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Cumulative gain or loss in percentage points. |
+| `PercentOfAccount` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Holding allocation weight in percentage points. |
+| `AverageCostBasis` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidPerformanceMetric`) | Per-unit cost basis in dollars (`0.0` when placeholder). |
+| `Type` | `string` | Optional | Raw Fidelity `"Type"` classification, trimmed (e.g., `"Cash"`, `"Margin"`). |
+
+#### Decomposed 3-Stage Validation (`FidelityPosition.Validate`)
+To maintain low cognitive complexity, `FidelityPosition.Validate()` decomposes invariant checks after the nil-receiver guard (`ErrNilFidelityPosition`) into three focused stages:
+1. **`validateIdentity()`**: Validates `Lineage.Validate()`, `AccountID != ""` (`ErrMissingAccountID`), and `Symbol != ""` (`ErrMissingSymbol`).
+2. **`validateCoreMetrics()`**: Enforces IEEE 754 finiteness (`isFinite`) on `Quantity`, `LastPrice`, `CurrentValue`, and `CostBasis`, plus non-negativity (`LastPrice >= 0`).
+3. **`validatePerformanceMetrics()`**: Verifies via `allFinite(...)` that all seven performance and allocation `float64` fields (`LastPriceChange`, `TodaysGainLossDollar`, `TodaysGainLossPct`, `TotalGainLossDollar`, `TotalGainLossPct`, `PercentOfAccount`, `AverageCostBasis`) are finite numbers, returning `ErrInvalidPerformanceMetric` otherwise.
 
 #### `FidelityPosition` Sentinel Errors (`fidelity_position.go`)
 
@@ -351,6 +375,7 @@ type FidelityPosition struct {
 | `ErrNegativeLastPrice` | `"last price cannot be negative"` | `LastPrice < 0`. |
 | `ErrInvalidCurrentValue` | `"current value must be a valid finite number"` | `CurrentValue` is `NaN` or `±Inf`. |
 | `ErrInvalidCostBasis` | `"cost basis must be a valid finite number"` | `CostBasis` is `NaN` or `±Inf`. |
+| `ErrInvalidPerformanceMetric` | `"performance or allocation metric must be a valid finite number"` | Any of the 7 performance/allocation `float64` fields is `NaN` or `±Inf`. |
 | `ErrMissingAsOfDate` | `"fidelity snapshot date (asOfDate) is required"` | Non-empty Fidelity position batch lacks a `"Date downloaded"` footer timestamp (`asOfDate.IsZero()`). |
 
 ---

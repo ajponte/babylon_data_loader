@@ -14,7 +14,7 @@ flowchart TD
         EXT["Extractor (extractor.go)<br/>• validateParams & nil-context guard<br/>• stripUTF8BOM (non-EOF error propagation)<br/>• defaultPositionsCapacity = 64<br/>• Embedded _ &quot;time/tzdata&quot;"]
         HDR["readHeader & validateHeaderSignatures<br/>• Schema signature validation<br/>• Column index resolution"]
         FTR["Date Downloaded Footer Parser (extractor.go)<br/>• matchDateDownloadedField (hasDateDownloadedPrefix, joinNonEmptyFooterFields)<br/>• parseDateDownloaded (stripDateDownloadedPrefix, stripEasternSuffix, normalizeMeridiem)<br/>• resolveDateLocation (America/New_York / EDT / UTC)"]
-        PRS["Dedicated Parser Engine (parser.go)<br/>• rowParser.parse<br/>• isDisclaimerText (filtering notices)<br/>• normalizeHoldingSymbol (cash sweep mapping)<br/>• parseFinancialNumber (Unicode space stripping)"]
+        PRS["Dedicated Parser Engine (parser.go)<br/>• rowParser.parse & resolveIdentity (holdingIdentity)<br/>• metricRowReader: readCore (coreMetrics) & readPerformance (performanceMetrics)<br/>• isDisclaimerText (isSummaryDisclaimer, isLegalDisclosurePrefix, isFootnotePrefix)<br/>• normalizeHoldingSymbol (cash sweep mapping)<br/>• parseFinancialNumber & parsePercent"]
         FIN["Batch Finalizer (extractor.go)<br/>• finalizePositions (stamps AsOfDate or returns model.ErrMissingAsOfDate)<br/>• resolveBatchAccountID"]
     end
 
@@ -75,10 +75,10 @@ func stripUTF8BOM(br *bufio.Reader) error {
 ```
 
 ### 3. Multi-Line Legal Disclaimers & Summary Totals Filtering
-Fidelity statements include multi-line legal notices, quote delays, and summary lines (e.g. `"Account Total"`, `"Ending Value"`) embedded in the CSV body. [`isDisclaimerText`](../../../internal/infra/sources/fidelity/parser.go) identifies and skips these lines:
-- Skips legal preamble: `"Please note"`, `"The data and information"`, `"Brokerage services"`.
-- Skips summary rows: `"Total"`, `"Account Total"`, `"Ending Value"`, `"Portfolio Total"`.
-- Skips numbered footnotes and footnote annotations: `"* "`, `"** "`, `"1. "`, `"2. "`.
+Fidelity statements include multi-line legal notices, quote delays, and summary lines (e.g. `"Account Total"`, `"Ending Value"`) embedded in the CSV body. [`isDisclaimerText`](../../../internal/infra/sources/fidelity/parser.go) decomposes disclaimer detection into three focused semantic predicates backed by `hasAnyPrefix`:
+- **Summary Disclaimers (`isSummaryDisclaimer`)**: Matches exact `"total"` or prefixes `"total market"`, `"account total"`, `"portfolio total"`, and `"ending value"`.
+- **Legal Disclosure Preambles (`isLegalDisclosurePrefix`)**: Matches prefixes `"the data and information"`, `"brokerage services"`, `"disclaimer"`, `"please note"`, `"important"`, `"quotes are"`, and `"security prices"`.
+- **Footnote Annotations (`isFootnotePrefix`)**: Matches leading `"*"` (excluding the `"**"` cash sweep symbol) and numbered footnote prefixes `"1."`.
 
 ### 4. Core Cash Sweep Normalization
 Fidelity represents cash sweeps using non-standard ticker markers:
@@ -108,6 +108,26 @@ func normalizeSymbol(symbol, description string) (string, bool) {
 ### 5. Preservation of Mutual Funds with "Total" in Description
 Earlier parsers dropped legitimate broad-market index funds (e.g. `VTI` Vanguard Total Stock Market, `BND` Total Bond Market, `TTE` TotalEnergies) because their descriptions contained `"Total"`. The parser decouples symbol evaluation: if `symbol != ""` and the row is not a summary row, the record is unconditionally preserved.
 
+### 6. Legacy Field Parity & Performance Metrics
+To preserve complete fidelity with legacy `positions_fidelity` documents, [`parser.go`](../../../internal/infra/sources/fidelity/parser.go) extracts 8 additional optional performance, allocation, and classification columns alongside core valuation metrics:
+- **The 8 Legacy-Parity Fields**:
+  1. `LastPriceChange` (`"last price change"`): Per-unit dollar change (`float64`, parsed via `parseCurrency`).
+  2. `TodaysGainLossDollar` (`"today's gain/loss dollar"`, `"todays gain/loss dollar"`): Today's dollar gain/loss (`float64`, parsed via `parseCurrency`).
+  3. `TodaysGainLossPct` (`"today's gain/loss percent"`, `"todays gain/loss percent"`): Today's percentage gain/loss in percentage points (`"+0.84%"` -> `0.84`, parsed via `parsePercent`).
+  4. `TotalGainLossDollar` (`"total gain/loss dollar"`): Cumulative dollar gain/loss (`float64`, parsed via `parseCurrency`).
+  5. `TotalGainLossPct` (`"total gain/loss percent"`): Cumulative percentage gain/loss in percentage points (`float64`, parsed via `parsePercent`).
+  6. `PercentOfAccount` (`"percent of account"`): Portfolio allocation weight in percentage points (`float64`, parsed via `parsePercent`).
+  7. `AverageCostBasis` (`"average cost basis"`): Per-unit cost basis in dollars (`float64`, parsed via `parseCurrency`).
+  8. `Type` (`"type"`): Raw Fidelity holding classification, trimmed (e.g. `"Cash"`, `"Margin"`).
+- **`parsePercent` Heuristics**:
+  - **Strict Placeholder Pre-Check**: Evaluates `isNumericDefaultZero` on the raw trimmed input *before* stripping `%` so legitimate placeholders (`""`, `"-"`, `"--"`, `"n/a"`, `"unknown"`, `"pending"`) resolve to `0.0`, while bare or placeholder-prefixed percent tokens (`"%"`, `"-%"`, `"--%"`, `"N/A%"`) are rejected after stripping.
+  - **Accounting Parentheses & Trailing `%`**: `stripPercentSymbol` (via `removeOuterOrInnerPercent` and `stripParenthesizedPercent`) handles both trailing `%` (`"+0.84%"` -> `"+0.84"`) and inner parenthesized percentages (`"(0.44%)"` -> `"(0.44)"`, which `sanitizeFinancialToken` converts to `"-0.44"`).
+  - **Duplicate / Embedded `%` Rejection**: Any remaining `%` character after outer/inner stripping (such as `"12%34"` or `"25%%"`) causes `stripPercentSymbol` to fail immediately.
+- **Domain Parameter Objects & Decomposed Metric Reading**:
+  - `holdingIdentity`: Value struct produced by `rowParser.resolveIdentity(row, lineNum)` encapsulating `accountID`, `accountName`, `symbol`, `description`, `securityType` (`Type`), and `rawLineNumber`.
+  - `coreMetrics` & `performanceMetrics`: Value structs aggregated into `positionMetrics`, which populates the target entity via `(m positionMetrics) applyTo(pos *model.FidelityPosition)`.
+  - `metricRowReader`: Short-circuiting row reader helper exposing `(r *metricRowReader) readCore() (coreMetrics, error)` and `(r *metricRowReader) readPerformance() (performanceMetrics, error)` to keep cyclomatic and cognitive complexity flat.
+
 ---
 
 ## 3. Schema Signature Validation
@@ -130,7 +150,7 @@ Fidelity portfolio files frequently represent single-account statements where ac
 
 ## 5. Exported Sentinel Errors
 
-[`extractor.go`](../../../internal/infra/sources/fidelity/extractor.go) exports adapter-level sentinels and wraps the domain-level `model.ErrMissingAsOfDate` sentinel when a non-empty statement lacks a `"Date downloaded "` footer:
+[`extractor.go`](../../../internal/infra/sources/fidelity/extractor.go) exports adapter-level sentinels and wraps domain-level sentinels from [`fidelity_position.go`](../../../internal/domain/model/fidelity_position.go) during validation and batch finalization:
 
 ```go
 // Adapter-level sentinels in internal/infra/sources/fidelity/extractor.go
@@ -140,9 +160,9 @@ var (
 	ErrInvalidDateDownloaded  = errors.New("invalid fidelity Date downloaded footer")
 )
 
-// Domain-level sentinel in internal/domain/model/fidelity_position.go
-// Returned by finalizePositions when len(positions) > 0 and asOfDate.IsZero()
+// Domain-level sentinels in internal/domain/model/fidelity_position.go
 var (
-	ErrMissingAsOfDate = errors.New("fidelity snapshot date (asOfDate) is required")
+	ErrInvalidPerformanceMetric = errors.New("performance or allocation metric must be a valid finite number")
+	ErrMissingAsOfDate          = errors.New("fidelity snapshot date (asOfDate) is required")
 )
 ```

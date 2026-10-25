@@ -21,6 +21,8 @@ var (
 	ErrInvalidCurrentValue = errors.New("current value must be a valid finite number")
 	// ErrInvalidCostBasis indicates that the cost basis is NaN or infinite.
 	ErrInvalidCostBasis = errors.New("cost basis must be a valid finite number")
+	// ErrInvalidPerformanceMetric indicates that a performance or allocation metric is NaN or infinite.
+	ErrInvalidPerformanceMetric = errors.New("performance or allocation metric must be a valid finite number")
 	// ErrMissingAsOfDate indicates that the portfolio snapshot date (asOfDate) is missing.
 	ErrMissingAsOfDate = errors.New("fidelity snapshot date (asOfDate) is required")
 )
@@ -37,6 +39,16 @@ type FidelityPosition struct {
 	CurrentValue float64
 	CostBasis    float64
 	AsOfDate     time.Time // UTC instant parsed from the "Date downloaded" footer.
+
+	// Legacy-parity fields (A1, Option C). Placeholders ("--", "") parse to zero, as in legacy.
+	LastPriceChange      float64 // Per-unit dollar change.
+	TodaysGainLossDollar float64 // Today's gain/loss in dollars.
+	TodaysGainLossPct    float64 // Percentage points: "+0.84%" -> 0.84 (not 0.0084).
+	TotalGainLossDollar  float64 // Total gain/loss in dollars.
+	TotalGainLossPct     float64 // Percentage points.
+	PercentOfAccount     float64 // Percentage points.
+	AverageCostBasis     float64 // Per-unit cost basis in dollars.
+	Type                 string  // Raw Fidelity "Type" column, trimmed (e.g. "Cash", "Margin").
 }
 
 // Validate validates the essential fields of a FidelityPosition.
@@ -44,6 +56,16 @@ func (p *FidelityPosition) Validate() error {
 	if p == nil {
 		return ErrNilFidelityPosition
 	}
+	if err := p.validateIdentity(); err != nil {
+		return err
+	}
+	if err := p.validateCoreMetrics(); err != nil {
+		return err
+	}
+	return p.validatePerformanceMetrics()
+}
+
+func (p *FidelityPosition) validateIdentity() error {
 	if err := p.Lineage.Validate(); err != nil {
 		return err
 	}
@@ -53,20 +75,52 @@ func (p *FidelityPosition) Validate() error {
 	if p.Symbol == "" {
 		return ErrMissingSymbol
 	}
-	if math.IsNaN(p.Quantity) || math.IsInf(p.Quantity, 0) {
+	return nil
+}
+
+func (p *FidelityPosition) validateCoreMetrics() error {
+	if !isFinite(p.Quantity) {
 		return ErrInvalidQuantity
 	}
-	if math.IsNaN(p.LastPrice) || math.IsInf(p.LastPrice, 0) {
+	if !isFinite(p.LastPrice) {
 		return ErrInvalidLastPrice
 	}
 	if p.LastPrice < 0 {
 		return ErrNegativeLastPrice
 	}
-	if math.IsNaN(p.CurrentValue) || math.IsInf(p.CurrentValue, 0) {
+	if !isFinite(p.CurrentValue) {
 		return ErrInvalidCurrentValue
 	}
-	if math.IsNaN(p.CostBasis) || math.IsInf(p.CostBasis, 0) {
+	if !isFinite(p.CostBasis) {
 		return ErrInvalidCostBasis
 	}
 	return nil
+}
+
+func (p *FidelityPosition) validatePerformanceMetrics() error {
+	if !allFinite(
+		p.LastPriceChange,
+		p.TodaysGainLossDollar,
+		p.TodaysGainLossPct,
+		p.TotalGainLossDollar,
+		p.TotalGainLossPct,
+		p.PercentOfAccount,
+		p.AverageCostBasis,
+	) {
+		return ErrInvalidPerformanceMetric
+	}
+	return nil
+}
+
+func allFinite(vals ...float64) bool {
+	for _, v := range vals {
+		if !isFinite(v) {
+			return false
+		}
+	}
+	return true
+}
+
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }

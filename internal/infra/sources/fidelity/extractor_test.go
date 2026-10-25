@@ -84,12 +84,91 @@ func TestFidelityExtractor_Extract_Fixture(t *testing.T) {
 
 	zeroPos := positions[4]
 	assertHolding(t, zeroPos, "SYNTH-TAX-303", "CASH", 0.0)
+	assertFixtureLegacyFields(t, positions)
 
 	if spaxx.Lineage.RowNumber != 2 {
 		t.Errorf("expected spaxx Lineage.RowNumber 2, got %d", spaxx.Lineage.RowNumber)
 	}
 	if spaxx.Lineage.FileName != meta.FileName || spaxx.Lineage.FileHash != meta.FileHash {
 		t.Errorf("unexpected spaxx Lineage metadata: %+v", spaxx.Lineage)
+	}
+}
+
+type expectedLegacyMetrics struct {
+	lastPriceChange      float64
+	todaysGainLossDollar float64
+	todaysGainLossPct    float64
+	totalGainLossDollar  float64
+	totalGainLossPct     float64
+	percentOfAccount     float64
+	averageCostBasis     float64
+	posType              string
+}
+
+func assertFixtureLegacyFields(t *testing.T, positions []model.FidelityPosition) {
+	t.Helper()
+
+	wantByIdx := []expectedLegacyMetrics{
+		{
+			percentOfAccount: 25.00,
+			posType:          "Cash",
+		},
+		{
+			lastPriceChange:      1.25,
+			todaysGainLossDollar: 56.56,
+			todaysGainLossPct:    0.84,
+			totalGainLossDollar:  787.50,
+			totalGainLossPct:     13.13,
+			percentOfAccount:     52.21,
+			averageCostBasis:     132.59,
+			posType:              "Cash",
+		},
+		{
+			lastPriceChange:      2.10,
+			todaysGainLossDollar: 21.00,
+			todaysGainLossPct:    0.71,
+			totalGainLossDollar:  462.50,
+			totalGainLossPct:     18.50,
+			percentOfAccount:     22.79,
+			averageCostBasis:     250.00,
+			posType:              "Cash",
+		},
+		{
+			lastPriceChange:      -0.80,
+			todaysGainLossDollar: -20.40,
+			todaysGainLossPct:    -0.44,
+			totalGainLossDollar:  595.10,
+			totalGainLossPct:     14.88,
+			percentOfAccount:     100.00,
+			averageCostBasis:     156.86,
+			posType:              "Cash",
+		},
+		{},
+	}
+
+	for i, want := range wantByIdx {
+		assertPositionLegacyMetrics(t, positions[i], want)
+	}
+}
+
+func assertPositionLegacyMetrics(
+	t *testing.T,
+	pos model.FidelityPosition,
+	want expectedLegacyMetrics,
+) {
+	t.Helper()
+	if pos.LastPriceChange != want.lastPriceChange ||
+		pos.TodaysGainLossDollar != want.todaysGainLossDollar ||
+		pos.TodaysGainLossPct != want.todaysGainLossPct {
+		t.Errorf("symbol %q daily legacy metrics mismatch: got %+v, want %+v", pos.Symbol, pos, want)
+	}
+	if pos.TotalGainLossDollar != want.totalGainLossDollar ||
+		pos.TotalGainLossPct != want.totalGainLossPct ||
+		pos.PercentOfAccount != want.percentOfAccount {
+		t.Errorf("symbol %q total/account legacy metrics mismatch: got %+v, want %+v", pos.Symbol, pos, want)
+	}
+	if pos.AverageCostBasis != want.averageCostBasis || pos.Type != want.posType {
+		t.Errorf("symbol %q averageCostBasis/Type mismatch: got %+v, want %+v", pos.Symbol, pos, want)
 	}
 }
 
@@ -1552,6 +1631,77 @@ func runStructuralOrderingCase(
 	}
 }
 
+func TestFidelityExtractor_Extract_InvalidPerformanceColumnsFailStream(t *testing.T) {
+	ctx := context.Background()
+	meta := model.FileMetadata{
+		FileName:   "Portfolio_Positions_InvalidPerf.csv",
+		FileHash:   "hash_fid_invalid_perf",
+		AccountID:  "SYNTH-DEFAULT",
+		IngestedAt: time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC),
+	}
+
+	header := "Account number,Account name,Symbol,Description,Quantity,Last price," +
+		"Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent," +
+		"Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total," +
+		"Average cost basis,Type\n"
+
+	tests := []struct {
+		name    string
+		dataRow string
+		wantSub string
+	}{
+		{
+			name:    "invalid Last price change column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,BAD_LPC,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash\n",
+			wantSub: "last price change",
+		},
+		{
+			name:    "invalid Today's gain/loss dollar column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,+$1.25,$6787.50,BAD_TGLD,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash\n",
+			wantSub: "todays gain/loss dollar",
+		},
+		{
+			name:    "invalid Today's gain/loss percent column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,+$1.25,$6787.50,+$56.56,NaN%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash\n",
+			wantSub: "todays gain/loss percent",
+		},
+		{
+			name:    "invalid Total gain/loss dollar column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,BAD_TOTGLD,+13.13%,52.21%,$6000.00,$132.59,Cash\n",
+			wantSub: "total gain/loss dollar",
+		},
+		{
+			name:    "invalid Total gain/loss percent column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,BAD_PCT%,52.21%,$6000.00,$132.59,Cash\n",
+			wantSub: "total gain/loss percent",
+		},
+		{
+			name:    "invalid Percent of account column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,25%%,$6000.00,$132.59,Cash\n",
+			wantSub: "percent of account",
+		},
+		{
+			name:    "invalid Average cost basis column fails stream",
+			dataRow: "SYNTH-ROTH-101,ROTH IRA,FSKAX,TOTAL MKT,45.25,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,BAD_ACB,Cash\n",
+			wantSub: "average cost basis",
+		},
+	}
+
+	extractor := fidelity.NewExtractor()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			csvPayload := header + tc.dataRow
+			batch, err := extractor.Extract(ctx, strings.NewReader(csvPayload), meta)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil (batch=%+v)", tc.name, batch)
+			}
+			if !strings.Contains(err.Error(), "row 2") || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("expected error containing 'row 2' and %q, got %v", tc.wantSub, err)
+			}
+		})
+	}
+}
+
 type testErrorReader struct {
 	err error
 }
@@ -1581,12 +1731,16 @@ func (r *midStreamCancelReader) Read(p []byte) (int, error) {
 func generateSyntheticFidelityCSV(rows int) string {
 	var sb strings.Builder
 	sb.WriteString(
-		"Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\n",
+		"Account number,Account name,Symbol,Description,Quantity,Last price," +
+			"Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent," +
+			"Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total," +
+			"Average cost basis,Type\n",
 	)
 	for i := range rows {
 		fmt.Fprintf(
 			&sb,
-			"FID-BENCH-%d,INDIVIDUAL,SYM%d,SYNTHETIC HOLDING %d,%d.25,$150.00,$%d.00,$%d.00\n",
+			"FID-BENCH-%d,INDIVIDUAL,SYM%d,SYNTHETIC HOLDING %d,%d.25,$150.00,"+
+				"+$1.25,$%d.00,+$56.56,+0.84%%,+$787.50,+13.13%%,10.50%%,$%d.00,$120.00,Cash\n",
 			(i%5)+1,
 			i,
 			i,

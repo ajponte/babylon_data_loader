@@ -21,36 +21,59 @@ func TestFidelityPosition_Instantiation(t *testing.T) {
 	}
 
 	pos := model.FidelityPosition{
-		Lineage:      lineage,
-		AccountID:    "FID-ROTH-789",
-		AccountName:  "ROTH IRA",
-		Symbol:       "FSKAX",
-		Description:  "FIDELITY TOTAL MARKET INDEX",
-		Quantity:     125.750,
-		LastPrice:    152.40,
-		CurrentValue: 19164.30,
-		CostBasis:    16500.00,
-		AsOfDate:     asOfDate,
+		Lineage:              lineage,
+		AccountID:            "FID-ROTH-789",
+		AccountName:          "ROTH IRA",
+		Symbol:               "FSKAX",
+		Description:          "FIDELITY TOTAL MARKET INDEX",
+		Quantity:             125.750,
+		LastPrice:            152.40,
+		CurrentValue:         19164.30,
+		CostBasis:            16500.00,
+		AsOfDate:             asOfDate,
+		LastPriceChange:      1.25,
+		TodaysGainLossDollar: 56.56,
+		TodaysGainLossPct:    0.84,
+		TotalGainLossDollar:  2664.30,
+		TotalGainLossPct:     16.15,
+		PercentOfAccount:     52.21,
+		AverageCostBasis:     131.21,
+		Type:                 "Cash",
 	}
 
 	assertFidelityPositionEqual(t, pos, model.FidelityPosition{
-		Lineage:      lineage,
-		AccountID:    "FID-ROTH-789",
-		AccountName:  "ROTH IRA",
-		Symbol:       "FSKAX",
-		Description:  "FIDELITY TOTAL MARKET INDEX",
-		Quantity:     125.750,
-		LastPrice:    152.40,
-		CurrentValue: 19164.30,
-		CostBasis:    16500.00,
-		AsOfDate:     asOfDate,
+		Lineage:              lineage,
+		AccountID:            "FID-ROTH-789",
+		AccountName:          "ROTH IRA",
+		Symbol:               "FSKAX",
+		Description:          "FIDELITY TOTAL MARKET INDEX",
+		Quantity:             125.750,
+		LastPrice:            152.40,
+		CurrentValue:         19164.30,
+		CostBasis:            16500.00,
+		AsOfDate:             asOfDate,
+		LastPriceChange:      1.25,
+		TodaysGainLossDollar: 56.56,
+		TodaysGainLossPct:    0.84,
+		TotalGainLossDollar:  2664.30,
+		TotalGainLossPct:     16.15,
+		PercentOfAccount:     52.21,
+		AverageCostBasis:     131.21,
+		Type:                 "Cash",
 	})
 }
 
 func assertFidelityPositionEqual(t *testing.T, got, want model.FidelityPosition) {
 	t.Helper()
-	if got.Lineage.FileName != want.Lineage.FileName {
-		t.Errorf("expected lineage FileName %q, got %q", want.Lineage.FileName, got.Lineage.FileName)
+	assertFidelityIdentityEqual(t, got, want)
+	assertFidelityCoreMetricsEqual(t, got, want)
+	assertFidelityPerformanceEqual(t, got, want)
+}
+
+func assertFidelityIdentityEqual(t *testing.T, got, want model.FidelityPosition) {
+	t.Helper()
+	if got.Lineage != want.Lineage {
+		t.Errorf("expected Lineage %+v, got %+v", want.Lineage, got.Lineage)
 	}
 	if got.AccountID != want.AccountID {
 		t.Errorf("expected AccountID %q, got %q", want.AccountID, got.AccountID)
@@ -64,6 +87,10 @@ func assertFidelityPositionEqual(t *testing.T, got, want model.FidelityPosition)
 	if got.Description != want.Description {
 		t.Errorf("expected Description %q, got %q", want.Description, got.Description)
 	}
+}
+
+func assertFidelityCoreMetricsEqual(t *testing.T, got, want model.FidelityPosition) {
+	t.Helper()
 	if got.Quantity != want.Quantity {
 		t.Errorf("expected Quantity %f, got %f", want.Quantity, got.Quantity)
 	}
@@ -81,6 +108,34 @@ func assertFidelityPositionEqual(t *testing.T, got, want model.FidelityPosition)
 	}
 	if got.AsOfDate.Location() != time.UTC {
 		t.Errorf("expected AsOfDate location UTC, got %v", got.AsOfDate.Location())
+	}
+}
+
+func assertFidelityPerformanceEqual(t *testing.T, got, want model.FidelityPosition) {
+	t.Helper()
+	if got.LastPriceChange != want.LastPriceChange {
+		t.Errorf("expected LastPriceChange %f, got %f", want.LastPriceChange, got.LastPriceChange)
+	}
+	if got.TodaysGainLossDollar != want.TodaysGainLossDollar {
+		t.Errorf("expected TodaysGainLossDollar %f, got %f", want.TodaysGainLossDollar, got.TodaysGainLossDollar)
+	}
+	if got.TodaysGainLossPct != want.TodaysGainLossPct {
+		t.Errorf("expected TodaysGainLossPct %f, got %f", want.TodaysGainLossPct, got.TodaysGainLossPct)
+	}
+	if got.TotalGainLossDollar != want.TotalGainLossDollar {
+		t.Errorf("expected TotalGainLossDollar %f, got %f", want.TotalGainLossDollar, got.TotalGainLossDollar)
+	}
+	if got.TotalGainLossPct != want.TotalGainLossPct {
+		t.Errorf("expected TotalGainLossPct %f, got %f", want.TotalGainLossPct, got.TotalGainLossPct)
+	}
+	if got.PercentOfAccount != want.PercentOfAccount {
+		t.Errorf("expected PercentOfAccount %f, got %f", want.PercentOfAccount, got.PercentOfAccount)
+	}
+	if got.AverageCostBasis != want.AverageCostBasis {
+		t.Errorf("expected AverageCostBasis %f, got %f", want.AverageCostBasis, got.AverageCostBasis)
+	}
+	if got.Type != want.Type {
+		t.Errorf("expected Type %q, got %q", want.Type, got.Type)
 	}
 }
 
@@ -135,34 +190,7 @@ func TestFidelityPosition_NumericPrecision(t *testing.T) {
 
 func TestFidelityPosition_ZeroValue(t *testing.T) {
 	var pos model.FidelityPosition
-
-	if pos.AccountID != "" {
-		t.Errorf("expected empty AccountID, got %q", pos.AccountID)
-	}
-	if pos.AccountName != "" {
-		t.Errorf("expected empty AccountName, got %q", pos.AccountName)
-	}
-	if pos.Symbol != "" {
-		t.Errorf("expected empty Symbol, got %q", pos.Symbol)
-	}
-	if pos.Description != "" {
-		t.Errorf("expected empty Description, got %q", pos.Description)
-	}
-	if pos.Quantity != 0.0 {
-		t.Errorf("expected Quantity 0.0, got %f", pos.Quantity)
-	}
-	if pos.LastPrice != 0.0 {
-		t.Errorf("expected LastPrice 0.0, got %f", pos.LastPrice)
-	}
-	if pos.CurrentValue != 0.0 {
-		t.Errorf("expected CurrentValue 0.0, got %f", pos.CurrentValue)
-	}
-	if pos.CostBasis != 0.0 {
-		t.Errorf("expected CostBasis 0.0, got %f", pos.CostBasis)
-	}
-	if pos.Lineage.FileName != "" || pos.Lineage.RowNumber != 0 {
-		t.Errorf("expected zero Lineage, got %+v", pos.Lineage)
-	}
+	assertFidelityPositionEqual(t, pos, model.FidelityPosition{})
 	if !pos.AsOfDate.IsZero() {
 		t.Errorf("expected zero AsOfDate, got %v", pos.AsOfDate)
 	}
@@ -174,12 +202,20 @@ func newValidTestPosition(mutate func(*model.FidelityPosition)) *model.FidelityP
 			FileName:  "positions.csv",
 			RowNumber: 2,
 		},
-		AccountID:    "FID-123",
-		Symbol:       "FXAIX",
-		Quantity:     10.0,
-		LastPrice:    180.50,
-		CurrentValue: 1805.00,
-		CostBasis:    1500.00,
+		AccountID:            "FID-123",
+		Symbol:               "FXAIX",
+		Quantity:             10.0,
+		LastPrice:            180.50,
+		CurrentValue:         1805.00,
+		CostBasis:            1500.00,
+		LastPriceChange:      1.25,
+		TodaysGainLossDollar: 12.50,
+		TodaysGainLossPct:    0.70,
+		TotalGainLossDollar:  305.00,
+		TotalGainLossPct:     20.33,
+		PercentOfAccount:     100.00,
+		AverageCostBasis:     150.00,
+		Type:                 "Cash",
 	}
 	if mutate != nil {
 		mutate(pos)
@@ -211,6 +247,17 @@ func TestFidelityPosition_Validate(t *testing.T) {
 			name: "valid position with populated UTC AsOfDate (post-footer stamping)",
 			pos: newValidTestPosition(func(p *model.FidelityPosition) {
 				p.AsOfDate = time.Date(2026, 9, 26, 1, 50, 0, 0, time.UTC)
+			}),
+			expectedErr: nil,
+		},
+		{
+			name: "valid position with negative daily and total gain/loss performance metrics",
+			pos: newValidTestPosition(func(p *model.FidelityPosition) {
+				p.LastPriceChange = -0.80
+				p.TodaysGainLossDollar = -20.40
+				p.TodaysGainLossPct = -0.44
+				p.TotalGainLossDollar = -595.10
+				p.TotalGainLossPct = -14.88
 			}),
 			expectedErr: nil,
 		},
@@ -327,5 +374,73 @@ func TestFidelityPosition_ErrMissingAsOfDateSentinel(t *testing.T) {
 	wrapped := fmt.Errorf("batch validation failed: %w", model.ErrMissingAsOfDate)
 	if !errors.Is(wrapped, model.ErrMissingAsOfDate) {
 		t.Errorf("expected errors.Is(wrapped, model.ErrMissingAsOfDate) == true, got false")
+	}
+}
+
+func TestFidelityPosition_ErrInvalidPerformanceMetricSentinel(t *testing.T) {
+	if model.ErrInvalidPerformanceMetric == nil {
+		t.Fatal("expected model.ErrInvalidPerformanceMetric to be non-nil")
+	}
+	if model.ErrInvalidPerformanceMetric.Error() == "" {
+		t.Error("expected model.ErrInvalidPerformanceMetric to have a non-empty error message")
+	}
+	wrapped := fmt.Errorf("row validation failed: %w", model.ErrInvalidPerformanceMetric)
+	if !errors.Is(wrapped, model.ErrInvalidPerformanceMetric) {
+		t.Errorf("expected errors.Is(wrapped, model.ErrInvalidPerformanceMetric) == true, got false")
+	}
+	distinctSentinels := []error{
+		model.ErrInvalidQuantity,
+		model.ErrInvalidLastPrice,
+		model.ErrInvalidCurrentValue,
+		model.ErrInvalidCostBasis,
+		model.ErrMissingAsOfDate,
+	}
+	for _, target := range distinctSentinels {
+		if errors.Is(wrapped, target) {
+			t.Errorf("expected ErrInvalidPerformanceMetric to be distinct from %v", target)
+		}
+	}
+}
+
+func TestFidelityPosition_Validate_PerformanceMetricsFinite(t *testing.T) {
+	nonFiniteValues := []struct {
+		label string
+		val   float64
+	}{
+		{label: "NaN", val: math.NaN()},
+		{label: "+Inf", val: math.Inf(1)},
+		{label: "-Inf", val: math.Inf(-1)},
+	}
+
+	fields := []struct {
+		name string
+		set  func(p *model.FidelityPosition, v float64)
+	}{
+		{name: "LastPriceChange", set: func(p *model.FidelityPosition, v float64) { p.LastPriceChange = v }},
+		{name: "TodaysGainLossDollar", set: func(p *model.FidelityPosition, v float64) { p.TodaysGainLossDollar = v }},
+		{name: "TodaysGainLossPct", set: func(p *model.FidelityPosition, v float64) { p.TodaysGainLossPct = v }},
+		{name: "TotalGainLossDollar", set: func(p *model.FidelityPosition, v float64) { p.TotalGainLossDollar = v }},
+		{name: "TotalGainLossPct", set: func(p *model.FidelityPosition, v float64) { p.TotalGainLossPct = v }},
+		{name: "PercentOfAccount", set: func(p *model.FidelityPosition, v float64) { p.PercentOfAccount = v }},
+		{name: "AverageCostBasis", set: func(p *model.FidelityPosition, v float64) { p.AverageCostBasis = v }},
+	}
+
+	for _, field := range fields {
+		for _, nf := range nonFiniteValues {
+			t.Run(field.name+"_"+nf.label, func(t *testing.T) {
+				pos := newValidTestPosition(func(p *model.FidelityPosition) {
+					field.set(p, nf.val)
+				})
+				err := pos.Validate()
+				if !errors.Is(err, model.ErrInvalidPerformanceMetric) {
+					t.Errorf(
+						"expected errors.Is(err, model.ErrInvalidPerformanceMetric) for %s=%s, got: %v",
+						field.name,
+						nf.label,
+						err,
+					)
+				}
+			})
+		}
 	}
 }
