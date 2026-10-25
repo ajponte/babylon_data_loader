@@ -89,9 +89,10 @@ The Chase adapter handles CSV exports from Chase Bank for checking, savings, and
 6. **Strict Currency Grammar (`cleanNumeric`)**: Amounts and balances must match an optional sign or accounting parentheses, an optional `$`, commas only between three-digit groups, and at most two decimals. Unicode minus and dashes are normalized to `-` first. Inputs such as `12,34`, `1+2` and `0x1p4` are rejected, never silently re-valued.
 7. **Ergonomic Dialect Row Mappers**: `parseCheckingRow` and `parseCreditCardRow` use `rowReader`, reducing cognitive complexity to 2.
 8. **Pending Date Fallbacks (`resolveCreditCardDate`)**: Falls back from unsettled `"Post Date"` to `"Transaction Date"` for credit card rows.
-9. **Unwrapped Context Cancellation**: Raw `context.Canceled` and `context.DeadlineExceeded` are returned strictly unwrapped across pipeline stages and header/row parsing (`handleReadError`). A nil context is normalized once, in `Extract`.
-10. **Error Taxonomy**: Row rejections wrap `ErrInvalidRow` plus the matching domain sentinel (`model.ErrInvalidAmount`, `ErrInvalidBalance`, `ErrMissingDescription`, `ErrMissingPostingDate`). CSV syntax errors wrap `ErrMalformedCSV` and `*csv.ParseError`. Header defects return `ErrMalformedHeader` (CR-only line endings) or `ErrDuplicateColumn`. I/O failures match none of these.
-11. **Shared Destination**: `model.DestChaseChecking` and `model.DestChaseCreditCard` are the same collection (`"transactions_chase"`), so the dialect is carried only by the payload fields each parser populates.
+9. **Transaction Date Extraction (`resolveTransactionDate`)**: Resolves optional credit card purchase date into `*time.Time` at UTC midnight (nil for checking, synthetic, or placeholders), rejecting unparseable non-placeholder dates with `ErrInvalidRow`.
+10. **Unwrapped Context Cancellation**: Raw `context.Canceled` and `context.DeadlineExceeded` are returned strictly unwrapped across pipeline stages and header/row parsing (`handleReadError`). A nil context is normalized once, in `Extract`.
+11. **Error Taxonomy**: Row rejections wrap `ErrInvalidRow` plus the matching domain sentinel (`model.ErrInvalidAmount`, `ErrInvalidBalance`, `ErrMissingDescription`, `ErrMissingPostingDate`). CSV syntax errors wrap `ErrMalformedCSV` and `*csv.ParseError`. Header defects return `ErrMalformedHeader` (CR-only line endings) or `ErrDuplicateColumn`. I/O failures match none of these.
+12. **Shared Destination**: `model.DestChaseChecking` and `model.DestChaseCreditCard` are the same collection (`"transactions_chase"`), so the dialect is carried only by the payload fields each parser populates.
 
 ```go
 // Primary interface implementation in internal/infra/sources/chase/extractor.go

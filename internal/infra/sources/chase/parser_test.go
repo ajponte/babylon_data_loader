@@ -1204,6 +1204,9 @@ func testParseCreditCardRowStandard(t *testing.T, meta model.FileMetadata, colIn
 	if tx.Balance == nil || *tx.Balance != 1200.00 {
 		t.Errorf("expected 1200.00, got %v", tx.Balance)
 	}
+	if tx.TransactionDate == nil || tx.TransactionDate.Format("2006-01-02") != "2026-10-17" {
+		t.Errorf("expected TransactionDate 2026-10-17, got %v", tx.TransactionDate)
+	}
 }
 
 func testParseCreditCardRowFallbacks(t *testing.T, meta model.FileMetadata, colIndex map[string]int) {
@@ -1213,11 +1216,17 @@ func testParseCreditCardRowFallbacks(t *testing.T, meta model.FileMetadata, colI
 	if err != nil || txDef.Type != "Sale" {
 		t.Errorf("expected 'Sale', got %q, err=%v", txDef.Type, err)
 	}
+	if txDef.TransactionDate == nil || txDef.TransactionDate.Format("2006-01-02") != "2026-10-17" {
+		t.Errorf("expected TransactionDate 2026-10-17, got %v", txDef.TransactionDate)
+	}
 
 	rowPending := []string{"pending", "COFFEE SHOP", "-4.50", "Sale", "", "", "", "10/17/2026"}
 	txPending, err := parseCreditCardRow(rowPending, colIndex, 22, meta)
 	if err != nil || txPending.PostingDate.Format("2006-01-02") != "2026-10-17" {
 		t.Errorf("expected 2026-10-17, got %v, err=%v", txPending.PostingDate, err)
+	}
+	if txPending.TransactionDate == nil || !txPending.TransactionDate.Equal(txPending.PostingDate) {
+		t.Errorf("expected TransactionDate equal to PostingDate 2026-10-17, got %v", txPending.TransactionDate)
 	}
 }
 
@@ -1301,5 +1310,340 @@ func TestParseChaseRecords_CancellationBetweenRows(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("expected the row loop to stop after 1 row, parsed %d", calls)
+	}
+}
+
+func assertResolvedTransactionDate(
+	t *testing.T,
+	got *time.Time,
+	err error,
+	wantDate string,
+	wantNil bool,
+	wantErr bool,
+	errSubstr string,
+) {
+	t.Helper()
+	if wantErr {
+		if err == nil || !strings.Contains(err.Error(), errSubstr) {
+			t.Fatalf("expected error containing %q, got: %v", errSubstr, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wantNil {
+		if got != nil {
+			t.Errorf("expected nil TransactionDate, got %v", *got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("expected non-nil TransactionDate %q, got nil", wantDate)
+	}
+	if got.Format("2006-01-02") != wantDate {
+		t.Errorf("expected %s, got %s", wantDate, got.Format("2006-01-02"))
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("expected UTC location, got %v", got.Location())
+	}
+}
+
+func TestResolveTransactionDate(t *testing.T) {
+	t.Parallel()
+	const lineNum = 7
+	stdIndex := map[string]int{"transaction date": 0}
+
+	tests := []struct {
+		name      string
+		row       []string
+		colIndex  map[string]int
+		wantDate  string
+		wantNil   bool
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:     "MM/DD/YYYY 10/14/2026 resolves to UTC midnight",
+			row:      []string{"10/14/2026"},
+			colIndex: stdIndex,
+			wantDate: "2026-10-14",
+		},
+		{
+			name:     "M/D/YYYY 1/2/2026 resolves to UTC midnight",
+			row:      []string{"1/2/2026"},
+			colIndex: stdIndex,
+			wantDate: "2026-01-02",
+		},
+		{
+			name:     "ISO 2026-10-14 resolves to UTC midnight",
+			row:      []string{"2026-10-14"},
+			colIndex: stdIndex,
+			wantDate: "2026-10-14",
+		},
+		{
+			name:     "trans date alias resolves to UTC midnight",
+			row:      []string{"10/14/2026"},
+			colIndex: map[string]int{"trans date": 0},
+			wantDate: "2026-10-14",
+		},
+		{name: "empty string returns nil", row: []string{""}, colIndex: stdIndex, wantNil: true},
+		{name: "double dash -- returns nil", row: []string{"--"}, colIndex: stdIndex, wantNil: true},
+		{name: "unicode em dash — returns nil", row: []string{"\u2014"}, colIndex: stdIndex, wantNil: true},
+		{name: "pending placeholder returns nil", row: []string{"pending"}, colIndex: stdIndex, wantNil: true},
+		{name: "N/A placeholder returns nil", row: []string{"N/A"}, colIndex: stdIndex, wantNil: true},
+		{
+			name:     "column absent returns nil",
+			row:      []string{"10/18/2026"},
+			colIndex: map[string]int{"post date": 0},
+			wantNil:  true,
+		},
+		{
+			name:      "invalid date 13/45/2026 returns row error",
+			row:       []string{"13/45/2026"},
+			colIndex:  stdIndex,
+			wantErr:   true,
+			errSubstr: "row 7: transaction date",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rr := newRowReader(tc.row, tc.colIndex, lineNum)
+			got, err := resolveTransactionDate(rr)
+			assertResolvedTransactionDate(t, got, err, tc.wantDate, tc.wantNil, tc.wantErr, tc.errSubstr)
+		})
+	}
+}
+
+func TestParseCreditCardRow_TransactionDatePopulated(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "cc_settled.csv",
+		AccountID:  "acc-cc-settled",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	colIndex := map[string]int{
+		"transaction date": 0,
+		"post date":        1,
+		"description":      2,
+		"amount":           3,
+	}
+	row := []string{"10/14/2026", "10/16/2026", "COFFEE ROASTERS", "-6.75"}
+
+	tx, err := parseCreditCardRow(row, colIndex, 2, meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tx.TransactionDate == nil {
+		t.Fatal("expected non-nil TransactionDate")
+	}
+	wantTxDate := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	wantPostDate := time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC)
+	if !tx.TransactionDate.Equal(wantTxDate) {
+		t.Errorf("expected TransactionDate %v, got %v", wantTxDate, *tx.TransactionDate)
+	}
+	if !tx.PostingDate.Equal(wantPostDate) {
+		t.Errorf("expected PostingDate %v, got %v", wantPostDate, tx.PostingDate)
+	}
+	if tx.TransactionDate.Equal(tx.PostingDate) {
+		t.Errorf("expected purchase TransactionDate (%v) to differ from PostingDate (%v)", *tx.TransactionDate, tx.PostingDate)
+	}
+}
+
+func TestParseCreditCardRow_PendingUsesTransactionDateForBoth(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "cc_pending.csv",
+		AccountID:  "acc-cc-pending",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	colIndex := map[string]int{
+		"transaction date": 0,
+		"post date":        1,
+		"description":      2,
+		"amount":           3,
+	}
+	row := []string{"10/14/2026", "", "PENDING MERCHANT", "-24.00"}
+
+	tx, err := parseCreditCardRow(row, colIndex, 3, meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tx.TransactionDate == nil {
+		t.Fatal("expected non-nil TransactionDate for pending credit card row")
+	}
+	wantDay := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	if !tx.PostingDate.Equal(wantDay) || !tx.TransactionDate.Equal(wantDay) {
+		t.Errorf("expected both PostingDate and TransactionDate to equal %v, got post=%v tx=%v",
+			wantDay, tx.PostingDate, *tx.TransactionDate)
+	}
+}
+
+func TestParseCreditCardRow_InvalidTransactionDateFailsRow(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "cc_invalid_txdate.csv",
+		AccountID:  "acc-cc-err",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	colIndex := map[string]int{
+		"transaction date": 0,
+		"post date":        1,
+		"description":      2,
+		"amount":           3,
+	}
+	row := []string{"13/45/2026", "10/16/2026", "BAD TX DATE", "-15.00"}
+
+	_, rowErr := parseCreditCardRow(row, colIndex, 4, meta)
+	if rowErr == nil || !strings.Contains(rowErr.Error(), "row 4: transaction date") {
+		t.Fatalf("expected row 4 transaction date error, got: %v", rowErr)
+	}
+
+	csvData := "Transaction Date,Post Date,Description,Amount\n13/45/2026,10/16/2026,BAD TX DATE,-15.00\n"
+	_, streamErr := parseCreditCard(context.Background(), strings.NewReader(csvData), meta)
+	if !errors.Is(streamErr, ErrInvalidRow) {
+		t.Fatalf("expected errors.Is(streamErr, ErrInvalidRow), got: %v", streamErr)
+	}
+}
+
+func TestParseCheckingRow_TransactionDateNil(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "checking_single.csv",
+		AccountID:  "acc-chk-single",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	colIndex := map[string]int{
+		"posting date": 0,
+		"description":  1,
+		"amount":       2,
+	}
+	row := []string{"10/18/2026", "DIRECT DEPOSIT", "2500.00"}
+
+	tx, err := parseCheckingRow(row, colIndex, 2, meta)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tx.TransactionDate != nil {
+		t.Errorf("expected nil TransactionDate for checking row, got %v", *tx.TransactionDate)
+	}
+}
+
+func TestParseCreditCard_StreamTransactionDateParity(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "cc_stream_parity.csv",
+		AccountID:  "acc-cc-parity",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+
+	tests := []struct {
+		name         string
+		csvData      string
+		wantPostDate string
+		wantTxDate   string
+		wantNilTx    bool
+	}{
+		{
+			name: "settled charge with distinct Transaction Date and Post Date",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"10/14/2026,10/16/2026,BOOKSTORE,Shopping,Sale,-28.50,\n",
+			wantPostDate: "2026-10-16",
+			wantTxDate:   "2026-10-14",
+		},
+		{
+			name: "pending row with blank Post Date uses Transaction Date for both",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"10/15/2026,,DINER,Food & Drink,Sale,-18.00,\n",
+			wantPostDate: "2026-10-15",
+			wantTxDate:   "2026-10-15",
+		},
+		{
+			name: "placeholder Transaction Date -- leaves TransactionDate nil",
+			csvData: "Transaction Date,Post Date,Description,Category,Type,Amount,Memo\n" +
+				"--,10/16/2026,PAYMENT THANK YOU,,Payment,250.00,\n",
+			wantPostDate: "2026-10-16",
+			wantNilTx:    true,
+		},
+		{
+			name: "Trans Date header alias populates TransactionDate",
+			csvData: "Trans Date,Post Date,Description,Amount\n" +
+				"10/12/2026,10/14/2026,HARDWARE STORE,-42.10\n",
+			wantPostDate: "2026-10-14",
+			wantTxDate:   "2026-10-12",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			txs, err := parseCreditCard(context.Background(), strings.NewReader(tc.csvData), meta)
+			if err != nil || len(txs) != 1 {
+				t.Fatalf("expected 1 transaction without error, got len=%d err=%v", len(txs), err)
+			}
+			tx := txs[0]
+			if tx.PostingDate.Format("2006-01-02") != tc.wantPostDate {
+				t.Errorf("expected PostingDate %s, got %s", tc.wantPostDate, tx.PostingDate.Format("2006-01-02"))
+			}
+			assertResolvedTransactionDate(t, tx.TransactionDate, nil, tc.wantTxDate, tc.wantNilTx, false, "")
+		})
+	}
+}
+
+func TestParseChecking_StreamTransactionDateAlwaysNil(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "chk_stream.csv",
+		AccountID:  "acc-chk-stream",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	csvData := "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n" +
+		"DEBIT,10/15/2026,GROCERY,-54.20,POS,1200.00,\n" +
+		"CREDIT,10/16/2026,PAYROLL,2000.00,ACH,3200.00,\n" +
+		"CHECK,10/17/2026,CHECK 101,-100.00,CHECK,3100.00,101\n"
+
+	txs, err := parseChecking(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil || len(txs) != 3 {
+		t.Fatalf("expected 3 checking transactions without error, got len=%d err=%v", len(txs), err)
+	}
+	for i, tx := range txs {
+		if tx.TransactionDate != nil {
+			t.Errorf("row %d: expected nil TransactionDate for checking transaction, got %v", i, *tx.TransactionDate)
+		}
+	}
+}
+
+func TestChaseTransactionDate_PointerIsolationAndUTC(t *testing.T) {
+	t.Parallel()
+	meta := model.FileMetadata{
+		FileName:   "cc_isolation.csv",
+		AccountID:  "acc-cc-iso",
+		IngestedAt: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC),
+	}
+	csvData := "Transaction Date,Post Date,Description,Amount\n" +
+		"10/14/2026,10/16/2026,FIRST CHARGE,-10.00\n" +
+		"10/14/2026,10/16/2026,SECOND CHARGE,-20.00\n"
+
+	txs, err := parseCreditCard(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil || len(txs) != 2 {
+		t.Fatalf("expected 2 transactions without error, got len=%d err=%v", len(txs), err)
+	}
+	if txs[0].TransactionDate == nil || txs[1].TransactionDate == nil {
+		t.Fatal("expected non-nil TransactionDate on both rows")
+	}
+	if txs[0].TransactionDate == txs[1].TransactionDate {
+		t.Error("expected distinct *time.Time pointer instances across rows")
+	}
+	if txs[0].TransactionDate.Location() != time.UTC || txs[1].TransactionDate.Location() != time.UTC {
+		t.Errorf("expected time.UTC locations, got %v and %v",
+			txs[0].TransactionDate.Location(), txs[1].TransactionDate.Location())
+	}
+
+	mutated := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	*txs[0].TransactionDate = mutated
+	if txs[1].TransactionDate.Equal(mutated) {
+		t.Error("mutating *txs[0].TransactionDate should not affect *txs[1].TransactionDate")
 	}
 }
