@@ -23,6 +23,8 @@ var (
 	ErrMissingKey = errors.New("s3: object key is required")
 	// ErrNilAPI indicates that the provided ObjectAPI client is nil.
 	ErrNilAPI = errors.New("s3: api client is nil")
+	// ErrSameSourceAndDestination indicates that source and destination keys are identical.
+	ErrSameSourceAndDestination = errors.New("s3: source and destination keys must differ")
 )
 
 // ObjectAPI defines the subset of S3 SDK operations required by Client.
@@ -95,6 +97,9 @@ func NewClientFromConfig(ctx context.Context, cfg Config) (*Client, error) {
 
 // DownloadStream opens an object for streaming from S3. The caller is responsible for closing the returned ReadCloser.
 func (c *Client) DownloadStream(ctx context.Context, key string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(key) == "" {
 		return nil, ErrMissingKey
 	}
@@ -105,9 +110,9 @@ func (c *Client) DownloadStream(ctx context.Context, key string) (io.ReadCloser,
 	})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, fmt.Errorf("s3: get %s: %w", key, port.ErrObjectNotFound)
+			return nil, fmt.Errorf("s3: get %s/%s: %w", c.bucket, key, port.ErrObjectNotFound)
 		}
-		return nil, fmt.Errorf("s3: get %s: %w", key, err)
+		return nil, fmt.Errorf("s3: get %s/%s: %w", c.bucket, key, err)
 	}
 
 	return out.Body, nil
@@ -116,14 +121,23 @@ func (c *Client) DownloadStream(ctx context.Context, key string) (io.ReadCloser,
 // ArchiveFile copies srcKey to destKey within the configured bucket and then deletes srcKey.
 // It is non-atomic. If copying fails, the source file is never deleted.
 func (c *Client) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
-	if strings.TrimSpace(srcKey) == "" || strings.TrimSpace(destKey) == "" {
-		return ErrMissingKey
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	copySource := buildCopySource(c.bucket, srcKey)
+	src := cleanKey(srcKey)
+	dest := cleanKey(destKey)
+	if src == "" || dest == "" {
+		return ErrMissingKey
+	}
+	if src == dest {
+		return ErrSameSourceAndDestination
+	}
+
+	copySource := buildCopySource(c.bucket, src)
 	_, err := c.api.CopyObject(ctx, &awss3.CopyObjectInput{
 		Bucket:     aws.String(c.bucket),
-		Key:        aws.String(destKey),
+		Key:        aws.String(dest),
 		CopySource: aws.String(copySource),
 	})
 	if err != nil {
@@ -135,7 +149,7 @@ func (c *Client) ArchiveFile(ctx context.Context, srcKey, destKey string) error 
 
 	_, err = c.api.DeleteObject(ctx, &awss3.DeleteObjectInput{
 		Bucket: aws.String(c.bucket),
-		Key:    aws.String(srcKey),
+		Key:    aws.String(src),
 	})
 	if err != nil {
 		return fmt.Errorf("s3: archive delete %s: %w", srcKey, err)
@@ -144,9 +158,12 @@ func (c *Client) ArchiveFile(ctx context.Context, srcKey, destKey string) error 
 	return nil
 }
 
+func cleanKey(key string) string {
+	return strings.TrimPrefix(strings.TrimSpace(key), "/")
+}
+
 func buildCopySource(bucket, key string) string {
-	cleanKey := strings.TrimPrefix(key, "/")
-	parts := strings.Split(cleanKey, "/")
+	parts := strings.Split(cleanKey(key), "/")
 	for i, p := range parts {
 		parts[i] = url.PathEscape(p)
 	}

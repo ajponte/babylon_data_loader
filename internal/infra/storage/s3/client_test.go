@@ -207,10 +207,16 @@ func TestDownloadStream_NoSuchKey(t *testing.T) {
 			}
 			if tc.expectIs != nil {
 				assertErrorIs(t, err, tc.expectIs)
+				if !strings.Contains(err.Error(), "test-bucket/missing.csv") {
+					t.Fatalf("expected error containing %q, got %v", "test-bucket/missing.csv", err)
+				}
 				return
 			}
 			if errors.Is(err, port.ErrObjectNotFound) || !strings.Contains(err.Error(), tc.apiErr.Error()) {
 				t.Fatalf("unexpected error for %v: %v", tc.apiErr, err)
+			}
+			if !strings.Contains(err.Error(), "test-bucket/missing.csv") {
+				t.Fatalf("expected error containing %q, got %v", "test-bucket/missing.csv", err)
 			}
 		})
 	}
@@ -235,6 +241,59 @@ func TestDownloadStream_ContextPropagated(t *testing.T) {
 	val, ok := fake.lastGetCtx.Value(key).(string)
 	if !ok || val != "trace-12345" {
 		t.Fatalf("expected propagated context value %q, got %q", "trace-12345", val)
+	}
+}
+
+func TestDownloadStream_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fake := &fakeObjectAPI{}
+	client := newTestClient(t, fake, "test-bucket")
+
+	rc, err := client.DownloadStream(ctx, "file.csv")
+	if rc != nil {
+		_ = rc.Close()
+	}
+	assertErrorIs(t, err, context.Canceled)
+	if len(fake.Calls()) != 0 {
+		t.Fatalf("expected 0 API calls on canceled context, got %d", len(fake.Calls()))
+	}
+}
+
+type trackingCloser struct {
+	io.Reader
+
+	closed bool
+}
+
+func (c *trackingCloser) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestDownloadStream_CloserDelegated(t *testing.T) {
+	ctx := context.Background()
+	tc := &trackingCloser{Reader: strings.NewReader("sample payload")}
+	fake := &fakeObjectAPI{
+		getObjectFn: func(_ context.Context, _ *awss3.GetObjectInput, _ ...optFn) (*awss3.GetObjectOutput, error) {
+			return &awss3.GetObjectOutput{Body: tc}, nil
+		},
+	}
+	client := newTestClient(t, fake, "test-bucket")
+
+	rc, err := client.DownloadStream(ctx, "file.csv")
+	if err != nil {
+		t.Fatalf("unexpected DownloadStream error: %v", err)
+	}
+	if tc.closed {
+		t.Fatal("expected trackingCloser not to be closed before caller Close()")
+	}
+	if closeErr := rc.Close(); closeErr != nil {
+		t.Fatalf("unexpected Close error: %v", closeErr)
+	}
+	if !tc.closed {
+		t.Fatal("expected underlying stream body Close() to be called")
 	}
 }
 
@@ -318,6 +377,9 @@ func TestArchiveFile_CopySourceEscaping_LegacyParity(t *testing.T) {
 		{name: "key with unicode characters", srcKey: "unprocessed/résumé.csv", destKey: "processed/résumé.csv", expectedCopySource: "my-bucket/unprocessed/r%C3%A9sum%C3%A9.csv"},
 		{name: "nested slashes", srcKey: "a/b/c/file.csv", destKey: "processed/file.csv", expectedCopySource: "my-bucket/a/b/c/file.csv"},
 		{name: "leading slash trimmed", srcKey: "/unprocessed/test.csv", destKey: "processed/test.csv", expectedCopySource: "my-bucket/unprocessed/test.csv"},
+		{name: "key with ampersand and equals", srcKey: "unprocessed/report&query=1.csv", destKey: "processed/report&query=1.csv", expectedCopySource: "my-bucket/unprocessed/report&query=1.csv"},
+		{name: "key with question mark", srcKey: "unprocessed/data?test=true.csv", destKey: "processed/data?test=true.csv", expectedCopySource: "my-bucket/unprocessed/data%3Ftest=true.csv"},
+		{name: "key with at sign", srcKey: "unprocessed/user@domain.csv", destKey: "processed/user@domain.csv", expectedCopySource: "my-bucket/unprocessed/user@domain.csv"},
 	}
 
 	for _, tc := range tests {
@@ -366,9 +428,60 @@ func TestArchiveFile_SourceMissing(t *testing.T) {
 	}
 }
 
+func TestArchiveFile_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fake := &fakeObjectAPI{}
+	client := newTestClient(t, fake, "test-bucket")
+
+	err := client.ArchiveFile(ctx, "src.csv", "dest.csv")
+	assertErrorIs(t, err, context.Canceled)
+	if len(fake.Calls()) != 0 {
+		t.Fatalf("expected 0 API calls on canceled context, got %d", len(fake.Calls()))
+	}
+}
+
+func TestArchiveFile_RejectsIdenticalKeys(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		srcKey  string
+		destKey string
+	}{
+		{name: "exact match", srcKey: "data.csv", destKey: "data.csv"},
+		{name: "leading slash difference on source", srcKey: "/data.csv", destKey: "data.csv"},
+		{name: "leading slash difference on dest", srcKey: "data.csv", destKey: "/data.csv"},
+		{name: "whitespace and slash differences", srcKey: "  /nested/path/data.csv  ", destKey: "nested/path/data.csv"},
+		{name: "both with leading slashes", srcKey: "/nested/path/data.csv", destKey: "/nested/path/data.csv"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeObjectAPI{}
+			client := newTestClient(t, fake, "test-bucket")
+
+			err := client.ArchiveFile(ctx, tc.srcKey, tc.destKey)
+			assertErrorIs(t, err, s3.ErrSameSourceAndDestination)
+			if len(fake.Calls()) != 0 {
+				t.Fatalf("expected 0 API calls when keys are identical, got %d", len(fake.Calls()))
+			}
+		})
+	}
+}
+
 func TestArchiveFile_EmptyKeys(t *testing.T) {
 	ctx := context.Background()
-	cases := [][2]string{{"", "dest.csv"}, {"   ", "dest.csv"}, {"src.csv", ""}, {"src.csv", "   "}, {"", ""}}
+	cases := [][2]string{
+		{"", "dest.csv"},
+		{"   ", "dest.csv"},
+		{"src.csv", ""},
+		{"src.csv", "   "},
+		{"", ""},
+		{"/", "dest.csv"},
+		{"src.csv", "/"},
+		{"  /  ", "dest.csv"},
+	}
 	for _, c := range cases {
 		fake := &fakeObjectAPI{}
 		client := newTestClient(t, fake, "test-bucket")
