@@ -13,7 +13,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	mongodrv "go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"babylon/dataloader/internal/domain/port"
 )
+
+var _ port.Repository = (*Repository)(nil)
 
 const (
 	// DefaultDatabase defines the default datalake database name.
@@ -50,6 +54,11 @@ type database interface {
 
 type collection interface {
 	InsertOne(ctx context.Context, doc any, opts ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error)
+	BulkWrite(
+		ctx context.Context,
+		models []mongodrv.WriteModel,
+		opts ...*options.BulkWriteOptions,
+	) (*mongodrv.BulkWriteResult, error)
 	CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error
 }
 
@@ -73,6 +82,14 @@ func (c *realCollection) InsertOne(
 	return c.coll.InsertOne(ctx, doc, opts...)
 }
 
+func (c *realCollection) BulkWrite(
+	ctx context.Context,
+	models []mongodrv.WriteModel,
+	opts ...*options.BulkWriteOptions,
+) (*mongodrv.BulkWriteResult, error) {
+	return c.coll.BulkWrite(ctx, models, opts...)
+}
+
 func (c *realCollection) CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error {
 	_, err := c.coll.Indexes().CreateMany(ctx, models)
 	return err
@@ -84,6 +101,7 @@ type Repository struct {
 	db      database
 	mu      sync.Mutex
 	ensured map[string]bool
+	now     func() time.Time
 }
 
 // NewRepository connects to MongoDB with the given configuration.
@@ -110,11 +128,23 @@ func NewRepository(ctx context.Context, cfg Config) (*Repository, error) {
 		client:  client,
 		db:      &realDatabase{db: client.Database(cfg.Database)},
 		ensured: make(map[string]bool),
+		now:     time.Now,
 	}, nil
 }
 
 func newRepository(db database) *Repository {
-	return &Repository{db: db, ensured: make(map[string]bool)}
+	return &Repository{
+		db:      db,
+		ensured: make(map[string]bool),
+		now:     time.Now,
+	}
+}
+
+func (r *Repository) timeNow() time.Time {
+	if r != nil && r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 // Close disconnects the MongoDB client. It is nil-safe.

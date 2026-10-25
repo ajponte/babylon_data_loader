@@ -18,15 +18,20 @@ import (
 )
 
 type fakeCollection struct {
-	name         string
-	db           *fakeDatabase
-	mu           sync.Mutex
-	insertedDocs []any
-	createdIndex [][]mongodrv.IndexModel
-	insertOneErr error
-	createIdxErr error
-	failIdxCount int
-	idxCalls     int32
+	name            string
+	db              *fakeDatabase
+	mu              sync.Mutex
+	insertedDocs    []any
+	createdIndex    [][]mongodrv.IndexModel
+	insertOneErr    error
+	createIdxErr    error
+	failIdxCount    int
+	idxCalls        int32
+	bulkWriteModels []mongodrv.WriteModel
+	bulkWriteOpts   []*options.BulkWriteOptions
+	bulkWriteResult *mongodrv.BulkWriteResult
+	bulkWriteErr    error
+	bulkCalls       int32
 }
 
 func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error) {
@@ -37,6 +42,27 @@ func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.Ins
 	}
 	f.insertedDocs = append(f.insertedDocs, doc)
 	return &mongodrv.InsertOneResult{}, nil
+}
+
+func (f *fakeCollection) BulkWrite(
+	_ context.Context,
+	models []mongodrv.WriteModel,
+	opts ...*options.BulkWriteOptions,
+) (*mongodrv.BulkWriteResult, error) {
+	atomic.AddInt32(&f.bulkCalls, 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bulkWriteModels = append(f.bulkWriteModels, models...)
+	f.bulkWriteOpts = append(f.bulkWriteOpts, opts...)
+	if f.bulkWriteErr != nil {
+		return f.bulkWriteResult, f.bulkWriteErr
+	}
+	if f.bulkWriteResult != nil {
+		return f.bulkWriteResult, nil
+	}
+	return &mongodrv.BulkWriteResult{
+		UpsertedCount: int64(len(models)),
+	}, nil
 }
 
 func (f *fakeCollection) CreateIndexes(_ context.Context, models []mongodrv.IndexModel) error {
