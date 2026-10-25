@@ -1,6 +1,8 @@
 package mongo
 
 import (
+	"fmt"
+
 	"babylon/dataloader/internal/domain/model"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -114,23 +116,32 @@ func setDocument(doc any) (bson.D, error) {
 }
 
 // flattenSourceLineage transforms the top-level "source" subdocument into dotted "source.<key>" entries.
+// Flattening preserves historical lineage fields on disk (decision E6).
 func flattenSourceLineage(raw bson.D) bson.D {
 	flattened := make(bson.D, 0, len(raw)+flattenedSourceFieldsCount)
 	for _, elem := range raw {
 		if elem.Key == "source" {
-			if sub, ok := elem.Value.(bson.D); ok {
-				for _, subElem := range sub {
-					flattened = append(flattened, bson.E{
-						Key:   "source." + subElem.Key,
-						Value: subElem.Value,
-					})
-				}
-			}
+			flattened = appendDottedLineage(flattened, elem.Value)
 			continue
 		}
 		flattened = append(flattened, elem)
 	}
 	return flattened
+}
+
+// appendDottedLineage unpacks a lineage subdocument into dotted "source.<key>" elements.
+func appendDottedLineage(dst bson.D, val any) bson.D {
+	sub, ok := val.(bson.D)
+	if !ok {
+		return dst
+	}
+	for _, elem := range sub {
+		dst = append(dst, bson.E{
+			Key:   "source." + elem.Key,
+			Value: elem.Value,
+		})
+	}
+	return dst
 }
 
 // collectionFor maps a destination to its collection or returns model.ErrInvalidDestination.
@@ -161,6 +172,9 @@ type writePlan struct {
 func buildWritePlan(batch *model.IngestionBatch) (writePlan, error) {
 	if batch == nil {
 		return writePlan{}, model.ErrNilBatch
+	}
+	if batch.RecordCount < 0 {
+		return writePlan{}, model.ErrNegativeRecordCount
 	}
 
 	coll, err := collectionFor(batch.Destination)
@@ -222,7 +236,7 @@ func buildChaseUpdateModel(tx model.ChaseTransaction, dataSource string) (*mongo
 	d := toChaseDoc(tx, dataSource)
 	u, err := setDocument(d)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mongo: build chase update model: %w", err)
 	}
 	return mongodrv.NewUpdateOneModel().
 		SetFilter(chaseFilter(d)).
@@ -249,7 +263,7 @@ func buildFidelityUpdateModel(p model.FidelityPosition) (*mongodrv.UpdateOneMode
 	d := toFidelityDoc(p)
 	u, err := setDocument(d)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mongo: build fidelity update model: %w", err)
 	}
 	return mongodrv.NewUpdateOneModel().
 		SetFilter(fidelityFilter(d)).

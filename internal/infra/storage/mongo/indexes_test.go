@@ -10,6 +10,7 @@ import (
 	"babylon/dataloader/internal/domain/model"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	mongodrv "go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -186,23 +187,13 @@ func TestIndexCatalog_RegisteredInRepository(t *testing.T) {
 	}
 }
 
-// 3. TestUpsertFilter_ChaseLegacyParity: Golden check against legacy Chase upsert filter.
-func TestUpsertFilter_ChaseLegacyParity(t *testing.T) {
-	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	tx := newTestChaseTx("act-1234", 7, false)
-	tx.PostingDate = now
-	tx.Description = "CHASE GROCERY"
-	tx.Amount = -42.50
-
-	d := toChaseDoc(tx, dataSourceChase)
-	filter := chaseFilter(d)
-
+func assertChaseFilterValues(t *testing.T, filter bson.D, now time.Time, wantAmount float64) {
+	t.Helper()
 	wantKeys := []string{"accountId", "postingDate", "description", "amount", "source.rowNumber"}
 	if gotKeys := extractDocKeys(filter); !reflect.DeepEqual(gotKeys, wantKeys) {
 		t.Fatalf("filter keys mismatch: got %v, want %v", gotKeys, wantKeys)
 	}
 
-	// Verify BSON types and values
 	if val, ok := findDocValue(filter, "accountId"); !ok || val != "act-1234" {
 		t.Errorf("accountId mismatch: %v", val)
 	}
@@ -212,11 +203,38 @@ func TestUpsertFilter_ChaseLegacyParity(t *testing.T) {
 	if val, ok := findDocValue(filter, "description"); !ok || val != "CHASE GROCERY" {
 		t.Errorf("description mismatch: %v", val)
 	}
-	if val, ok := findDocValue(filter, "amount"); !ok || val != -42.50 {
-		t.Errorf("amount mismatch: %v", val)
+	if val, ok := findDocValue(filter, "amount"); !ok || val != wantAmount {
+		t.Errorf("amount mismatch: got %v, want %v", val, wantAmount)
 	}
 	if val, ok := findDocValue(filter, "source.rowNumber"); !ok || val != int64(7) {
 		t.Errorf("source.rowNumber mismatch (must be int64): %v (type %T)", val, val)
+	}
+}
+
+// 3. TestUpsertFilter_ChaseLegacyParity: Golden check against legacy Chase upsert filter with table-driven amounts.
+func TestUpsertFilter_ChaseLegacyParity(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		amount     float64
+		wantAmount float64
+	}{
+		{name: "negative debit amount", amount: -42.50, wantAmount: -42.50},
+		{name: "zero fee amount", amount: 0.0, wantAmount: 0.0},
+		{name: "positive credit amount", amount: 1250.75, wantAmount: 1250.75},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := newTestChaseTx("act-1234", 7, false)
+			tx.PostingDate = now
+			tx.Description = "CHASE GROCERY"
+			tx.Amount = tt.amount
+
+			d := toChaseDoc(tx, dataSourceChase)
+			assertChaseFilterValues(t, chaseFilter(d), now, tt.wantAmount)
+		})
 	}
 }
 
@@ -306,6 +324,54 @@ func TestSetDocument_FlattensSourceLineage(t *testing.T) {
 			t.Errorf("missing expected dotted lineage key %q in $set", want)
 		}
 	}
+}
+
+// TestFlattenSourceLineage_EdgeCases verifies flattenSourceLineage and appendDottedLineage behavior
+// across document boundaries, empty subdocuments, and malformed/non-bson.D values.
+func TestFlattenSourceLineage_EdgeCases(t *testing.T) {
+	t.Run("DocumentWithoutSource", func(t *testing.T) {
+		raw := bson.D{{Key: "accountId", Value: "act-1"}, {Key: "amount", Value: 100.5}}
+		got := flattenSourceLineage(raw)
+		if !reflect.DeepEqual(got, raw) {
+			t.Errorf("expected unchanged document, got %+v", got)
+		}
+	})
+
+	t.Run("EmptySourceSubdocument", func(t *testing.T) {
+		raw := bson.D{
+			{Key: "accountId", Value: "act-1"},
+			{Key: "source", Value: bson.D{}},
+		}
+		got := flattenSourceLineage(raw)
+		want := bson.D{{Key: "accountId", Value: "act-1"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("expected empty source to be omitted, got %+v", got)
+		}
+	})
+
+	t.Run("MalformedSourceNonBsonD", func(t *testing.T) {
+		raw := bson.D{
+			{Key: "accountId", Value: "act-1"},
+			{Key: "source", Value: "not-a-subdoc"},
+		}
+		got := flattenSourceLineage(raw)
+		want := bson.D{{Key: "accountId", Value: "act-1"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("expected non-bson.D source to be safely ignored, got %+v", got)
+		}
+	})
+
+	t.Run("NilSourceValue", func(t *testing.T) {
+		raw := bson.D{
+			{Key: "accountId", Value: "act-1"},
+			{Key: "source", Value: nil},
+		}
+		got := flattenSourceLineage(raw)
+		want := bson.D{{Key: "accountId", Value: "act-1"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("expected nil source to be safely ignored, got %+v", got)
+		}
+	})
 }
 
 // 7. TestSetDocument_OmitsS3URIPlaceholder: Verify $set excludes source.s3Uri when empty (E6).
@@ -563,45 +629,149 @@ func assertValidUpdateModels(t *testing.T, models []mongodrv.WriteModel, wantCou
 	}
 }
 
-// 12. TestBuildWritePlan_UpsertModels: Verify UpdateOneModel properties (upsert=true, filter, $set).
+func assertChaseCheckingUpdateModel(t *testing.T, m *mongodrv.UpdateOneModel, wantUTC time.Time) {
+	t.Helper()
+	filt := m.Filter.(bson.D)
+	if val, ok := findDocValue(filt, "accountId"); !ok || val != "chk-1" {
+		t.Errorf("chk filter accountId mismatch: %v", val)
+	}
+	if val, ok := findDocValue(filt, "postingDate"); !ok || !val.(time.Time).Equal(wantUTC) || val.(time.Time).Location() != time.UTC {
+		t.Errorf("chk filter postingDate mismatch or non-UTC: %v", val)
+	}
+	if val, ok := findDocValue(filt, "source.rowNumber"); !ok || val != int64(1) {
+		t.Errorf("chk filter rowNumber mismatch: %v", val)
+	}
+
+	upd := m.Update.(bson.D)[0].Value.(bson.D)
+	if val, ok := findDocValue(upd, "amount"); !ok || val != -42.50 {
+		t.Errorf("chk update amount mismatch: %v", val)
+	}
+	if val, ok := findDocValue(upd, "dataSource"); !ok || val != "chase" {
+		t.Errorf("chk update dataSource mismatch: %v", val)
+	}
+	if _, ok := findDocValue(upd, "transactionDate"); ok {
+		t.Errorf("chk update transactionDate must be omitted for checking")
+	}
+}
+
+func assertChaseCreditCardUpdateModel(t *testing.T, m *mongodrv.UpdateOneModel, txDateEST time.Time) {
+	t.Helper()
+	filt := m.Filter.(bson.D)
+	if val, ok := findDocValue(filt, "accountId"); !ok || val != "cc-1" {
+		t.Errorf("cc filter accountId mismatch: %v", val)
+	}
+	if val, ok := findDocValue(filt, "source.rowNumber"); !ok || val != int64(10) {
+		t.Errorf("cc filter rowNumber mismatch: %v", val)
+	}
+
+	upd := m.Update.(bson.D)[0].Value.(bson.D)
+	val, ok := findDocValue(upd, "transactionDate")
+	if !ok {
+		t.Fatalf("cc update missing transactionDate")
+	}
+	pdt, isDT := val.(primitive.DateTime)
+	if !isDT {
+		t.Fatalf("expected transactionDate to be primitive.DateTime, got %T", val)
+	}
+	if !pdt.Time().UTC().Equal(txDateEST.UTC()) {
+		t.Errorf("cc update transactionDate mismatch: %v (want %v)", pdt.Time().UTC(), txDateEST.UTC())
+	}
+}
+
+func assertFidelityUpdateModel(t *testing.T, m *mongodrv.UpdateOneModel, wantUTC time.Time) {
+	t.Helper()
+	filt := m.Filter.(bson.D)
+	if val, ok := findDocValue(filt, "accountNumber"); !ok || val != "fid-1" {
+		t.Errorf("fid filter accountNumber mismatch: %v", val)
+	}
+	if val, ok := findDocValue(filt, "symbol"); !ok || val != "AAPL" {
+		t.Errorf("fid filter symbol mismatch: %v", val)
+	}
+	if val, ok := findDocValue(filt, "asOfDate"); !ok || !val.(time.Time).Equal(wantUTC) || val.(time.Time).Location() != time.UTC {
+		t.Errorf("fid filter asOfDate mismatch or non-UTC: %v", val)
+	}
+
+	upd := m.Update.(bson.D)[0].Value.(bson.D)
+	if val, ok := findDocValue(upd, "quantity"); !ok || val != 10.5 {
+		t.Errorf("fid update quantity mismatch: %v", val)
+	}
+	if val, ok := findDocValue(upd, "dataSource"); !ok || val != "fidelity" {
+		t.Errorf("fid update dataSource mismatch: %v", val)
+	}
+}
+
+// 12. TestBuildWritePlan_UpsertModels: Verify UpdateOneModel properties (upsert=true, filter, $set)
+// with value-level assertions and timezone normalization across Chase checking, credit card, and Fidelity.
 func TestBuildWritePlan_UpsertModels(t *testing.T) {
-	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	batchChase := &model.IngestionBatch{
-		Destination: model.DestChaseChecking,
-		AccountID:   "chk-1",
-		SourceFile:  "chase.csv",
-		IngestedAt:  now,
-		RecordCount: 2,
-		Payload: []model.ChaseTransaction{
-			newTestChaseTx("chk-1", 1, false),
-			newTestChaseTx("chk-1", 2, false),
-		},
-	}
+	estZone := time.FixedZone("EST", -5*3600)
+	nowEST := time.Date(2026, 10, 20, 7, 0, 0, 0, estZone)
+	wantUTC := nowEST.UTC()
 
-	planChase, err := buildWritePlan(batchChase)
-	if err != nil {
-		t.Fatalf("buildWritePlan for chase failed: %v", err)
-	}
-	assertValidUpdateModels(t, planChase.models, 2)
+	t.Run("ChaseChecking", func(t *testing.T) {
+		txChk1 := newTestChaseTx("chk-1", 1, false)
+		txChk1.PostingDate = nowEST
+		txChk2 := newTestChaseTx("chk-1", 2, false)
+		txChk2.PostingDate = nowEST
 
-	// Also verify Fidelity batch write models
-	batchFid := &model.IngestionBatch{
-		Destination: model.DestFidelityPosition,
-		AccountID:   "fid-1",
-		SourceFile:  "fidelity.csv",
-		IngestedAt:  now,
-		RecordCount: 2,
-		Payload: []model.FidelityPosition{
-			newTestFidelityPos("fid-1", "AAPL", now),
-			newTestFidelityPos("fid-1", "MSFT", now),
-		},
-	}
+		batchChase := &model.IngestionBatch{
+			Destination: model.DestChaseChecking,
+			AccountID:   "chk-1",
+			SourceFile:  "chase.csv",
+			IngestedAt:  nowEST,
+			RecordCount: 2,
+			Payload:     []model.ChaseTransaction{txChk1, txChk2},
+		}
 
-	planFid, err := buildWritePlan(batchFid)
-	if err != nil {
-		t.Fatalf("buildWritePlan for fidelity failed: %v", err)
-	}
-	assertValidUpdateModels(t, planFid.models, 2)
+		planChase, err := buildWritePlan(batchChase)
+		if err != nil {
+			t.Fatalf("buildWritePlan for chase checking failed: %v", err)
+		}
+		assertValidUpdateModels(t, planChase.models, 2)
+		assertChaseCheckingUpdateModel(t, planChase.models[0].(*mongodrv.UpdateOneModel), wantUTC)
+	})
+
+	t.Run("ChaseCreditCard", func(t *testing.T) {
+		txCC := newTestChaseTx("cc-1", 10, true)
+		txCC.PostingDate = nowEST
+		txDateEST := nowEST.Add(-48 * time.Hour)
+		txCC.TransactionDate = &txDateEST
+
+		batchCC := &model.IngestionBatch{
+			Destination: model.DestChaseCreditCard,
+			AccountID:   "cc-1",
+			SourceFile:  "credit.csv",
+			IngestedAt:  nowEST,
+			RecordCount: 1,
+			Payload:     []model.ChaseTransaction{txCC},
+		}
+
+		planCC, err := buildWritePlan(batchCC)
+		if err != nil {
+			t.Fatalf("buildWritePlan for chase credit card failed: %v", err)
+		}
+		assertValidUpdateModels(t, planCC.models, 1)
+		assertChaseCreditCardUpdateModel(t, planCC.models[0].(*mongodrv.UpdateOneModel), txDateEST)
+	})
+
+	t.Run("FidelityPosition", func(t *testing.T) {
+		pos1 := newTestFidelityPos("fid-1", "AAPL", nowEST)
+		pos2 := newTestFidelityPos("fid-1", "MSFT", nowEST)
+		batchFid := &model.IngestionBatch{
+			Destination: model.DestFidelityPosition,
+			AccountID:   "fid-1",
+			SourceFile:  "fidelity.csv",
+			IngestedAt:  nowEST,
+			RecordCount: 2,
+			Payload:     []model.FidelityPosition{pos1, pos2},
+		}
+
+		planFid, err := buildWritePlan(batchFid)
+		if err != nil {
+			t.Fatalf("buildWritePlan for fidelity failed: %v", err)
+		}
+		assertValidUpdateModels(t, planFid.models, 2)
+		assertFidelityUpdateModel(t, planFid.models[0].(*mongodrv.UpdateOneModel), wantUTC)
+	})
 }
 
 // 13. TestBuildWritePlan_FidelityMissingAsOfDate: Verify zero AsOfDate yields model.ErrMissingAsOfDate.
@@ -623,7 +793,8 @@ func TestBuildWritePlan_FidelityMissingAsOfDate(t *testing.T) {
 	}
 }
 
-// 14. TestBuildWritePlan_EmptyPayload: Verify empty batch yields 0 models and nil error.
+// 14. TestBuildWritePlan_EmptyPayload: Verify empty batch yields 0 models, nil batch yields ErrNilBatch,
+// negative count yields ErrNegativeRecordCount, and invalid destination yields ErrInvalidDestination.
 func TestBuildWritePlan_EmptyPayload(t *testing.T) {
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	destinations := []struct {
@@ -660,10 +831,23 @@ func TestBuildWritePlan_EmptyPayload(t *testing.T) {
 		})
 	}
 
-	// Also verify nil batch returns ErrNilBatch
+	// Verify nil batch returns ErrNilBatch
 	_, err := buildWritePlan(nil)
 	if !errors.Is(err, model.ErrNilBatch) {
 		t.Errorf("expected ErrNilBatch for nil batch, got %v", err)
+	}
+
+	// Verify negative RecordCount returns ErrNegativeRecordCount
+	negBatch := &model.IngestionBatch{
+		Destination: model.DestChaseChecking,
+		AccountID:   "act-neg",
+		SourceFile:  "neg.csv",
+		IngestedAt:  now,
+		RecordCount: -1,
+	}
+	_, err = buildWritePlan(negBatch)
+	if !errors.Is(err, model.ErrNegativeRecordCount) {
+		t.Errorf("expected ErrNegativeRecordCount for negative RecordCount, got %v", err)
 	}
 
 	// Verify invalid destination returns ErrInvalidDestination
@@ -671,5 +855,38 @@ func TestBuildWritePlan_EmptyPayload(t *testing.T) {
 	_, err = buildWritePlan(badBatch)
 	if !errors.Is(err, model.ErrInvalidDestination) {
 		t.Errorf("expected ErrInvalidDestination, got %v", err)
+	}
+}
+
+// 15. TestBuildWritePlan_DuplicateKeysPreservedInBatch: Verifies that batches containing duplicate
+// unique keys emit both write models without in-memory deduplication, leaving upsert semantics to MongoDB.
+func TestBuildWritePlan_DuplicateKeysPreservedInBatch(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	tx1 := newTestChaseTx("chk-dup", 1, false)
+	tx2 := newTestChaseTx("chk-dup", 1, false) // identical key fields
+
+	batch := &model.IngestionBatch{
+		Destination: model.DestChaseChecking,
+		AccountID:   "chk-dup",
+		SourceFile:  "dup.csv",
+		IngestedAt:  now,
+		RecordCount: 2,
+		Payload:     []model.ChaseTransaction{tx1, tx2},
+	}
+
+	plan, err := buildWritePlan(batch)
+	if err != nil {
+		t.Fatalf("buildWritePlan failed: %v", err)
+	}
+	assertValidUpdateModels(t, plan.models, 2)
+
+	m1 := plan.models[0].(*mongodrv.UpdateOneModel)
+	m2 := plan.models[1].(*mongodrv.UpdateOneModel)
+
+	filt1 := m1.Filter.(bson.D)
+	filt2 := m2.Filter.(bson.D)
+
+	if !reflect.DeepEqual(filt1, filt2) {
+		t.Errorf("expected identical filters for duplicate input records, got %+v and %+v", filt1, filt2)
 	}
 }
