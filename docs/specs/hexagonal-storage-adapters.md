@@ -23,12 +23,46 @@ The secondary storage adapters encapsulate all persistence and datalake interact
 | `internal/infra/storage/mongo/` | `mongo` | `mongodrv "go.mongodb.org/mongo-driver/mongo"` | MongoDB repository, bulk upserts, `$set` builder, index lifecycle, and `dataSync` audit logging. |
 | `internal/infra/storage/s3/` | `s3` | `awss3 "github.com/aws/aws-sdk-go-v2/service/s3"` | AWS S3 object store adapter, streaming download, and archive copy-delete operations. |
 
+### 2.1 Repository Architecture & Driver Seams
+
+Authoritative implementation reference: [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go).
+
+The MongoDB persistence adapter [`Repository`](../../internal/infra/storage/mongo/repository.go) implements [`port.Repository`](../../internal/domain/port/repository.go) with decoupled driver interfaces and defensive lifecycle management:
+
+1. **Configuration & Defaults**:
+   - `Config` specifies `URI` (required), `Database` (defaults to `"datalake"` via `withDefaults()`), and `Timeout` (connect/ping budget, defaults to `10s`).
+   - Constructor `NewRepository(ctx, cfg)` validates that `URI` is non-empty (`ErrMissingURI`), applies defaults, establishes connection with context timeout, and verifies connectivity via `client.Ping`. Zero indexes are created at construction time.
+2. **Unexported Driver Seams (`database` & `collection`)**:
+   - To enable 100% hermetic unit testing without running a live MongoDB instance or external testcontainers during `make test-ci`, driver operations are mediated through unexported interfaces:
+     ```go
+     type database interface {
+         Collection(name string) collection
+     }
+
+     type collection interface {
+         InsertOne(ctx context.Context, doc any, opts ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error)
+         CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error
+     }
+     ```
+   - Production instances wrap the official Go MongoDB driver via `realDatabase` and `realCollection`.
+   - Unit test suites instantiate repositories via unexported `newRepository(db database)` using `fakeDatabase` and `fakeCollection` mocks.
+3. **Nil-Safe Resource Disposal (`Close`)**:
+   - `Close(ctx context.Context) error` is strictly nil-safe: calling `Close()` on a nil `*Repository` pointer or an uninitialized repository instance returns `nil` without panicking.
+4. **Credential Leak Defense**:
+   - Connection URIs, plaintext passwords, and usernames are strictly sanitized from all error messages returned by `NewRepository` via `sanitizeURIError`.
+   - Verifies against raw connection string leaks and embedded credentials (`mongodb://user:password@host/`), replacing sensitive fragments with `[REDACTED_URI]`, `[REDACTED]`, or `://[REDACTED]:[REDACTED]@` (`TestNewRepository_ErrorDoesNotLeakCredentials`).
+5. **Retry-Safe Deterministic Index Lifecycle**:
+   - Indexes are registered in an immutable catalog `indexCatalog() []collectionIndexes`.
+   - `ensureIndexes(ctx, coll)` protects index creation with a mutex (`r.mu.Lock()`). Crucially, `r.ensured[coll] = true` is set **strictly after** driver `CreateIndexes` returns without error. If index creation fails due to a transient error, the flag remains unset, allowing subsequent retry calls to re-attempt index creation (`TestEnsureIndexes_RetriesAfterFailure`).
+   - Concurrent callers synchronize safely via the mutex, ensuring indexes are created exactly once under concurrent traffic (`TestEnsureIndexes_ConcurrentCallsCreateOnce`).
+   - Public `EnsureIndexes(ctx)` iterates the catalog in deterministic slice order to ensure upfront initialization when desired.
+
 ---
 
 ## 3. Decision Record (M0 Decisions)
 
 > [!NOTE]
-> **Milestone Status (Phase 3B)**: Milestone 1 (M1 - Contract Frozen) DTO mappers and BSON serialization contracts are fully implemented and verified with 100% statement test coverage in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go) and [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go). See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
+> **Milestone Status (Phase 3C)**: Milestone 1 (M1 - Contract Frozen) DTO mappers and Milestone 2 (Phase 3C - Repository skeleton & dataSync audit sink) are fully implemented and verified with 87.9% statement test coverage across [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/). See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
 
 ### 3.1 User Decisions (D1–D8, A1)
 
@@ -136,11 +170,12 @@ type fidelityDoc struct {
 
 #### Pure Mapper Signatures
 
-Persistence transformations are implemented as pure, side-effect-free functions in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). They accept immutable domain models by value and return unexported BSON DTOs:
+Persistence transformations are implemented as pure, side-effect-free functions in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go). They accept immutable domain models by value or reference and return unexported BSON DTOs:
 
 - `toChaseDoc(tx model.ChaseTransaction, dataSource string) chaseDoc`: Maps domain Chase transactions (and synthetic transactions) to persistence DTO `chaseDoc`, parameterizing `dataSource` (`"chase"` or `"synthetic"`).
 - `toFidelityDoc(p model.FidelityPosition) fidelityDoc`: Maps domain Fidelity positions to persistence DTO `fidelityDoc`, binding `dataSource` to `"fidelity"`.
 - `toLineageDoc(l model.SourceLineage) lineageDoc`: Maps domain lineage metadata to embedded subdocument `lineageDoc`, converting `RowNumber` to `int64` (BSON int64 compatibility) and leaving `S3URI` empty for Phase 4.
+- `toSyncLogDoc(log *model.SyncLog) syncLogDoc`: Maps domain audit logs to persistence DTO `syncLogDoc` in [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), converting `SyncedAt` to UTC and mapping legacy desktop dual fields (`collection_name`, `sync_timestamp`, and conditional `records_uploaded`).
 
 #### Memory Safety & Immutability Invariants
 
@@ -148,14 +183,47 @@ Persistence transformations are implemented as pure, side-effect-free functions 
    - For optional pointer fields (`TransactionDate *time.Time` and `Balance *float64` in `chaseDoc`), mappers allocate fresh heap memory and copy the dereferenced value (deep copy) rather than aliasing the pointer from the incoming domain model.
    - This guarantees complete pointer isolation between caller and callee: subsequent mutations of domain model pointers (or reuse across concurrent worker goroutines) will never mutate persistence DTO values, and vice versa.
 2. **Timestamp Normalization & BSON Millisecond Truncation**:
-   - All temporal fields (`PostingDate`, `TransactionDate`, `AsOfDate`, and `Source.IngestedAt`) are normalized to UTC instants using `.UTC()`.
+   - All temporal fields (`PostingDate`, `TransactionDate`, `AsOfDate`, `Source.IngestedAt`, and `SyncedAt`) are normalized to UTC instants using `.UTC()`.
    - MongoDB BSON `DateTime` stores timestamps as signed 64-bit integers representing milliseconds since Unix epoch (UTC). Any sub-millisecond nanosecond components in Go `time.Time` values are cleanly truncated by the BSON encoder (`t.UnixMilli()`) without shifting the calendar date, hour, or second across timezones.
 3. **Zero Mutation Guarantee**:
-   - All mappers take domain structs by value (`tx model.ChaseTransaction`, `p model.FidelityPosition`, `l model.SourceLineage`), guaranteeing that domain entities remain strictly immutable and free from side effects.
+   - All mappers guarantee that caller domain entities remain strictly immutable and free from side effects.
 
 #### `syncLogDoc` (`dataSync` with Legacy Dual Fields)
-- Canonical: `_id` (ObjectId, `omitempty`), `fileName` (string), `fileHash` (string, `omitempty`), `collectionName` (string, `omitempty`), `recordCount` (int64), `upsertedCount` (int64), `matchedCount` (int64), `status` (string), `errorMessage` (string, `omitempty`), `syncedAt` (date), `durationMs` (int64).
-- Dual Fields (desktop compatibility): `collection_name` (string, `omitempty`), `sync_timestamp` (date, `omitempty`), `records_uploaded` (int64, `omitempty`, omitted on failure when 0).
+
+Authoritative implementation reference: [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go).
+
+```go
+type syncLogDoc struct {
+	ID             primitive.ObjectID `bson:"_id,omitempty"`
+	FileName       string             `bson:"fileName"`
+	FileHash       string             `bson:"fileHash,omitempty"`
+	CollectionName string             `bson:"collectionName,omitempty"`
+	RecordCount    int64              `bson:"recordCount"`
+	UpsertedCount  int64              `bson:"upsertedCount"`
+	MatchedCount   int64              `bson:"matchedCount"`
+	Status         string             `bson:"status"`
+	ErrorMessage   string             `bson:"errorMessage,omitempty"`
+	SyncedAt       time.Time          `bson:"syncedAt"`
+	DurationMs     int64              `bson:"durationMs"`
+
+	DualCollectionName  string    `bson:"collection_name,omitempty"`
+	DualSyncTimestamp   time.Time `bson:"sync_timestamp,omitempty"`
+	DualRecordsUploaded int64     `bson:"records_uploaded,omitempty"`
+}
+```
+
+##### Mapping Rules & Dual-Field Compatibility (`toSyncLogDoc`)
+Implemented in [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), the pure mapper `toSyncLogDoc(log *model.SyncLog) syncLogDoc` translates domain audit logs to BSON documents:
+1. **Canonical Attributes**:
+   - `FileName`, `FileHash`, `CollectionName`, `RecordCount`, `UpsertedCount`, `MatchedCount`, and `DurationMs` map directly from the domain model.
+   - `Status` converts the domain `model.SyncStatus` enum to string (`"SUCCESS"` or `"FAILED"`).
+   - `ErrorMessage` is emitted when populated; `omitempty` omits it on successful synchronizations.
+2. **UTC Normalization**:
+   - `SyncedAt` is converted to UTC (`log.SyncedAt.UTC()`) before assignment to both canonical `SyncedAt` and legacy `DualSyncTimestamp`.
+3. **Desktop Compatibility Dual Fields**:
+   - `DualCollectionName` (`collection_name,omitempty`): mirrors `CollectionName`.
+   - `DualSyncTimestamp` (`sync_timestamp,omitempty`): mirrors UTC `SyncedAt`.
+   - `DualRecordsUploaded` (`records_uploaded,omitempty`): mirrors `UpsertedCount`. Because of `omitempty`, when `UpsertedCount == 0` (e.g., in failure logs), `records_uploaded` is excluded from the inserted BSON document, preserving exact bit-for-bit parity with legacy ingestion logs.
 
 #### Dotted `$set` Invariant
 To prevent overwriting unmapped legacy lineage attributes (such as historical `source.s3Uri`), `$set` updates flatten the `source` struct to dotted field paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`).
@@ -175,11 +243,17 @@ To prevent overwriting unmapped legacy lineage attributes (such as historical `s
 8. Success -> return `(successSyncLog, nil)`. Returned logs always satisfy `model.SyncLog.Validate()`.
 
 ### 5.2 `LogSync(ctx, log)` (`port.Repository`)
-1. Context canceled -> return `ctx.Err()`.
-2. Nil log -> return `model.ErrNilSyncLog`.
-3. Zero timestamp -> reject with `model.ErrMissingSyncTime` (no defaulting per D5).
-4. Validation failure -> return wrapped `log.Validate()` error.
-5. Lazily ensures `dataSync` indexes and executes `InsertOne`. Input struct is never mutated.
+
+Authoritative implementation reference: [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go).
+
+Writes an audit record to the `dataSync` datalake collection. The contract enforces the following verified invariants:
+1. **Context Cancellation**: Evaluates `ctx.Err()` immediately before any operations; returns the cancellation or deadline error without side effects (`TestLogSync_CancelledContext`).
+2. **Nil Guard**: Rejects nil log pointers with sentinel `model.ErrNilSyncLog` (`TestLogSync_RejectsNilAndInvalid`).
+3. **Zero Timestamp Rejection**: Validates domain rules via `log.Validate()`. A zero `SyncedAt` value returns `model.ErrMissingSyncTime`; timestamps are never defaulted or synthesized per decision D5 (`TestLogSync_RejectsZeroSyncedAt`).
+4. **Validation Wrapping**: Non-nil validation errors (e.g., missing `ErrorMessage` on failed sync) are wrapped with descriptive prefix `mongo: invalid sync log: %w`.
+5. **Lazy Index Creation**: Lazily ensures `dataSync` indexes (`idx_datasync_synced_at`, `idx_datasync_filename_synced_at`) via `ensureIndexes(ctx, dataSyncCollection)` before inserting.
+6. **Insertion & Error Wrapping**: Encodes document via `toSyncLogDoc` and executes `InsertOne(ctx, doc)`. Driver errors are wrapped with collection context: `mongo: log sync to dataSync: %w` (`TestLogSync_InsertErrorWrapped`).
+7. **Input Immutability**: The caller's `*model.SyncLog` instance is treated as read-only and is never mutated during mapping or insertion (`TestLogSync_DoesNotMutateInput`).
 
 ### 5.3 `ListSyncLogs(ctx, limit)` (`port.Repository`)
 1. Non-positive `limit <= 0` defaults to `DefaultSyncLogLimit = 100`.
@@ -221,7 +295,7 @@ To prevent overwriting unmapped legacy lineage attributes (such as historical `s
 | :--- | :--- | :--- | :---: | :--- |
 | **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
 | **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
-| **M2** | Phase 3C | Repository skeleton, bulk upsert engine, `$set` builder, index lifecycle, and `dataSync` audit sink. | *Planned* | Hermetic mock tests (`make test-ci`) and integration tests (`make test-integration`). |
+| **M2** | Phase 3C | Repository skeleton, index lifecycle, and `dataSync` audit sink in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go) (records write keys / `SaveBatch` scheduled for Phase 3E/3F). | **Complete** | 87.9% statement test coverage in [`internal/infra/storage/mongo/audit_test.go`](../../internal/infra/storage/mongo/audit_test.go); hermetic driver mock verification, credential leak defense, and race-free concurrent index creation verified. |
 | **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore`. | *Planned* | Hermetic S3 API mocks and streaming download validation. |
 | **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
 
@@ -234,4 +308,16 @@ Key verified invariants include:
 - **Pointer Un-aliasing Isolation**: Optional `TransactionDate` and `Balance` fields are verified to allocate distinct heap pointers, preventing shared memory mutation.
 - **UTC Normalization & Millisecond Truncation**: Timestamps across non-UTC timezones convert to UTC, and sub-millisecond nanoseconds truncate cleanly without shifting calendar date or hour.
 - **BSON Type Fidelity**: `source.rowNumber` is asserted as BSON `int64` (not `int32`), and legacy 2E numeric fields (`0.0`) and string fields (`""`) are explicitly emitted without omission.
+
+### 9.2 Phase 3C Verification & Test Coverage Evidence
+
+Phase 3C implements the repository skeleton, driver seams, index lifecycle management, and `dataSync` audit sink in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go). It achieves **87.9% statement test coverage** across the package (`go test -cover -race ./internal/infra/storage/mongo/...`) with 100% hermetic mock execution during `make check-quality` / `make test-ci`.
+
+Key verified invariants include:
+- **Credential Leak Defense**: `TestNewRepository_ErrorDoesNotLeakCredentials` asserts that connection URIs, usernames, and passwords never leak into constructor error messages or error string outputs upon connection or ping failures.
+- **Retry-Safe Index Lifecycle**: `TestEnsureIndexes_RetriesAfterFailure` validates that transient index creation errors do not mark the collection as ensured; subsequent retries re-execute index creation until successful.
+- **Thread-Safe Concurrent Index Creation**: `TestEnsureIndexes_ConcurrentCallsCreateOnce` executes 20 concurrent goroutines calling `EnsureIndexes`, verifying race-free execution and guaranteeing exactly 1 driver `CreateIndexes` call occurs.
+- **Audit Sink Parity & Dual-Field Output**: `TestSyncLogDoc_LegacyBSONParity` and `TestLogSync_WritesDualFields` assert exact BSON field types and desktop compatibility dual fields (`collection_name`, `sync_timestamp`, and conditional `records_uploaded`).
+- **Strict Domain Validation & Zero Defaulting**: `TestLogSync_RejectsZeroSyncedAt` and `TestLogSync_RejectsNilAndInvalid` verify that nil logs and zero `SyncedAt` timestamps are rejected with sentinel errors (`model.ErrMissingSyncTime`, `model.ErrNilSyncLog`) without synthesizing or defaulting timestamps.
+- **Context Cancellation & Input Immutability**: `TestLogSync_CancelledContext` and `TestLogSync_DoesNotMutateInput` verify context cancellation short-circuits execution and caller domain objects remain strictly immutable.
 
