@@ -69,7 +69,7 @@ The ingestion adapter package layout in `babylon_data_loader` strictly separates
 | Directory | Package / Component | Architectural Role | Composable Spec Link |
 | :--- | :--- | :--- | :--- |
 | `internal/infra/sources/chase/` | `chase.Extractor` | Chase deposit and credit card statement extraction, dialect classification, zero-allocation parsing primitives, and date fallbacks. | **[Chase Adapter Spec](./architecture/chase-adapter.md)** |
-| `internal/infra/sources/fidelity/` | `fidelity.Extractor` | Fidelity brokerage portfolio holdings extraction, UTF-8 BOM stripping, disclaimer filtering, and cash sweep normalization. | **[Fidelity Adapter Spec](./architecture/fidelity-adapter.md)** |
+| `internal/infra/sources/fidelity/` | `fidelity.Extractor` | Fidelity brokerage portfolio holdings extraction, UTF-8 BOM stripping, `"Date downloaded"` footer `AsOfDate` stamping, disclaimer filtering, and cash sweep normalization. | **[Fidelity Adapter Spec](./architecture/fidelity-adapter.md)** |
 | `internal/infra/sources/synthetic/` | `synthetic.Extractor` | In-memory deterministic fixture generation via `math/rand/v2` PCG generator for load testing and benchmark harnesses. | **[Synthetic Adapter Spec](./architecture/synthetic-adapter.md)** |
 | *(Cross-Cutting)* | Quality & Verification | Standard library isolation, race safety, comparative benchmarks, and cognitive complexity gates. | **[Verification & Quality Gates](./architecture/verification-and-quality.md)** |
 | *(Cross-Cutting)* | Remediation History | Formal audit trails and remediation logs across Phases 1 to 4 and the Round 3 review. | **[Remediation Log](./architecture/remediation-log.md)** |
@@ -116,10 +116,11 @@ The Fidelity adapter transforms brokerage portfolio holdings exports into strong
 
 ### Key Architectural Invariants:
 1. **UTF-8 BOM Detection & Propagation**: `stripUTF8BOM` detects `0xef, 0xbb, 0xbf`, gracefully handling empty files and surfacing non-EOF stream errors.
-2. **Multi-Line Disclaimer Filtering**: `isDisclaimerText` filters out legal disclaimers, footnote annotations (`"* "`, `"1. "`), and portfolio summary rows (`"Total"`, `"Account Total"`).
-3. **Cash Sweep Normalization**: Normalizes non-standard markers (`"**"`, `"FCASH"`, `"CORE"`) to `"CASH"`, while preserving valid mutual fund tickers with descriptions containing `"Total"` (e.g. `VTI`, `BND`, `TTE`).
-4. **Mandatory Schema Signatures**: Requires both a symbol alias (`"symbol"` / `"ticker"`) and a valuation alias (`"current value"`, `"market value"`, etc.) before parsing.
-5. **Single-Account Batch Inference**: Automatically infers batch `AccountID` when homogeneous accounts are present.
+2. **`"Date downloaded "` Footer `AsOfDate` Extraction & Stamping**: `matchDateDownloadedField` and `parseDateDownloaded` (with `normalizeMeridiem`, `resolveDateLocation`, and embedded `_ "time/tzdata"`) parse the statement footer into a UTC `time.Time` instant. The first footer wins and is never emitted as a position; `finalizePositions` stamps `AsOfDate` onto every extracted position and returns `model.ErrMissingAsOfDate` if a non-empty batch lacks a footer (while empty or header-only streams succeed without one).
+3. **Multi-Line Disclaimer Filtering**: `isDisclaimerText` filters out legal disclaimers, footnote annotations (`"* "`, `"1. "`), and portfolio summary rows (`"Total"`, `"Account Total"`).
+4. **Cash Sweep Normalization**: Normalizes non-standard markers (`"**"`, `"FCASH"`, `"CORE"`) to `"CASH"`, while preserving valid mutual fund tickers with descriptions containing `"Total"` (e.g. `VTI`, `BND`, `TTE`).
+5. **Mandatory Schema Signatures**: Requires both a symbol alias (`"symbol"` / `"ticker"`) and a valuation alias (`"current value"`, `"market value"`, `"current balance"`) before parsing.
+6. **Single-Account Batch Inference**: Automatically infers batch `AccountID` when homogeneous accounts are present.
 
 For the complete technical blueprint and disclaimer filtering rules:  
 👉 **[Complete Fidelity Adapter Architecture Specification](./architecture/fidelity-adapter.md)**

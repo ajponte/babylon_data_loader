@@ -323,6 +323,7 @@ type FidelityPosition struct {
     LastPrice    float64
     CurrentValue float64
     CostBasis    float64
+    AsOfDate     time.Time // UTC instant parsed from the "Date downloaded" footer.
 }
 ```
 
@@ -333,10 +334,24 @@ type FidelityPosition struct {
 | `AccountName` | `string` | Optional | Human-readable account label (e.g., `"ROTH IRA"`). |
 | `Symbol` | `string` | Required: `!= ""` (`ErrMissingSymbol`) | Ticker symbol or cash designation (e.g., `"SPAXX**"`, `"FSKAX"`). |
 | `Description` | `string` | Optional | Full fund or security description. |
-| `Quantity` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` | Total units or fractional shares held. |
-| `LastPrice` | `float64` | Finite & Non-negative: `!math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0` | Market price per share at statement capture. |
-| `CurrentValue` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` | Aggregate market value (`Quantity * LastPrice`). |
-| `CostBasis` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` | Total purchase cost basis (`0.0` for gifts/cash). |
+| `Quantity` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidQuantity`) | Total units or fractional shares held. |
+| `LastPrice` | `float64` | Finite & Non-negative: `!math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0` (`ErrInvalidLastPrice`, `ErrNegativeLastPrice`) | Market price per share at statement capture. |
+| `CurrentValue` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidCurrentValue`) | Aggregate market value (`Quantity * LastPrice`). |
+| `CostBasis` | `float64` | Finite: `!math.IsNaN(v) && !math.IsInf(v, 0)` (`ErrInvalidCostBasis`) | Total purchase cost basis (`0.0` for gifts/cash). |
+| `AsOfDate` | `time.Time` | Batch-stamped by extractor (`ErrMissingAsOfDate` if missing on non-empty batch) | UTC snapshot timestamp parsed from the `"Date downloaded"` statement footer. |
+
+#### `FidelityPosition` Sentinel Errors (`fidelity_position.go`)
+
+| Sentinel Error | Error Message | Trigger Condition |
+| :--- | :--- | :--- |
+| `ErrNilFidelityPosition` | `"fidelity position is nil"` | `Validate()` invoked on a `nil` `*FidelityPosition` receiver. |
+| `ErrMissingSymbol` | `"symbol is required"` | `Symbol == ""` during `Validate()`. |
+| `ErrInvalidQuantity` | `"quantity must be a valid finite number"` | `Quantity` is `NaN` or `±Inf`. |
+| `ErrInvalidLastPrice` | `"last price must be a valid finite number"` | `LastPrice` is `NaN` or `±Inf`. |
+| `ErrNegativeLastPrice` | `"last price cannot be negative"` | `LastPrice < 0`. |
+| `ErrInvalidCurrentValue` | `"current value must be a valid finite number"` | `CurrentValue` is `NaN` or `±Inf`. |
+| `ErrInvalidCostBasis` | `"cost basis must be a valid finite number"` | `CostBasis` is `NaN` or `±Inf`. |
+| `ErrMissingAsOfDate` | `"fidelity snapshot date (asOfDate) is required"` | Non-empty Fidelity position batch lacks a `"Date downloaded"` footer timestamp (`asOfDate.IsZero()`). |
 
 ---
 

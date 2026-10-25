@@ -231,7 +231,6 @@ func firstNonEmptyField(record []string) string {
 func isDisclaimerText(firstLower string) bool {
 	return strings.HasPrefix(firstLower, "the data and information") ||
 		strings.HasPrefix(firstLower, "brokerage services") ||
-		strings.HasPrefix(firstLower, "date downloaded") ||
 		firstLower == "total" ||
 		strings.HasPrefix(firstLower, "total market") ||
 		strings.HasPrefix(firstLower, "account total") ||

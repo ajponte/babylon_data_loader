@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 func TestFidelityPosition_Instantiation(t *testing.T) {
 	ingestedAt := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	asOfDate := time.Date(2026, 9, 26, 1, 50, 0, 0, time.UTC)
 	lineage := model.SourceLineage{
 		FileName:   "Portfolio_Positions.csv",
 		FileHash:   "fidposhash123",
@@ -28,6 +30,7 @@ func TestFidelityPosition_Instantiation(t *testing.T) {
 		LastPrice:    152.40,
 		CurrentValue: 19164.30,
 		CostBasis:    16500.00,
+		AsOfDate:     asOfDate,
 	}
 
 	if pos.Lineage.FileName != "Portfolio_Positions.csv" {
@@ -56,6 +59,12 @@ func TestFidelityPosition_Instantiation(t *testing.T) {
 	}
 	if pos.CostBasis != 16500.00 {
 		t.Errorf("expected CostBasis 16500.00, got %f", pos.CostBasis)
+	}
+	if !pos.AsOfDate.Equal(asOfDate) {
+		t.Errorf("expected AsOfDate %v, got %v", asOfDate, pos.AsOfDate)
+	}
+	if pos.AsOfDate.Location() != time.UTC {
+		t.Errorf("expected AsOfDate location UTC, got %v", pos.AsOfDate.Location())
 	}
 }
 
@@ -138,6 +147,9 @@ func TestFidelityPosition_ZeroValue(t *testing.T) {
 	if pos.Lineage.FileName != "" || pos.Lineage.RowNumber != 0 {
 		t.Errorf("expected zero Lineage, got %+v", pos.Lineage)
 	}
+	if !pos.AsOfDate.IsZero() {
+		t.Errorf("expected zero AsOfDate, got %v", pos.AsOfDate)
+	}
 }
 
 func TestFidelityPosition_Validate(t *testing.T) {
@@ -160,7 +172,7 @@ func TestFidelityPosition_Validate(t *testing.T) {
 			expectedErr: model.ErrNilFidelityPosition,
 		},
 		{
-			name: "valid position",
+			name: "valid position with zero AsOfDate (pre-footer row validation)",
 			pos: &model.FidelityPosition{
 				Lineage:      validLineage,
 				AccountID:    "FID-123",
@@ -169,6 +181,20 @@ func TestFidelityPosition_Validate(t *testing.T) {
 				LastPrice:    180.50,
 				CurrentValue: 1805.00,
 				CostBasis:    1500.00,
+			},
+			expectedErr: nil,
+		},
+		{
+			name: "valid position with populated UTC AsOfDate (post-footer stamping)",
+			pos: &model.FidelityPosition{
+				Lineage:      validLineage,
+				AccountID:    "FID-123",
+				Symbol:       "FXAIX",
+				Quantity:     10.0,
+				LastPrice:    180.50,
+				CurrentValue: 1805.00,
+				CostBasis:    1500.00,
+				AsOfDate:     time.Date(2026, 9, 26, 1, 50, 0, 0, time.UTC),
 			},
 			expectedErr: nil,
 		},
@@ -322,5 +348,18 @@ func TestFidelityPosition_Validate(t *testing.T) {
 				t.Errorf("Validate() err = %v, want %v", err, tt.expectedErr)
 			}
 		})
+	}
+}
+
+func TestFidelityPosition_ErrMissingAsOfDateSentinel(t *testing.T) {
+	if model.ErrMissingAsOfDate == nil {
+		t.Fatal("expected model.ErrMissingAsOfDate to be non-nil")
+	}
+	if model.ErrMissingAsOfDate.Error() == "" {
+		t.Error("expected model.ErrMissingAsOfDate to have a non-empty error message")
+	}
+	wrapped := fmt.Errorf("batch validation failed: %w", model.ErrMissingAsOfDate)
+	if !errors.Is(wrapped, model.ErrMissingAsOfDate) {
+		t.Errorf("expected errors.Is(wrapped, model.ErrMissingAsOfDate) == true, got false")
 	}
 }

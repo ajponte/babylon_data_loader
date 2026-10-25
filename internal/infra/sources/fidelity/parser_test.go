@@ -471,7 +471,7 @@ func TestIsFidelityDisclaimerOrEmpty(t *testing.T) {
 		{name: "all blank fields", record: []string{"", "   ", "\t"}, want: true},
 		{name: "disclaimer data and info", record: []string{"", "The data and information provided are..."}, want: true},
 		{name: "disclaimer brokerage services", record: []string{"Brokerage services are provided by..."}, want: true},
-		{name: "disclaimer date downloaded", record: []string{"Date downloaded 10/18/2026"}, want: true},
+		{name: "date downloaded footer handled by extractor not disclaimer filter", record: []string{"Date downloaded 10/18/2026"}, want: false},
 		{name: "disclaimer total keyword", record: []string{"total"}, want: true},
 		{name: "disclaimer total market", record: []string{"Total Market Value"}, want: true},
 		{name: "disclaimer account total", record: []string{"Account Total:"}, want: true},

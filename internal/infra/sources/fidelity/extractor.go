@@ -22,12 +22,14 @@ var (
 	ErrNilReader = errors.New("reader cannot be nil")
 	// ErrMissingRequiredColumns indicates that the CSV header is missing mandatory columns.
 	ErrMissingRequiredColumns = errors.New("fidelity CSV missing required header columns")
+	// ErrInvalidDateDownloaded indicates that a Date downloaded footer line could not be parsed.
+	ErrInvalidDateDownloaded = errors.New("invalid fidelity Date downloaded footer")
 )
 
 const (
 	defaultPositionsCapacity = 64
 	utf8BOMString            = "\xef\xbb\xbf"
-	dateDownloadedPrefix     = "Date downloaded "
+	dateDownloadedKeyword    = "date downloaded"
 	dateTrimCutset           = "\", \t\r\n"
 	edtOffsetSeconds         = -4 * 3600 // Eastern Daylight Time UTC offset in seconds (satisfies mnd linter).
 )
@@ -206,25 +208,58 @@ func finalizePositions(positions []model.FidelityPosition, asOfDate time.Time) (
 }
 
 func matchDateDownloadedField(row []string) (string, bool) {
-	for _, field := range row {
+	for i, field := range row {
 		trimmed := strings.Trim(field, dateTrimCutset)
-		if trimmed != "" {
-			return trimmed, strings.HasPrefix(trimmed, dateDownloadedPrefix)
+		if trimmed == "" {
+			continue
 		}
+		if !hasDateDownloadedPrefix(trimmed) {
+			return "", false
+		}
+		return joinNonEmptyFooterFields(row[i:]), true
 	}
 	return "", false
+}
+
+func hasDateDownloadedPrefix(s string) bool {
+	if len(s) < len(dateDownloadedKeyword) {
+		return false
+	}
+	if !strings.EqualFold(s[:len(dateDownloadedKeyword)], dateDownloadedKeyword) {
+		return false
+	}
+	if len(s) == len(dateDownloadedKeyword) {
+		return true
+	}
+	next := s[len(dateDownloadedKeyword)]
+	return next == ' ' || next == '\t' || next == ':' || next == ','
+}
+
+func joinNonEmptyFooterFields(fields []string) string {
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
+		trimmed := strings.Trim(f, dateTrimCutset)
+		if trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // parseDateDownloaded is a behavior-identical port of legacy
 // datalake/model.ParseFidelityDateDownloaded, returning the instant in UTC.
 func parseDateDownloaded(line string) (time.Time, error) {
-	clean := strings.Trim(line, dateTrimCutset)
-	dateStr := strings.TrimPrefix(clean, dateDownloadedPrefix)
-	dateStr = strings.Trim(dateStr, dateTrimCutset)
-	dateStr = normalizeMeridiem(dateStr)
+	rawDate, ok := stripDateDownloadedPrefix(line)
+	if !ok || rawDate == "" {
+		return time.Time{}, fmt.Errorf("%w: empty or missing date in %q", ErrInvalidDateDownloaded, line)
+	}
 
-	isET := strings.HasSuffix(strings.TrimSpace(dateStr), "ET")
-	dateStr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(dateStr), "ET"))
+	dateStr, isET := stripEasternSuffix(rawDate)
+	dateStr = normalizeMeridiem(dateStr)
+	dateStr = strings.Join(strings.Fields(dateStr), " ")
+	if dateStr == "" {
+		return time.Time{}, fmt.Errorf("%w: empty date in %q", ErrInvalidDateDownloaded, line)
+	}
 
 	loc := resolveDateLocation(isET)
 
@@ -233,18 +268,49 @@ func parseDateDownloaded(line string) (time.Time, error) {
 		var errSingle error
 		parsed, errSingle = time.ParseInLocation("Jan-2-2006 3:04 PM", dateStr, loc)
 		if errSingle != nil {
-			return time.Time{}, fmt.Errorf("failed to parse date %q: %w", dateStr, err)
+			return time.Time{}, fmt.Errorf("%w %q: %w", ErrInvalidDateDownloaded, dateStr, errSingle)
 		}
 	}
 	return parsed.UTC(), nil
 }
 
+func stripDateDownloadedPrefix(line string) (string, bool) {
+	clean := strings.Trim(line, dateTrimCutset)
+	if !hasDateDownloadedPrefix(clean) {
+		return "", false
+	}
+	rest := clean[len(dateDownloadedKeyword):]
+	rest = strings.TrimLeft(rest, " \t:,")
+	rest = strings.Trim(rest, dateTrimCutset)
+	return rest, true
+}
+
+func stripEasternSuffix(s string) (string, bool) {
+	trimmed := strings.TrimSpace(s)
+	upper := strings.ToUpper(trimmed)
+	for _, suffix := range []string{"EDT", "EST", "ET"} {
+		if strings.HasSuffix(upper, suffix) {
+			without := strings.TrimSpace(trimmed[:len(trimmed)-len(suffix)])
+			return strings.Trim(without, dateTrimCutset), true
+		}
+	}
+	return trimmed, false
+}
+
 func normalizeMeridiem(s string) string {
-	s = strings.ReplaceAll(s, "p.m.", "PM")
-	s = strings.ReplaceAll(s, "a.m.", "AM")
-	s = strings.ReplaceAll(s, "p.m", "PM")
-	s = strings.ReplaceAll(s, "a.m", "AM")
-	return s
+	replacer := strings.NewReplacer(
+		"p.m.", "PM",
+		"a.m.", "AM",
+		"P.M.", "PM",
+		"A.M.", "AM",
+		"p.m", "PM",
+		"a.m", "AM",
+		"P.M", "PM",
+		"A.M", "AM",
+		"pm", "PM",
+		"am", "AM",
+	)
+	return replacer.Replace(s)
 }
 
 func resolveDateLocation(isET bool) *time.Location {
