@@ -191,6 +191,23 @@ func toIndexModel(spec indexSpec) mongodrv.IndexModel {
 	return mongodrv.IndexModel{Keys: spec.keys, Options: opts}
 }
 
+func indexSpecsFor(coll string) []indexSpec {
+	for _, ci := range indexCatalog() {
+		if ci.collection == coll {
+			return ci.indexes
+		}
+	}
+	return nil
+}
+
+func toIndexModels(specs []indexSpec) []mongodrv.IndexModel {
+	models := make([]mongodrv.IndexModel, len(specs))
+	for i, spec := range specs {
+		models[i] = toIndexModel(spec)
+	}
+	return models
+}
+
 func (r *Repository) ensureIndexes(ctx context.Context, coll string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -202,22 +219,12 @@ func (r *Repository) ensureIndexes(ctx context.Context, coll string) error {
 		return nil
 	}
 
-	var specs []indexSpec
-	for _, ci := range indexCatalog() {
-		if ci.collection == coll {
-			specs = ci.indexes
-			break
-		}
-	}
+	specs := indexSpecsFor(coll)
 	if len(specs) == 0 {
 		return nil
 	}
 
-	models := make([]mongodrv.IndexModel, len(specs))
-	for i, spec := range specs {
-		models[i] = toIndexModel(spec)
-	}
-
+	models := toIndexModels(specs)
 	if err := r.db.Collection(coll).CreateIndexes(ctx, models); err != nil {
 		return fmt.Errorf("mongo: create indexes on %s: %w", coll, err)
 	}
