@@ -27,11 +27,13 @@ var (
 )
 
 const (
-	defaultPositionsCapacity = 64
-	utf8BOMString            = "\xef\xbb\xbf"
-	dateDownloadedKeyword    = "date downloaded"
-	dateTrimCutset           = "\", \t\r\n"
-	edtOffsetSeconds         = -4 * 3600 // Eastern Daylight Time UTC offset in seconds (satisfies mnd linter).
+	defaultPositionsCapacity           = 64
+	utf8BOMString                      = "\xef\xbb\xbf"
+	dateDownloadedKeyword              = "date downloaded"
+	dateTrimCutset                     = "\", \t\r\n"          // Characters stripped from raw CSV cells: quotes, commas, tabs, spaces, and CRLF newlines.
+	edtOffsetSeconds                   = -4 * 3600             // Eastern Daylight Time UTC offset in seconds (satisfies mnd linter).
+	dateDownloadedLayoutTwoDigitDay    = "Jan-02-2006 3:04 PM" // Standard Fidelity snapshot date layout with two-digit day.
+	dateDownloadedLayoutSingleDigitDay = "Jan-2-2006 3:04 PM"  // Fallback layout supporting single-digit days (e.g. "Sep-5-2026").
 )
 
 // Extractor implements port.Extractor for Fidelity portfolio positions exports.
@@ -278,10 +280,10 @@ func parseDateDownloaded(line string) (time.Time, error) {
 }
 
 func parseTimestampInLocation(dateStr string, loc *time.Location) (time.Time, error) {
-	parsed, err := time.ParseInLocation("Jan-02-2006 3:04 PM", dateStr, loc)
+	parsed, err := time.ParseInLocation(dateDownloadedLayoutTwoDigitDay, dateStr, loc)
 	if err != nil {
 		var errSingle error
-		parsed, errSingle = time.ParseInLocation("Jan-2-2006 3:04 PM", dateStr, loc)
+		parsed, errSingle = time.ParseInLocation(dateDownloadedLayoutSingleDigitDay, dateStr, loc)
 		if errSingle != nil {
 			return time.Time{}, fmt.Errorf("%w %q: %w", ErrInvalidDateDownloaded, dateStr, errSingle)
 		}
