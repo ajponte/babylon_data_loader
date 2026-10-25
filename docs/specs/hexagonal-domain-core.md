@@ -448,7 +448,7 @@ Domain validation is strictly self-contained within each entity's `Validate()` m
 ```
 Domain Validation Invariants
 ├── Compound Unique Key Protection
-│   └── AccountID != "" (Enforces MongoDB Atlas idx_chase_dedup & idx_fidelity_dedup)
+│   └── AccountID != "" (Enforces MongoDB Atlas idx_chase_account_post_desc_amount_row & idx_account_symbol_asof)
 ├── Provenance Integrity
 │   ├── SourceLineage.FileName != ""
 │   └── SourceLineage.RowNumber >= 0
@@ -463,12 +463,12 @@ Domain Validation Invariants
 ```
 
 ### 5.1. MongoDB Atlas Compound Index Alignment
-Per the MongoDB Atlas specification ([`mongodb-atlas-datalake.md`](./mongodb-atlas-datalake.md)), deduplication relies on unique compound indexes:
-- `idx_chase_dedup`: `{ "accountId": 1, "postingDate": 1, "description": 1, "amount": 1 }`
-- `idx_fidelity_dedup`: `{ "accountId": 1, "symbol": 1 }`
+Per the canonical storage specification ([`hexagonal-storage-adapters.md`](./hexagonal-storage-adapters.md), which supersedes earlier working index names and [`mongodb-atlas-datalake.md`](./mongodb-atlas-datalake.md) §5.1), deduplication relies on live Atlas unique compound indexes:
+- `idx_chase_account_post_desc_amount_row` (supersedes temporary working name `idx_chase_dedup`): `{ "accountId": 1, "postingDate": 1, "description": 1, "amount": 1, "source.rowNumber": 1 }` (unique, sparse)
+- `idx_account_symbol_asof` (supersedes temporary working name `idx_fidelity_dedup`): `{ "accountNumber": 1, "symbol": 1, "asOfDate": 1 }` (unique)
 
 > [!IMPORTANT]
-> If `AccountID` is empty, MongoDB indexes evaluate all records under a shared empty key `""`, leading to cross-account document collisions and silent data overwrites during bulk upserts. Enforcing `AccountID != ""` at the domain model level prevents un-keyed records from entering persistence.
+> If `AccountID` is empty, MongoDB indexes evaluate all records under a shared empty key `""`, leading to cross-account document collisions and silent data overwrites during bulk upserts. Enforcing `AccountID != ""` at the domain model level prevents un-keyed records from entering persistence. Consult [`docs/specs/hexagonal-storage-adapters.md`](./hexagonal-storage-adapters.md) as the authoritative index catalog.
 
 ### 5.2. IEEE 754 Floating-Point Sanitization
 Go `float64` variables can represent special IEEE 754 values (`NaN`, `+Inf`, `-Inf`). When passed into MongoDB BSON serializers or Python downstream analytics pipelines (`babylon_features`), these values produce serialization errors or corrupt statistical moments. All monetary and quantitative fields must be finite numbers:
@@ -477,6 +477,17 @@ if math.IsNaN(val) || math.IsInf(val, 0) {
     return ErrInvalidAmount
 }
 ```
+
+In Phase 2E, seven legacy performance and allocation `float64` metrics were restored to `FidelityPosition`:
+- `LastPriceChange`
+- `TodaysGainLossDollar`
+- `TodaysGainLossPct`
+- `TotalGainLossDollar`
+- `TotalGainLossPct`
+- `PercentOfAccount`
+- `AverageCostBasis`
+
+Under `FidelityPosition.Validate()`, these metrics are checked via `validatePerformanceMetrics()` using `allFinite(...)`. If any of these seven fields evaluates to `NaN` or `±Inf`, validation rejects the position with sentinel error `ErrInvalidPerformanceMetric` (`"performance or allocation metric must be a valid finite number"`), protecting the datalake against corrupted floating-point calculations.
 
 ---
 
@@ -602,7 +613,7 @@ During the joint QA and code review of the Phase 1 implementation, 10 Medium-to-
 | Finding ID | Title | Severity | Impact Prior to Remediation | Remediation Applied |
 | :---: | :--- | :---: | :--- | :--- |
 | **F-01** | Unvalidated Nested `SourceLineage` | High | Entities with uninitialized or corrupt lineage (negative row numbers, empty filenames) passed validation. | Delegated `t.Lineage.Validate()` inside both `ChaseTransaction.Validate()` and `FidelityPosition.Validate()`. |
-| **F-02** | Missing `AccountID` Validation | High | Empty account IDs caused collisions under MongoDB compound unique indexes (`idx_chase_dedup`, `idx_fidelity_dedup`). | Introduced `ErrMissingAccountID` and enforced `AccountID != ""` across `ChaseTransaction`, `FidelityPosition`, `IngestionBatch`, and `FileMetadata`. |
+| **F-02** | Missing `AccountID` Validation | High | Empty account IDs caused collisions under MongoDB compound unique indexes (superseded working names `idx_chase_dedup`, `idx_fidelity_dedup`; canonical legacy names `idx_chase_account_post_desc_amount_row` and `idx_account_symbol_asof`, see [`hexagonal-storage-adapters.md`](./hexagonal-storage-adapters.md)). | Introduced `ErrMissingAccountID` and enforced `AccountID != ""` across `ChaseTransaction`, `FidelityPosition`, `IngestionBatch`, and `FileMetadata`. |
 | **F-03** | Negative Counts & Missing Audit Fields | High | Corrupted negative metrics and empty error messages passed into `SyncLog`, degrading datalake diagnostics. | Enforced non-negative validation on `RecordCount`, `UpsertedCount`, `MatchedCount`, and `DurationMs`; required `FileName`, `CollectionName`, `SyncedAt`, and mandatory `ErrorMessage` on `SyncStatusFailed`. |
 | **F-04** | `IngestionBatch.Payload` Type Safety | High | Downstream adapters performing unchecked runtime type assertions risked panicking on mismatched payloads. | Enforced `RecordCount > 0 && Payload == nil` check in `Validate()`; implemented type-guarded accessors `AsChaseTransactions()` and `AsFidelityPositions()`. |
 | **F-05** | `Extractor.Extract` Signature Conflation | High | Extractor accepted `SourceLineage`, forcing callers to fabricate dummy per-record `RowNumber: 1` before parsing. | Introduced `FileMetadata` (containing `FileName`, `FileHash`, `AccountID`, `IngestedAt`) for `Extract()`; extractors now generate per-record `SourceLineage` during row parsing. |
