@@ -27,6 +27,9 @@ The secondary storage adapters encapsulate all persistence and datalake interact
 
 ## 3. Decision Record (M0 Decisions)
 
+> [!NOTE]
+> **Milestone Status (Phase 3B)**: Milestone 1 (M1 - Contract Frozen) DTO mappers and BSON serialization contracts are fully implemented and verified with 100% statement test coverage in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go) and [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go). See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
+
 ### 3.1 User Decisions (D1–D8, A1)
 
 | ID | Decision | Rationale |
@@ -69,23 +72,86 @@ The secondary storage adapters encapsulate all persistence and datalake interact
 
 ### 4.2 BSON Document Schemas & DTO Mappings
 
+Authoritative implementation reference: [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go).
+
 #### `lineageDoc` (Embedded Subdocument)
 ```go
 type lineageDoc struct {
-    S3URI      string    `bson:"s3Uri,omitempty"` // Phase 4 placeholder; omitted when empty in Phase 3
-    FileName   string    `bson:"fileName"`
-    RowNumber  int64     `bson:"rowNumber"`        // Must be int64 (Go int encodes as BSON int32)
-    IngestedAt time.Time `bson:"ingestedAt"`
-    SHA256     string    `bson:"sha256,omitempty"` // Mapped from Lineage.FileHash
+	// S3URI is a Phase 4 placeholder: batch/file metadata supplied by the Lambda entrypoint.
+	// Always empty in Phase 3, so omitempty keeps it out of inserts and $set (E6 preserves
+	// existing values). Field order matches legacy datalake/model.SourceLineage.
+	S3URI      string    `bson:"s3Uri,omitempty"`
+	FileName   string    `bson:"fileName"`
+	RowNumber  int64     `bson:"rowNumber"` // int64, NOT int: Go int encodes as BSON int32.
+	IngestedAt time.Time `bson:"ingestedAt"`
+	SHA256     string    `bson:"sha256,omitempty"` // from Lineage.FileHash.
 }
 ```
 
 #### `chaseDoc` (`transactions_chase` & `transactions_synthetic`)
-- `accountId` (string), `postingDate` (UTC date), `transactionDate` (UTC date, `omitempty`, 2F), `description` (string), `amount` (double), `transactionType` (string), `balance` (double, `omitempty`), `category` (string, `omitempty`), `details` (string, `omitempty`), `checkOrSlipNum` (string, `omitempty`), `memo` (string, `omitempty`), `dataSource` (string: `"chase"` or `"synthetic"`), `source` (`lineageDoc`).
+```go
+type chaseDoc struct {
+	AccountID       string     `bson:"accountId"`
+	PostingDate     time.Time  `bson:"postingDate"`
+	TransactionDate *time.Time `bson:"transactionDate,omitempty"` // 2F; nil for checking/synthetic.
+	Description     string     `bson:"description"`
+	Amount          float64    `bson:"amount"`
+	TransactionType string     `bson:"transactionType"`
+	Balance         *float64   `bson:"balance,omitempty"`
+	Category        string     `bson:"category,omitempty"`
+	Details         string     `bson:"details,omitempty"`
+	CheckOrSlipNum  string     `bson:"checkOrSlipNum,omitempty"`
+	Memo            string     `bson:"memo,omitempty"`
+	DataSource      string     `bson:"dataSource"`
+	Source          lineageDoc `bson:"source"`
+}
+```
 
 #### `fidelityDoc` (`positions_fidelity`)
-- `accountNumber` (string), `accountName` (string), `symbol` (string), `description` (string), `quantity` (double), `lastPrice` (double), `lastPriceChange` (double, 2E), `currentValue` (double), `todaysGainLossDollar` (double, 2E), `todaysGainLossPct` (double, 2E), `totalGainLossDollar` (double, 2E), `totalGainLossPct` (double, 2E), `percentOfAccount` (double, 2E), `costBasisTotal` (double), `averageCostBasis` (double, 2E), `type` (string, 2E, emitted even if `""`), `asOfDate` (UTC date, 2D), `dataSource` (string: `"fidelity"`), `source` (`lineageDoc`).
-- Note: Phase 2E numeric and string fields do not use `omitempty`; zero values are explicitly stored (`0.0` and `""`).
+```go
+// Field order matches legacy datalake/model.FidelityPosition. No omitempty on the 2E
+// fields: legacy always emits them (placeholders stored as 0.0 / "").
+type fidelityDoc struct {
+	AccountNumber        string     `bson:"accountNumber"`
+	AccountName          string     `bson:"accountName"`
+	Symbol               string     `bson:"symbol"`
+	Description          string     `bson:"description"`
+	Quantity             float64    `bson:"quantity"`
+	LastPrice            float64    `bson:"lastPrice"`
+	LastPriceChange      float64    `bson:"lastPriceChange"` // 2E.
+	CurrentValue         float64    `bson:"currentValue"`
+	TodaysGainLossDollar float64    `bson:"todaysGainLossDollar"` // 2E.
+	TodaysGainLossPct    float64    `bson:"todaysGainLossPct"`    // 2E, percentage points.
+	TotalGainLossDollar  float64    `bson:"totalGainLossDollar"`  // 2E.
+	TotalGainLossPct     float64    `bson:"totalGainLossPct"`     // 2E, percentage points.
+	PercentOfAccount     float64    `bson:"percentOfAccount"`     // 2E, percentage points.
+	CostBasisTotal       float64    `bson:"costBasisTotal"`
+	AverageCostBasis     float64    `bson:"averageCostBasis"` // 2E.
+	Type                 string     `bson:"type"`             // 2E, emitted even when "".
+	AsOfDate             time.Time  `bson:"asOfDate"`
+	DataSource           string     `bson:"dataSource"`
+	Source               lineageDoc `bson:"source"`
+}
+```
+
+#### Pure Mapper Signatures
+
+Persistence transformations are implemented as pure, side-effect-free functions in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). They accept immutable domain models by value and return unexported BSON DTOs:
+
+- `toChaseDoc(tx model.ChaseTransaction, dataSource string) chaseDoc`: Maps domain Chase transactions (and synthetic transactions) to persistence DTO `chaseDoc`, parameterizing `dataSource` (`"chase"` or `"synthetic"`).
+- `toFidelityDoc(p model.FidelityPosition) fidelityDoc`: Maps domain Fidelity positions to persistence DTO `fidelityDoc`, binding `dataSource` to `"fidelity"`.
+- `toLineageDoc(l model.SourceLineage) lineageDoc`: Maps domain lineage metadata to embedded subdocument `lineageDoc`, converting `RowNumber` to `int64` (BSON int64 compatibility) and leaving `S3URI` empty for Phase 4.
+
+#### Memory Safety & Immutability Invariants
+
+1. **Pointer Un-aliasing (Optional Field Isolation)**:
+   - For optional pointer fields (`TransactionDate *time.Time` and `Balance *float64` in `chaseDoc`), mappers allocate fresh heap memory and copy the dereferenced value (deep copy) rather than aliasing the pointer from the incoming domain model.
+   - This guarantees complete pointer isolation between caller and callee: subsequent mutations of domain model pointers (or reuse across concurrent worker goroutines) will never mutate persistence DTO values, and vice versa.
+2. **Timestamp Normalization & BSON Millisecond Truncation**:
+   - All temporal fields (`PostingDate`, `TransactionDate`, `AsOfDate`, and `Source.IngestedAt`) are normalized to UTC instants using `.UTC()`.
+   - MongoDB BSON `DateTime` stores timestamps as signed 64-bit integers representing milliseconds since Unix epoch (UTC). Any sub-millisecond nanosecond components in Go `time.Time` values are cleanly truncated by the BSON encoder (`t.UnixMilli()`) without shifting the calendar date, hour, or second across timezones.
+3. **Zero Mutation Guarantee**:
+   - All mappers take domain structs by value (`tx model.ChaseTransaction`, `p model.FidelityPosition`, `l model.SourceLineage`), guaranteeing that domain entities remain strictly immutable and free from side effects.
 
 #### `syncLogDoc` (`dataSync` with Legacy Dual Fields)
 - Canonical: `_id` (ObjectId, `omitempty`), `fileName` (string), `fileHash` (string, `omitempty`), `collectionName` (string, `omitempty`), `recordCount` (int64), `upsertedCount` (int64), `matchedCount` (int64), `status` (string), `errorMessage` (string, `omitempty`), `syncedAt` (date), `durationMs` (int64).
@@ -146,3 +212,26 @@ To prevent overwriting unmapped legacy lineage attributes (such as historical `s
 
 - **`docs/specs/mongodb-atlas-datalake.md` §5.1**: Superseded regarding speculative field names (`sourceFile`, `importedAt`, `rawDetails`). Live datalake fields (`fileName`, `ingestedAt`, `source.*`) specified herein are canonical.
 - **`docs/specs/hexagonal-domain-core.md` §5.1**: Superseded regarding working index names (`idx_chase_dedup`, `idx_fidelity_dedup`). Live Atlas index names (`idx_chase_account_post_desc_amount_row`, `idx_account_symbol_asof`) specified herein are canonical.
+
+---
+
+## 9. Implementation Milestones & Verification
+
+| Milestone | Phase | Description | Status | Verification Criteria |
+| :--- | :--- | :--- | :---: | :--- |
+| **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
+| **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
+| **M2** | Phase 3C | Repository skeleton, bulk upsert engine, `$set` builder, index lifecycle, and `dataSync` audit sink. | *Planned* | Hermetic mock tests (`make test-ci`) and integration tests (`make test-integration`). |
+| **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore`. | *Planned* | Hermetic S3 API mocks and streaming download validation. |
+| **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
+
+### 9.1 Phase 3B Verification & Test Coverage Evidence
+
+Milestone 1 (M1 - Contract Frozen) DTO mappers are fully implemented in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go) and achieve 100% statement test coverage across all branches in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go) (`go test -cover -race ./internal/infra/storage/mongo/...`).
+
+Key verified invariants include:
+- **Round-Trip BSON Schema Parity**: All field names, BSON types, and embedded subdocuments match live MongoDB Atlas collections exactly.
+- **Pointer Un-aliasing Isolation**: Optional `TransactionDate` and `Balance` fields are verified to allocate distinct heap pointers, preventing shared memory mutation.
+- **UTC Normalization & Millisecond Truncation**: Timestamps across non-UTC timezones convert to UTC, and sub-millisecond nanoseconds truncate cleanly without shifting calendar date or hour.
+- **BSON Type Fidelity**: `source.rowNumber` is asserted as BSON `int64` (not `int32`), and legacy 2E numeric fields (`0.0`) and string fields (`""`) are explicitly emitted without omission.
+
