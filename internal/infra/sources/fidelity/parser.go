@@ -259,6 +259,19 @@ func parseFinancialNumber(val string, stripDollar bool, fieldName string) (float
 		return 0.0, nil
 	}
 
+	clean := sanitizeFinancialToken(trimmed, stripDollar)
+
+	f, err := strconv.ParseFloat(clean, 64)
+	if err != nil {
+		return 0.0, fmt.Errorf("invalid %s value %q: %w", fieldName, val, err)
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0.0, fmt.Errorf("invalid %s value %q: non-finite float value", fieldName, val)
+	}
+	return f, nil
+}
+
+func sanitizeFinancialToken(trimmed string, stripDollar bool) string {
 	clean := trimmed
 	if stripDollar {
 		clean = strings.ReplaceAll(clean, "$", "")
@@ -272,16 +285,7 @@ func parseFinancialNumber(val string, stripDollar bool, fieldName string) (float
 	if strings.HasPrefix(clean, "(") && strings.HasSuffix(clean, ")") {
 		clean = "-" + clean[1:len(clean)-1]
 	}
-	clean = strings.ReplaceAll(clean, " ", "")
-
-	f, err := strconv.ParseFloat(clean, 64)
-	if err != nil {
-		return 0.0, fmt.Errorf("invalid %s value %q: %w", fieldName, val, err)
-	}
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0.0, fmt.Errorf("invalid %s value %q: non-finite float value", fieldName, val)
-	}
-	return f, nil
+	return strings.ReplaceAll(clean, " ", "")
 }
 
 func isNumericDefaultZero(val string) bool {

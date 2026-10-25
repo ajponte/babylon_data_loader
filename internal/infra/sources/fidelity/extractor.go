@@ -171,14 +171,11 @@ func parsePositions(
 			return nil, err
 		}
 
-		if footerField, isFooter := matchDateDownloadedField(row); isFooter {
-			if asOfDate.IsZero() {
-				parsedDate, dateErr := parseDateDownloaded(footerField)
-				if dateErr != nil {
-					return nil, fmt.Errorf("row %d date downloaded footer: %w", lineNum, dateErr)
-				}
-				asOfDate = parsedDate
-			}
+		isFooter, footerErr := consumeFooterRow(row, lineNum, &asOfDate)
+		if footerErr != nil {
+			return nil, footerErr
+		}
+		if isFooter {
 			continue
 		}
 
@@ -192,6 +189,21 @@ func parsePositions(
 	}
 
 	return finalizePositions(positions, asOfDate)
+}
+
+func consumeFooterRow(row []string, lineNum int, asOfDate *time.Time) (bool, error) {
+	footerField, isFooter := matchDateDownloadedField(row)
+	if !isFooter {
+		return false, nil
+	}
+	if asOfDate.IsZero() {
+		parsedDate, dateErr := parseDateDownloaded(footerField)
+		if dateErr != nil {
+			return true, fmt.Errorf("row %d date downloaded footer: %w", lineNum, dateErr)
+		}
+		*asOfDate = parsedDate
+	}
+	return true, nil
 }
 
 func finalizePositions(positions []model.FidelityPosition, asOfDate time.Time) ([]model.FidelityPosition, error) {
@@ -262,7 +274,10 @@ func parseDateDownloaded(line string) (time.Time, error) {
 	}
 
 	loc := resolveDateLocation(isET)
+	return parseTimestampInLocation(dateStr, loc)
+}
 
+func parseTimestampInLocation(dateStr string, loc *time.Location) (time.Time, error) {
 	parsed, err := time.ParseInLocation("Jan-02-2006 3:04 PM", dateStr, loc)
 	if err != nil {
 		var errSingle error

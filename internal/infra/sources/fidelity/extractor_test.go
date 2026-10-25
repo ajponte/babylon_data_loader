@@ -112,78 +112,90 @@ func assertHolding(
 }
 
 func TestFidelityExtractor_Errors(t *testing.T) {
-	ctx := context.Background()
+	baseCtx := context.Background()
+	canceledCtx, cancel := context.WithCancel(baseCtx)
+	cancel()
+
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+	validMeta := model.FileMetadata{
+		FileName:   "test.csv",
+		AccountID:  "acc-1",
+		IngestedAt: now,
+	}
+
+	tests := []struct {
+		name        string
+		ctx         context.Context
+		reader      io.Reader
+		meta        model.FileMetadata
+		wantErr     bool
+		expectedIs  error
+		wantRecords int
+	}{
+		{
+			name:   "invalid metadata missing account ID",
+			ctx:    baseCtx,
+			reader: strings.NewReader(""),
+			meta: model.FileMetadata{
+				FileName:   "test.csv",
+				IngestedAt: now,
+			},
+			wantErr: true,
+		},
+		{
+			name:       "nil reader returns ErrNilReader",
+			ctx:        baseCtx,
+			reader:     nil,
+			meta:       validMeta,
+			wantErr:    true,
+			expectedIs: fidelity.ErrNilReader,
+		},
+		{
+			name:    "nil context returns error",
+			ctx:     nil,
+			reader:  strings.NewReader(""),
+			meta:    validMeta,
+			wantErr: true,
+		},
+		{
+			name:       "cancelled context returns context.Canceled",
+			ctx:        canceledCtx,
+			reader:     strings.NewReader("Account number,Symbol\n"),
+			meta:       validMeta,
+			wantErr:    true,
+			expectedIs: context.Canceled,
+		},
+		{
+			name:        "empty stream returns empty batch without error",
+			ctx:         baseCtx,
+			reader:      strings.NewReader(""),
+			meta:        validMeta,
+			wantErr:     false,
+			wantRecords: 0,
+		},
+	}
+
 	extractor := fidelity.NewExtractor()
-
-	t.Run("invalid metadata", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(ctx, strings.NewReader(""), meta)
-		if err == nil {
-			t.Error("expected error with missing account ID in metadata")
-		}
-	})
-
-	t.Run("nil reader", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(ctx, nil, meta)
-		if err == nil {
-			t.Error("expected error with nil reader")
-		}
-		if !errors.Is(err, fidelity.ErrNilReader) {
-			t.Errorf("expected ErrNilReader, got %v", err)
-		}
-	})
-
-	t.Run("nil context", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		var nilCtx context.Context
-		_, err := extractor.Extract(nilCtx, strings.NewReader(""), meta)
-		if err == nil {
-			t.Error("expected error with nil context")
-		}
-	})
-
-	t.Run("context cancelled", func(t *testing.T) {
-		canceledCtx, cancel := context.WithCancel(ctx)
-		cancel()
-
-		meta := model.FileMetadata{
-			FileName:   "test.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		_, err := extractor.Extract(canceledCtx, strings.NewReader("Account number,Symbol\n"), meta)
-		if err == nil {
-			t.Error("expected error with cancelled context")
-		}
-	})
-
-	t.Run("empty stream", func(t *testing.T) {
-		meta := model.FileMetadata{
-			FileName:   "empty.csv",
-			AccountID:  "acc-1",
-			IngestedAt: now,
-		}
-		batch, err := extractor.Extract(ctx, strings.NewReader(""), meta)
-		if err != nil {
-			t.Fatalf("unexpected error on empty stream: %v", err)
-		}
-		if batch.RecordCount != 0 {
-			t.Errorf("expected 0 records for empty stream, got %d", batch.RecordCount)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			batch, err := extractor.Extract(tc.ctx, tc.reader, tc.meta)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.name)
+				}
+				if tc.expectedIs != nil && !errors.Is(err, tc.expectedIs) {
+					t.Errorf("expected errors.Is(err, %v), got %v", tc.expectedIs, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.name, err)
+			}
+			if batch.RecordCount != tc.wantRecords {
+				t.Errorf("expected %d records, got %d", tc.wantRecords, batch.RecordCount)
+			}
+		})
+	}
 }
 
 func TestFidelityExtractor_RejectArbitraryCSV(t *testing.T) {
@@ -258,8 +270,14 @@ Account Total,,,,,,$8475.00,
 	}
 }
 
+type cashNormalizationTestCase struct {
+	name         string
+	csvRow       string
+	expectKept   bool
+	expectSymbol string
+}
+
 func TestFidelityExtractor_CashSymbolNormalization(t *testing.T) {
-	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
 		FileName:   "cash_normalization.csv",
@@ -268,12 +286,7 @@ func TestFidelityExtractor_CashSymbolNormalization(t *testing.T) {
 		IngestedAt: now,
 	}
 
-	tests := []struct {
-		name         string
-		csvRow       string
-		expectKept   bool
-		expectSymbol string
-	}{
+	tests := []cashNormalizationTestCase{
 		{
 			name:         "asterisks with empty description normalized to CASH",
 			csvRow:       "FID-1,Taxable,**,,0.00,0.00,$250.00,$250.00",
@@ -319,36 +332,41 @@ func TestFidelityExtractor_CashSymbolNormalization(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			csvData := withFooter(
-				"Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\n" +
-					tc.csvRow + "\n",
-			)
-
-			extractor := fidelity.NewExtractor()
-			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
-			if err != nil {
-				t.Fatalf("unexpected Extract error: %v", err)
-			}
-
-			positions, err := batch.AsFidelityPositions()
-			if err != nil {
-				t.Fatalf("failed to cast payload: %v", err)
-			}
-
-			if !tc.expectKept {
-				if len(positions) != 0 {
-					t.Fatalf("expected 0 positions, got %d", len(positions))
-				}
-				return
-			}
-
-			if len(positions) != 1 {
-				t.Fatalf("expected 1 position, got %d", len(positions))
-			}
-			if positions[0].Symbol != tc.expectSymbol {
-				t.Errorf("expected symbol %q, got %q", tc.expectSymbol, positions[0].Symbol)
-			}
+			runCashNormalizationCase(t, meta, tc)
 		})
+	}
+}
+
+func runCashNormalizationCase(t *testing.T, meta model.FileMetadata, tc cashNormalizationTestCase) {
+	t.Helper()
+	csvData := withFooter(
+		"Account number,Account name,Symbol,Description,Quantity,Last price,Current value,Cost basis total\n" +
+			tc.csvRow + "\n",
+	)
+
+	extractor := fidelity.NewExtractor()
+	batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast payload: %v", err)
+	}
+
+	if !tc.expectKept {
+		if len(positions) != 0 {
+			t.Fatalf("expected 0 positions, got %d", len(positions))
+		}
+		return
+	}
+
+	if len(positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(positions))
+	}
+	if positions[0].Symbol != tc.expectSymbol {
+		t.Errorf("expected symbol %q, got %q", tc.expectSymbol, positions[0].Symbol)
 	}
 }
 
@@ -971,7 +989,6 @@ func TestFidelityExtractor_LeadingBlankLines(t *testing.T) {
 }
 
 func TestParseDateDownloaded_LegacyParity(t *testing.T) {
-	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
 	meta := model.FileMetadata{
 		FileName:   "date_parity.csv",
@@ -1086,26 +1103,37 @@ func TestParseDateDownloaded_LegacyParity(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			csvData := "Account number,Symbol,Current value\nFID-DATE,AAPL,$1500.00\n" + tc.footerRow + "\n"
-			batch, err := extractor.Extract(ctx, strings.NewReader(csvData), meta)
-			if err != nil {
-				t.Fatalf("unexpected Extract error: %v", err)
-			}
-			positions, err := batch.AsFidelityPositions()
-			if err != nil {
-				t.Fatalf("failed to cast positions: %v", err)
-			}
-			if len(positions) != 1 {
-				t.Fatalf("expected 1 position, got %d", len(positions))
-			}
-			got := positions[0].AsOfDate
-			if !got.Equal(tc.expectedUTC) {
-				t.Errorf("expected AsOfDate %v, got %v", tc.expectedUTC, got)
-			}
-			if got.Location() != time.UTC {
-				t.Errorf("expected AsOfDate location UTC, got %v", got.Location())
-			}
+			assertExtractedFooterDate(t, extractor, meta, tc.footerRow, tc.expectedUTC)
 		})
+	}
+}
+
+func assertExtractedFooterDate(
+	t *testing.T,
+	extractor port.Extractor,
+	meta model.FileMetadata,
+	footerRow string,
+	expectedUTC time.Time,
+) {
+	t.Helper()
+	csvData := "Account number,Symbol,Current value\nFID-DATE,AAPL,$1500.00\n" + footerRow + "\n"
+	batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("unexpected Extract error: %v", err)
+	}
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast positions: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(positions))
+	}
+	got := positions[0].AsOfDate
+	if !got.Equal(expectedUTC) {
+		t.Errorf("expected AsOfDate %v, got %v", expectedUTC, got)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("expected AsOfDate location UTC, got %v", got.Location())
 	}
 }
 
