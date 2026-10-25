@@ -140,6 +140,8 @@ func newRepository(db database) *Repository {
 	}
 }
 
+// timeNow returns the current timestamp using the injected clock function r.now, falling back
+// to time.Now if unconfigured. This enables deterministic elapsed duration calculations in unit tests.
 func (r *Repository) timeNow() time.Time {
 	if r != nil && r.now != nil {
 		return r.now()
@@ -167,6 +169,9 @@ type collectionIndexes struct {
 	indexes    []indexSpec
 }
 
+// indexCatalog defines the deterministic legacy index catalog for datalake collections.
+// Invariant (Decision D1): transactions_synthetic has zero registered index specifications
+// to avoid IndexOptionsConflict on live Atlas clusters and preserve legacy parity.
 func indexCatalog() []collectionIndexes {
 	return []collectionIndexes{
 		{collection: dataSyncCollection, indexes: dataSyncIndexes()},

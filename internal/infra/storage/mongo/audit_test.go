@@ -18,20 +18,21 @@ import (
 )
 
 type fakeCollection struct {
-	name            string
-	db              *fakeDatabase
-	mu              sync.Mutex
-	insertedDocs    []any
-	createdIndex    [][]mongodrv.IndexModel
-	insertOneErr    error
-	createIdxErr    error
-	failIdxCount    int
-	idxCalls        int32
-	bulkWriteModels []mongodrv.WriteModel
-	bulkWriteOpts   []*options.BulkWriteOptions
-	bulkWriteResult *mongodrv.BulkWriteResult
-	bulkWriteErr    error
-	bulkCalls       int32
+	name                string
+	db                  *fakeDatabase
+	mu                  sync.Mutex
+	insertedDocs        []any
+	createdIndex        [][]mongodrv.IndexModel
+	insertOneErr        error
+	createIdxErr        error
+	failIdxCount        int
+	idxCalls            int32
+	bulkWriteModels     []mongodrv.WriteModel
+	bulkWriteOpts       []*options.BulkWriteOptions
+	bulkWriteResult     *mongodrv.BulkWriteResult
+	bulkWriteErr        error
+	bulkCalls           int32
+	returnNilBulkResult bool
 }
 
 func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error) {
@@ -57,6 +58,9 @@ func (f *fakeCollection) BulkWrite(
 	if f.bulkWriteErr != nil {
 		return f.bulkWriteResult, f.bulkWriteErr
 	}
+	if f.returnNilBulkResult {
+		return nil, nil //nolint:nilnil // Test stub explicitly simulates driver returning (nil, nil)
+	}
 	if f.bulkWriteResult != nil {
 		return f.bulkWriteResult, nil
 	}
@@ -80,6 +84,25 @@ func (f *fakeCollection) CreateIndexes(_ context.Context, models []mongodrv.Inde
 	}
 	f.createdIndex = append(f.createdIndex, models)
 	return nil
+}
+
+// BulkCallCount returns the atomic count of BulkWrite invocations.
+func (f *fakeCollection) BulkCallCount() int32 {
+	return atomic.LoadInt32(&f.bulkCalls)
+}
+
+// IdxCallCount returns the atomic count of CreateIndexes invocations.
+func (f *fakeCollection) IdxCallCount() int32 {
+	return atomic.LoadInt32(&f.idxCalls)
+}
+
+// Models returns a thread-safe snapshot of all write models submitted to BulkWrite.
+func (f *fakeCollection) Models() []mongodrv.WriteModel {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]mongodrv.WriteModel, len(f.bulkWriteModels))
+	copy(out, f.bulkWriteModels)
+	return out
 }
 
 type fakeDatabase struct {
@@ -282,8 +305,8 @@ func TestEnsureIndexes_RetriesAfterFailure(t *testing.T) {
 		t.Fatalf("expected success on third call, got %v", err)
 	}
 	const expectedDriverCalls = 2
-	if atomic.LoadInt32(&coll.idxCalls) != expectedDriverCalls {
-		t.Fatalf("expected %d driver calls, got %d", expectedDriverCalls, atomic.LoadInt32(&coll.idxCalls))
+	if coll.IdxCallCount() != expectedDriverCalls {
+		t.Fatalf("expected %d driver calls, got %d", expectedDriverCalls, coll.IdxCallCount())
 	}
 }
 
@@ -304,8 +327,8 @@ func TestEnsureIndexes_ConcurrentCallsCreateOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	if atomic.LoadInt32(&fakeDB.dataSyncColl().idxCalls) != 1 {
-		t.Fatalf("expected 1 CreateIndexes call, got %d", atomic.LoadInt32(&fakeDB.dataSyncColl().idxCalls))
+	if fakeDB.dataSyncColl().IdxCallCount() != 1 {
+		t.Fatalf("expected 1 CreateIndexes call, got %d", fakeDB.dataSyncColl().IdxCallCount())
 	}
 }
 

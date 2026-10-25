@@ -25,6 +25,8 @@ func newValidTestBatch(dest model.Destination, count int) *model.IngestionBatch 
 	var payload any
 	switch dest {
 	case model.DestChaseChecking, model.DestSynthetic:
+		// Note (RF-10): model.DestChaseCreditCard evaluates to the same string constant ("transactions_chase")
+		// as DestChaseChecking and is explicitly covered here for credit card batch generation.
 		txs := make([]model.ChaseTransaction, count)
 		for i := range count {
 			txs[i] = model.ChaseTransaction{
@@ -105,6 +107,31 @@ func TestSaveBatch_NilAndInvalidBatch(t *testing.T) {
 			},
 			expectedErr: model.ErrMissingIngestedAt,
 		},
+		{
+			name: "negative record count",
+			batch: &model.IngestionBatch{
+				Destination: model.DestChaseChecking,
+				AccountID:   "a",
+				SourceFile:  "f.csv",
+				FileHash:    "h",
+				IngestedAt:  validNow,
+				RecordCount: -1,
+			},
+			expectedErr: model.ErrNegativeRecordCount,
+		},
+		{
+			name: "positive record count with nil payload",
+			batch: &model.IngestionBatch{
+				Destination: model.DestChaseChecking,
+				AccountID:   "a",
+				SourceFile:  "f.csv",
+				FileHash:    "h",
+				IngestedAt:  validNow,
+				RecordCount: 5,
+				Payload:     nil,
+			},
+			expectedErr: model.ErrNilPayload,
+		},
 	}
 
 	for _, tc := range tests {
@@ -114,8 +141,8 @@ func TestSaveBatch_NilAndInvalidBatch(t *testing.T) {
 				t.Fatalf("expected (nil, %v), got (%v, %v)", tc.expectedErr, log, err)
 			}
 			coll := fakeDB.collectionColl(chaseCollection)
-			if coll.bulkCalls != 0 || coll.idxCalls != 0 {
-				t.Fatalf("expected zero calls, got bulk=%d idx=%d", coll.bulkCalls, coll.idxCalls)
+			if coll.BulkCallCount() != 0 || coll.IdxCallCount() != 0 {
+				t.Fatalf("expected zero calls, got bulk=%d idx=%d", coll.BulkCallCount(), coll.IdxCallCount())
 			}
 		})
 	}
@@ -133,8 +160,8 @@ func TestSaveBatch_EmptyBatchSkipsWrite(t *testing.T) {
 	assertSyncLog(t, log, model.SyncStatusSuccess, chaseCollection, 0, 0, 0)
 
 	coll := fakeDB.collectionColl(chaseCollection)
-	if coll.bulkCalls != 0 || coll.idxCalls != 0 {
-		t.Fatalf("expected no driver calls on empty batch, got bulk=%d idx=%d", coll.bulkCalls, coll.idxCalls)
+	if coll.BulkCallCount() != 0 || coll.IdxCallCount() != 0 {
+		t.Fatalf("expected no driver calls on empty batch, got bulk=%d idx=%d", coll.BulkCallCount(), coll.IdxCallCount())
 	}
 }
 
@@ -167,15 +194,28 @@ func TestSaveBatch_UnorderedUpsertModels(t *testing.T) {
 	if len(coll.bulkWriteOpts) == 0 || coll.bulkWriteOpts[0].Ordered == nil || *coll.bulkWriteOpts[0].Ordered != false {
 		t.Fatal("expected BulkWrite Ordered option false")
 	}
-	if len(coll.bulkWriteModels) != 2 {
-		t.Fatalf("expected 2 write models, got %d", len(coll.bulkWriteModels))
+	models := coll.Models()
+	if len(models) != 2 {
+		t.Fatalf("expected 2 write models, got %d", len(models))
 	}
-	for i, m := range coll.bulkWriteModels {
+	for i, m := range models {
 		up, ok := m.(*mongodrv.UpdateOneModel)
 		if !ok || up.Upsert == nil || !*up.Upsert {
 			t.Fatalf("model %d expected *UpdateOneModel with Upsert=true, got %v", i, m)
 		}
 	}
+}
+
+func TestSaveBatch_NilBulkWriteResultHandled(t *testing.T) {
+	repo, fakeDB := setupTestRepo()
+	coll := fakeDB.collectionColl(chaseCollection)
+	coll.returnNilBulkResult = true
+
+	log, err := repo.SaveBatch(context.Background(), newValidTestBatch(model.DestChaseChecking, 2))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertSyncLog(t, log, model.SyncStatusSuccess, chaseCollection, 2, 0, 0)
 }
 
 func TestSaveBatch_RoutesAllDestinations(t *testing.T) {
@@ -198,8 +238,14 @@ func TestSaveBatch_RoutesAllDestinations(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			assertSyncLog(t, log, model.SyncStatusSuccess, tc.expectedColl, 1, 1, 0)
-			if coll := fakeDB.collectionColl(tc.expectedColl); coll.bulkCalls != 1 {
-				t.Errorf("expected 1 bulk call on %s, got %d", tc.expectedColl, coll.bulkCalls)
+			coll := fakeDB.collectionColl(tc.expectedColl)
+			if coll.BulkCallCount() != 1 {
+				t.Errorf("expected 1 bulk call on %s, got %d", tc.expectedColl, coll.BulkCallCount())
+			}
+			if tc.dest == model.DestSynthetic {
+				if coll.IdxCallCount() != 0 {
+					t.Errorf("expected 0 index calls for synthetic collection (Decision D1), got %d", coll.IdxCallCount())
+				}
 			}
 		})
 	}
@@ -215,7 +261,7 @@ func TestSaveBatch_PayloadMismatchReturnsFailedLog(t *testing.T) {
 		t.Fatalf("expected ErrPayloadTypeMismatch, got %v", err)
 	}
 	assertSyncLog(t, log, model.SyncStatusFailed, chaseCollection, 1, 0, 0)
-	if fakeDB.collectionColl(chaseCollection).bulkCalls != 0 {
+	if fakeDB.collectionColl(chaseCollection).BulkCallCount() != 0 {
 		t.Error("expected no bulk calls")
 	}
 }
@@ -230,7 +276,7 @@ func TestSaveBatch_FidelityZeroAsOfDate(t *testing.T) {
 		t.Fatalf("expected ErrMissingAsOfDate, got %v", err)
 	}
 	assertSyncLog(t, log, model.SyncStatusFailed, fidelityCollection, 1, 0, 0)
-	if fakeDB.collectionColl(fidelityCollection).bulkCalls != 0 {
+	if fakeDB.collectionColl(fidelityCollection).BulkCallCount() != 0 {
 		t.Error("expected no bulk calls")
 	}
 }
@@ -263,6 +309,22 @@ func TestSaveBatch_PartialResultDiscarded(t *testing.T) {
 	assertSyncLog(t, log, model.SyncStatusFailed, chaseCollection, 7, 0, 0)
 }
 
+func TestSaveBatch_IndexEnsureTransientError(t *testing.T) {
+	repo, fakeDB := setupTestRepo()
+	coll := fakeDB.collectionColl(chaseCollection)
+	coll.failIdxCount = 1
+	coll.createIdxErr = mongodrv.CommandError{Labels: []string{"NetworkError"}}
+
+	log, err := repo.SaveBatch(context.Background(), newValidTestBatch(model.DestChaseChecking, 1))
+	if err == nil || !errors.Is(err, ErrTransient) {
+		t.Fatalf("expected ErrTransient, got %v", err)
+	}
+	assertSyncLog(t, log, model.SyncStatusFailed, chaseCollection, 1, 0, 0)
+	if coll.BulkCallCount() != 0 {
+		t.Fatalf("expected 0 bulk calls when index ensure fails, got %d", coll.BulkCallCount())
+	}
+}
+
 func TestSaveBatch_IndexEnsureFailureThenRetry(t *testing.T) {
 	repo, fakeDB := setupTestRepo()
 	coll := fakeDB.collectionColl(chaseCollection)
@@ -277,8 +339,8 @@ func TestSaveBatch_IndexEnsureFailureThenRetry(t *testing.T) {
 		t.Fatal("expected error on first attempt, got nil")
 	}
 	assertSyncLog(t, log1, model.SyncStatusFailed, chaseCollection, 1, 0, 0)
-	if coll.bulkCalls != 0 {
-		t.Fatalf("expected no bulk write on index failure, got %d", coll.bulkCalls)
+	if coll.BulkCallCount() != 0 {
+		t.Fatalf("expected no bulk write on index failure, got %d", coll.BulkCallCount())
 	}
 
 	// Second attempt succeeds and retries index creation.
@@ -287,23 +349,50 @@ func TestSaveBatch_IndexEnsureFailureThenRetry(t *testing.T) {
 		t.Fatalf("expected second attempt success, got %v", err2)
 	}
 	assertSyncLog(t, log2, model.SyncStatusSuccess, chaseCollection, 1, 1, 0)
-	if coll.idxCalls != 2 || coll.bulkCalls != 1 {
-		t.Fatalf("expected 2 index attempts and 1 bulk write, got idx=%d bulk=%d", coll.idxCalls, coll.bulkCalls)
+	if coll.IdxCallCount() != 2 || coll.BulkCallCount() != 1 {
+		t.Fatalf("expected 2 index attempts and 1 bulk write, got idx=%d bulk=%d", coll.IdxCallCount(), coll.BulkCallCount())
 	}
 }
 
-func TestSaveBatch_ClassifiesErrors(t *testing.T) {
+func TestClassify_TableDriven(t *testing.T) {
+	bwePtr := &mongodrv.BulkWriteException{
+		WriteConcernError: &mongodrv.WriteConcernError{
+			Code:    50,
+			Message: "exceeded time limit",
+		},
+	}
+	genericErr := errors.New("generic")
+
 	tests := []struct {
 		name        string
 		inputErr    error
+		origErr     error
 		expectTrans bool
 		expectDup   bool
 	}{
 		{name: "nil error", inputErr: nil},
-		{name: "deadline exceeded", inputErr: context.DeadlineExceeded, expectTrans: true},
+		{name: "deadline exceeded", inputErr: context.DeadlineExceeded, origErr: context.DeadlineExceeded, expectTrans: true},
 		{name: "network labeled", inputErr: mongodrv.CommandError{Labels: []string{"NetworkError"}}, expectTrans: true},
 		{name: "duplicate key 11000", inputErr: mongodrv.CommandError{Code: 11000}, expectDup: true},
-		{name: "generic", inputErr: errors.New("generic")},
+		{name: "already classified transient", inputErr: ErrTransient, origErr: ErrTransient, expectTrans: true},
+		{name: "already classified duplicate key", inputErr: ErrDuplicateKey, origErr: ErrDuplicateKey, expectDup: true},
+		{
+			name: "bulk write exception with write concern timeout",
+			inputErr: mongodrv.BulkWriteException{
+				WriteConcernError: &mongodrv.WriteConcernError{
+					Code:    50,
+					Message: "exceeded time limit",
+				},
+			},
+			expectTrans: true,
+		},
+		{
+			name:        "bulk write exception pointer with write concern timeout",
+			inputErr:    bwePtr,
+			origErr:     bwePtr,
+			expectTrans: true,
+		},
+		{name: "generic", inputErr: genericErr, origErr: genericErr},
 	}
 
 	for _, tc := range tests {
@@ -321,9 +410,14 @@ func TestSaveBatch_ClassifiesErrors(t *testing.T) {
 			if errors.Is(classified, ErrDuplicateKey) != tc.expectDup {
 				t.Errorf("expected ErrDuplicateKey=%v, got %v", tc.expectDup, errors.Is(classified, ErrDuplicateKey))
 			}
+			if tc.origErr != nil && !errors.Is(classified, tc.origErr) {
+				t.Errorf("expected classified error to unwrap to root cause: %v", tc.origErr)
+			}
 		})
 	}
+}
 
+func TestSaveBatch_BulkWriteErrorClassification(t *testing.T) {
 	t.Run("SaveBatch wraps BulkWrite transient error", func(t *testing.T) {
 		repo, fakeDB := setupTestRepo()
 		fakeDB.collectionColl(chaseCollection).bulkWriteErr = mongodrv.CommandError{Labels: []string{"NetworkError"}}
@@ -339,6 +433,19 @@ func TestSaveBatch_ClassifiesErrors(t *testing.T) {
 			t.Fatalf("expected ErrDuplicateKey, got %v", err)
 		}
 	})
+
+	t.Run("SaveBatch wraps BulkWrite transient write concern error", func(t *testing.T) {
+		repo, fakeDB := setupTestRepo()
+		fakeDB.collectionColl(chaseCollection).bulkWriteErr = &mongodrv.BulkWriteException{
+			WriteConcernError: &mongodrv.WriteConcernError{
+				Code:    50,
+				Message: "write concern timeout",
+			},
+		}
+		if _, err := repo.SaveBatch(context.Background(), newValidTestBatch(model.DestChaseChecking, 1)); !errors.Is(err, ErrTransient) {
+			t.Fatalf("expected ErrTransient, got %v", err)
+		}
+	})
 }
 
 func TestSaveBatch_CancelledContext(t *testing.T) {
@@ -350,8 +457,9 @@ func TestSaveBatch_CancelledContext(t *testing.T) {
 	if log != nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected (nil, context.Canceled), got (%v, %v)", log, err)
 	}
-	if coll := fakeDB.collectionColl(chaseCollection); coll.bulkCalls != 0 || coll.idxCalls != 0 {
-		t.Fatalf("expected zero driver calls, got bulk=%d idx=%d", coll.bulkCalls, coll.idxCalls)
+	coll := fakeDB.collectionColl(chaseCollection)
+	if coll.BulkCallCount() != 0 || coll.IdxCallCount() != 0 {
+		t.Fatalf("expected zero driver calls, got bulk=%d idx=%d", coll.BulkCallCount(), coll.IdxCallCount())
 	}
 }
 
