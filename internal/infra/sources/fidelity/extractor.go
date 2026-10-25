@@ -173,11 +173,12 @@ func parsePositions(
 			return nil, err
 		}
 
-		isFooter, footerErr := consumeFooterRow(row, lineNum, &asOfDate)
+		newAsOf, isFooter, footerErr := consumeFooterRow(row, asOfDate)
 		if footerErr != nil {
-			return nil, footerErr
+			return nil, fmt.Errorf("row %d date downloaded footer: %w", lineNum, footerErr)
 		}
 		if isFooter {
+			asOfDate = newAsOf
 			continue
 		}
 
@@ -193,19 +194,19 @@ func parsePositions(
 	return finalizePositions(positions, asOfDate)
 }
 
-func consumeFooterRow(row []string, lineNum int, asOfDate *time.Time) (bool, error) {
+func consumeFooterRow(row []string, currentAsOf time.Time) (time.Time, bool, error) {
 	footerField, isFooter := matchDateDownloadedField(row)
 	if !isFooter {
-		return false, nil
+		return currentAsOf, false, nil
 	}
-	if asOfDate.IsZero() {
+	if currentAsOf.IsZero() {
 		parsedDate, dateErr := parseDateDownloaded(footerField)
 		if dateErr != nil {
-			return true, fmt.Errorf("row %d date downloaded footer: %w", lineNum, dateErr)
+			return time.Time{}, true, dateErr
 		}
-		*asOfDate = parsedDate
+		return parsedDate, true, nil
 	}
-	return true, nil
+	return currentAsOf, true, nil
 }
 
 func finalizePositions(positions []model.FidelityPosition, asOfDate time.Time) ([]model.FidelityPosition, error) {

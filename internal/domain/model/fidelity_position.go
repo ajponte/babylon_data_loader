@@ -98,7 +98,7 @@ func (p *FidelityPosition) validateCoreMetrics() error {
 }
 
 func (p *FidelityPosition) validatePerformanceMetrics() error {
-	metrics := [...]float64{
+	if !allFinite(
 		p.LastPriceChange,
 		p.TodaysGainLossDollar,
 		p.TodaysGainLossPct,
@@ -106,13 +106,19 @@ func (p *FidelityPosition) validatePerformanceMetrics() error {
 		p.TotalGainLossPct,
 		p.PercentOfAccount,
 		p.AverageCostBasis,
-	}
-	for _, v := range metrics {
-		if !isFinite(v) {
-			return ErrInvalidPerformanceMetric
-		}
+	) {
+		return ErrInvalidPerformanceMetric
 	}
 	return nil
+}
+
+func allFinite(vals ...float64) bool {
+	for _, v := range vals {
+		if !isFinite(v) {
+			return false
+		}
+	}
+	return true
 }
 
 func isFinite(v float64) bool {
