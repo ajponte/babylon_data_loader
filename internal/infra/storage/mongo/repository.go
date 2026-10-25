@@ -13,7 +13,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	mongodrv "go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"babylon/dataloader/internal/domain/port"
 )
+
+var _ port.Repository = (*Repository)(nil)
 
 const (
 	// DefaultDatabase defines the default datalake database name.
@@ -50,6 +54,11 @@ type database interface {
 
 type collection interface {
 	InsertOne(ctx context.Context, doc any, opts ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error)
+	BulkWrite(
+		ctx context.Context,
+		models []mongodrv.WriteModel,
+		opts ...*options.BulkWriteOptions,
+	) (*mongodrv.BulkWriteResult, error)
 	CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error
 }
 
@@ -73,6 +82,14 @@ func (c *realCollection) InsertOne(
 	return c.coll.InsertOne(ctx, doc, opts...)
 }
 
+func (c *realCollection) BulkWrite(
+	ctx context.Context,
+	models []mongodrv.WriteModel,
+	opts ...*options.BulkWriteOptions,
+) (*mongodrv.BulkWriteResult, error) {
+	return c.coll.BulkWrite(ctx, models, opts...)
+}
+
 func (c *realCollection) CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error {
 	_, err := c.coll.Indexes().CreateMany(ctx, models)
 	return err
@@ -84,6 +101,7 @@ type Repository struct {
 	db      database
 	mu      sync.Mutex
 	ensured map[string]bool
+	now     func() time.Time
 }
 
 // NewRepository connects to MongoDB with the given configuration.
@@ -110,11 +128,25 @@ func NewRepository(ctx context.Context, cfg Config) (*Repository, error) {
 		client:  client,
 		db:      &realDatabase{db: client.Database(cfg.Database)},
 		ensured: make(map[string]bool),
+		now:     time.Now,
 	}, nil
 }
 
 func newRepository(db database) *Repository {
-	return &Repository{db: db, ensured: make(map[string]bool)}
+	return &Repository{
+		db:      db,
+		ensured: make(map[string]bool),
+		now:     time.Now,
+	}
+}
+
+// timeNow returns the current timestamp using the injected clock function r.now, falling back
+// to time.Now if unconfigured. This enables deterministic elapsed duration calculations in unit tests.
+func (r *Repository) timeNow() time.Time {
+	if r != nil && r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 // Close disconnects the MongoDB client. It is nil-safe.
@@ -137,6 +169,9 @@ type collectionIndexes struct {
 	indexes    []indexSpec
 }
 
+// indexCatalog defines the deterministic legacy index catalog for datalake collections.
+// Invariant (Decision D1): transactions_synthetic has zero registered index specifications
+// to avoid IndexOptionsConflict on live Atlas clusters and preserve legacy parity.
 func indexCatalog() []collectionIndexes {
 	return []collectionIndexes{
 		{collection: dataSyncCollection, indexes: dataSyncIndexes()},
@@ -156,6 +191,23 @@ func toIndexModel(spec indexSpec) mongodrv.IndexModel {
 	return mongodrv.IndexModel{Keys: spec.keys, Options: opts}
 }
 
+func indexSpecsFor(coll string) []indexSpec {
+	for _, ci := range indexCatalog() {
+		if ci.collection == coll {
+			return ci.indexes
+		}
+	}
+	return nil
+}
+
+func toIndexModels(specs []indexSpec) []mongodrv.IndexModel {
+	models := make([]mongodrv.IndexModel, len(specs))
+	for i, spec := range specs {
+		models[i] = toIndexModel(spec)
+	}
+	return models
+}
+
 func (r *Repository) ensureIndexes(ctx context.Context, coll string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -167,22 +219,12 @@ func (r *Repository) ensureIndexes(ctx context.Context, coll string) error {
 		return nil
 	}
 
-	var specs []indexSpec
-	for _, ci := range indexCatalog() {
-		if ci.collection == coll {
-			specs = ci.indexes
-			break
-		}
-	}
+	specs := indexSpecsFor(coll)
 	if len(specs) == 0 {
 		return nil
 	}
 
-	models := make([]mongodrv.IndexModel, len(specs))
-	for i, spec := range specs {
-		models[i] = toIndexModel(spec)
-	}
-
+	models := toIndexModels(specs)
 	if err := r.db.Collection(coll).CreateIndexes(ctx, models); err != nil {
 		return fmt.Errorf("mongo: create indexes on %s: %w", coll, err)
 	}

@@ -276,14 +276,36 @@ Authoritative implementation reference: [`internal/infra/storage/mongo/indexes.g
 ## 5. Storage Adapter Contracts
 
 ### 5.1 `SaveBatch(ctx, batch)` (`port.Repository`)
-1. Context canceled -> return `(nil, ctx.Err())`.
-2. Invalid batch (`batch.Validate() != nil`) -> return `(nil, err)`.
-3. Routing/planning failure (zero `AsOfDate`, payload mismatch) -> return `(failedSyncLog, wrappedErr)`.
-4. Empty batch (`RecordCount == 0`) -> return `(successSyncLog{0,0,0}, nil)` without driver calls.
-5. Ensures indexes lazily before first collection write.
-6. Executes unordered bulk upsert (`SetOrdered(false)`).
-7. Driver failure -> return `(failedSyncLog, classify(err))`; partial counts discarded.
-8. Success -> return `(successSyncLog, nil)`. Returned logs always satisfy `model.SyncLog.Validate()`.
+
+Authoritative implementation reference: [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go).
+
+Persists an immutable domain `*model.IngestionBatch` to the routed MongoDB collection using an unordered bulk upsert operation. The adapter verifies compile-time interface adherence via `var _ port.Repository = (*Repository)(nil)` and enforces strict isolation, deterministic error classification, and failure contract guarantees:
+
+1. **Context Cancellation Short-Circuit**: Evaluates `ctx.Err()` immediately prior to any allocation or driver call; returns `(nil, ctx.Err())` with zero side effects (`TestSaveBatch_CancelledContext`).
+2. **Domain Batch Validation**: Validates incoming batch via `batch.Validate()`. If the batch is nil or structurally invalid (e.g., missing `SourceFile`, `FileHash`, `AccountID`, or zero `IngestedAt`), returns `(nil, err)`. Under Decision D5, a valid `*model.SyncLog` cannot be constructed without essential batch metadata, so no failed log is generated (`TestSaveBatch_NilAndInvalidBatch`).
+3. **Destination Collection Routing**: Resolves the target MongoDB collection via `collectionFor(batch.Destination)`. Unknown destinations return `(nil, model.ErrInvalidDestination)`. Both Chase checking and credit card route to `"transactions_chase"`, synthetic routes to `"transactions_synthetic"`, and Fidelity positions route to `"positions_fidelity"` (`TestSaveBatch_RoutesAllDestinations`).
+4. **Empty Batch Optimization (Zero Records)**: If `batch.RecordCount == 0`, immediately returns `(model.NewSuccessSyncLog(batch.SourceFile, batch.FileHash, coll, 0, 0, 0, now, dur), nil)` without ensuring indexes or dispatching driver calls, matching legacy parity (`TestSaveBatch_EmptyBatchSkipsWrite`).
+5. **Write Plan Construction & Defensive Guards**: Invokes `buildWritePlan(batch)` to produce unordered `mongodrv.UpdateOneModel` write operations with `SetUpsert(true)` and dotted `$set` documents. If planning fails (e.g., payload type mismatch `model.ErrPayloadTypeMismatch` or missing Fidelity `AsOfDate` `model.ErrMissingAsOfDate`), `SaveBatch` satisfies Decision D5 by constructing a failed audit log via `r.failedLog(...)` with `0` upserted and matched counts, returning `(failedSyncLog, fmt.Errorf("mongo: save batch to %s: %w", coll, planErr))` (`TestSaveBatch_PayloadMismatchReturnsFailedLog`, `TestSaveBatch_FidelityZeroAsOfDate`).
+6. **Lazy, Thread-Safe Index Ensuring**: Lazily invokes `r.ensureIndexes(ctx, coll)` before executing collection writes. If index creation fails, the collection is not marked ensured, the error is classified via `classify(idxErr)`, and `SaveBatch` returns `(failedSyncLog, fmt.Errorf("mongo: save batch to %s: %w", coll, classify(idxErr)))` per Decision D5 (`TestSaveBatch_IndexEnsureFailureThenRetry`).
+7. **Unordered Bulk Upsert Execution**: Dispatches write models to the driver collection via `BulkWrite(ctx, plan.models, options.BulkWrite().SetOrdered(false))`. Unordered execution allows MongoDB to execute writes in parallel across worker shards without halting on individual key conflicts (`TestSaveBatch_UnorderedUpsertModels`).
+8. **E7 Failure Contract & Partial Count Discard**: If `BulkWrite` returns an error, any partial counts (`UpsertedCount`, `MatchedCount`) in the driver result are strictly discarded per Decision E7. `SaveBatch` constructs a failed audit log with `0` upserted and `0` matched counts, classifies the driver error via `classify(bulkErr)`, and returns `(failedSyncLog, fmt.Errorf("mongo: save batch to %s: %w", coll, classify(bulkErr)))` (`TestSaveBatch_BulkWriteFailureReturnsFailedLog`, `TestSaveBatch_PartialResultDiscarded`).
+9. **Error Classification & Driver Abstraction**: Normalizes MongoDB driver errors into exported package sentinels without leaking driver-specific types through `port.Repository`:
+   - `mongo.ErrDuplicateKey`: Coded MongoDB 11000 duplicate key constraint violations (`mongodrv.IsDuplicateKeyError(err)`).
+   - `mongo.ErrTransient`: Network errors and timeouts (`mongodrv.IsTimeout(err) || mongodrv.IsNetworkError(err)`), signaling to callers that retry is safe.
+   - Sentinel wrapping via `%w: %w` allows callers to verify error categories using standard `errors.Is(err, mongo.ErrTransient)` and `errors.Is(err, mongo.ErrDuplicateKey)` (`TestSaveBatch_ClassifiesErrors`).
+10. **Success Result Construction**: On clean write completion, constructs and returns `(model.NewSuccessSyncLog(batch.SourceFile, batch.FileHash, coll, int64(batch.RecordCount), res.UpsertedCount, res.MatchedCount, now, dur), nil)` (`TestSaveBatch_ChaseSuccessBuildsSyncLog`).
+11. **Timing & Clamped Duration**: Computes execution duration in milliseconds using the repository's clock (`r.timeNow()`). Clamps negative elapsed durations caused by wall clock adjustments to `0` (`r.elapsed()`, `TestRepository_TimeNow`, `TestRepository_Elapsed_NegativeClampedToZero`).
+12. **Audit Separation Invariant**: `SaveBatch` never writes to `dataSync`. In accordance with hexagonal port segregation, `SaveBatch` returns the constructed audit log to the caller/pipeline, which owns persisting it via `LogSync` (with detached context if needed per Decision E5).
+
+| Step | Trigger / Condition | Return Value | Contract Rule |
+| :--- | :--- | :--- | :--- |
+| **Context Check** | `ctx.Err() != nil` | `(nil, ctx.Err())` | Fail fast; zero driver side effects |
+| **Batch Validation** | `batch.Validate() != nil` | `(nil, err)` | D5: Cannot build valid audit log |
+| **Empty Batch** | `batch.RecordCount == 0` | `(successLog{0,0,0}, nil)` | Legacy parity; skips driver write |
+| **Write Plan Failure** | Payload mismatch or missing `asOfDate` | `(failedLog, wrappedErr)` | D5: Failure audit log with routed collection |
+| **Index Ensure Failure** | Driver index creation error | `(failedLog, classify(err))` | D5: Failure audit log; safe retry |
+| **BulkWrite Failure** | Driver bulk write error | `(failedLog, classify(err))` | D5 & E7: Discard partial counts; classify sentinels |
+| **Success** | Bulk write completes cleanly | `(successLog, nil)` | Valid `model.SyncLog` with actual counts |
 
 ### 5.2 `LogSync(ctx, log)` (`port.Repository`)
 
@@ -361,7 +383,7 @@ The datalake object store adapter provides streaming raw statement retrieval and
 | :--- | :--- | :--- | :--- | :--- |
 | **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
 | **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
-| **M2** | Phase 3C / 3E | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, and batch router in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go), [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), and [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go) (`SaveBatch` driver execution scheduled for Phase 3F). | **Complete** | 89.3% statement test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/); legacy index parity, upsert filters equal to unique keys, flattened lineage, and pure batch routing verified. |
+| **M2** | Phase 3C / 3E / 3F | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, batch router, `SaveBatch` driver execution, bulk upsert, and error classification in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go), [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go), and [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go). | **Complete** | 92.1% statement test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/); 14 table-driven tests passing with `-race`, compile-time `var _ port.Repository = (*Repository)(nil)` verified, legacy index parity, upsert filters equal to unique keys, flattened lineage, and pure batch routing verified. |
 | **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go). | **Complete** | 96.2% statement test coverage in [`internal/infra/storage/s3/client_test.go`](../../internal/infra/storage/s3/client_test.go); hermetic S3 API mocks, streaming download, URL-escaping parity, and copy-then-delete ordering verified. |
 | **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
 
@@ -410,5 +432,20 @@ Key verified invariants include:
 - **Dotted `$set` Lineage Preservation**: `TestSetDocument_FlattensSourceLineage` and `TestSetDocument_OmitsS3URIPlaceholder` verify that lineage fields are flattened to dotted paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`) with no top-level `source` object and no empty `source.s3Uri`, preserving historical unmapped lineage in MongoDB Atlas (decision E6).
 - **Restored A1 Fields**: `TestSetDocument_IncludesRestoredA1Fields` verifies that all eight restored 2E fields appear in Fidelity `$set` updates (even when zero), and 2F `transactionDate` is present for credit cards and omitted for checking.
 - **Pure Batch Router & Write Planner**: `TestCollectionFor_AllDestinations`, `TestBuildWritePlan_PayloadMismatch`, `TestBuildWritePlan_SyntheticUsesChaseShape`, `TestBuildWritePlan_UpsertModels`, `TestBuildWritePlan_FidelityMissingAsOfDate`, and `TestBuildWritePlan_EmptyPayload` verify destination mapping without duplicate switch cases, payload type assertion guards, synthetic document routing with Chase shape (decision D4), zero `AsOfDate` sentinel error enforcement (decision D2), and empty batch handling with zero allocations.
+
+### 9.5 Phase 3F Verification & Test Coverage Evidence
+
+Phase 3F implements `SaveBatch` unordered bulk upsert, lazy index ensuring, error classification (`ErrTransient`, `ErrDuplicateKey`), and the D5/E7 failure contracts in [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go). It achieves **92.1% statement test coverage** across `internal/infra/storage/mongo` (`go test -cover -race ./internal/infra/storage/mongo/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
+
+Key verified invariants include:
+- **Compile-Time Port Implementation**: `TestRepository_ImplementsPort` verifies compile-time assignment `var _ port.Repository = (*Repository)(nil)`.
+- **D5 Failure Contract & Audit Log Construction**: `TestSaveBatch_PayloadMismatchReturnsFailedLog`, `TestSaveBatch_FidelityZeroAsOfDate`, `TestSaveBatch_BulkWriteFailureReturnsFailedLog`, and `TestSaveBatch_IndexEnsureFailureThenRetry` verify that once a batch passes initial validation, any planning or driver failure returns `(failedSyncLog, wrappedErr)` satisfying `model.SyncLog.Validate()`.
+- **E7 Partial Result Discard**: `TestSaveBatch_PartialResultDiscarded` proves that when `BulkWrite` returns an error alongside partial counts, the partial counts are discarded and the returned failed `SyncLog` reports exactly `0` upserted and `0` matched records.
+- **Empty Batch Zero-Driver Guarantee**: `TestSaveBatch_EmptyBatchSkipsWrite` confirms that batches with `RecordCount == 0` return a success `SyncLog` with `0` counts without invoking index creation or `BulkWrite`.
+- **Error Classification Sentinels**: `TestSaveBatch_ClassifiesErrors` validates that timeout and network errors wrap `mongo.ErrTransient`, duplicate key violations (code 11000) wrap `mongo.ErrDuplicateKey`, and caller error inspection succeeds via `errors.Is`.
+- **Unordered Execution & Upsert Models**: `TestSaveBatch_UnorderedUpsertModels` validates options `Ordered == false` and exact `UpdateOneModel` construction per batch record.
+- **Clock Invariant & Clamped Duration**: `TestRepository_TimeNow` and `TestRepository_Elapsed_NegativeClampedToZero` verify that timestamps are sourced from the repository's clock and negative elapsed times are clamped to `0`.
+- **Context Cancellation Short-Circuit**: `TestSaveBatch_CancelledContext` validates that pre-cancelled contexts abort execution immediately without side effects.
+
 
 
