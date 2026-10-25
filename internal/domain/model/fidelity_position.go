@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"math"
+	"time"
 )
 
 var (
@@ -20,6 +21,8 @@ var (
 	ErrInvalidCurrentValue = errors.New("current value must be a valid finite number")
 	// ErrInvalidCostBasis indicates that the cost basis is NaN or infinite.
 	ErrInvalidCostBasis = errors.New("cost basis must be a valid finite number")
+	// ErrMissingAsOfDate indicates that the portfolio snapshot date (asOfDate) is missing.
+	ErrMissingAsOfDate = errors.New("fidelity snapshot date (asOfDate) is required")
 )
 
 // FidelityPosition represents a normalized position holding from Fidelity statements.
@@ -33,6 +36,7 @@ type FidelityPosition struct {
 	LastPrice    float64
 	CurrentValue float64
 	CostBasis    float64
+	AsOfDate     time.Time // UTC instant parsed from the "Date downloaded" footer.
 }
 
 // Validate validates the essential fields of a FidelityPosition.

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
+	_ "time/tzdata" // Embed timezone database to match legacy datalake/model/fidelity_parser.go:8.
 
 	"babylon/dataloader/internal/domain/model"
 	"babylon/dataloader/internal/domain/port"
@@ -25,6 +27,9 @@ var (
 const (
 	defaultPositionsCapacity = 64
 	utf8BOMString            = "\xef\xbb\xbf"
+	dateDownloadedPrefix     = "Date downloaded "
+	dateTrimCutset           = "\", \t\r\n"
+	edtOffsetSeconds         = -4 * 3600 // Eastern Daylight Time UTC offset in seconds (satisfies mnd linter).
 )
 
 // Extractor implements port.Extractor for Fidelity portfolio positions exports.
@@ -153,6 +158,7 @@ func parsePositions(
 ) ([]model.FidelityPosition, error) {
 	positions := make([]model.FidelityPosition, 0, defaultPositionsCapacity)
 	parser := newRowParser(colIndex, meta)
+	var asOfDate time.Time
 
 	for {
 		row, lineNum, err := readNextRow(ctx, reader)
@@ -161,6 +167,17 @@ func parsePositions(
 				break
 			}
 			return nil, err
+		}
+
+		if footerField, isFooter := matchDateDownloadedField(row); isFooter {
+			if asOfDate.IsZero() {
+				parsedDate, dateErr := parseDateDownloaded(footerField)
+				if dateErr != nil {
+					return nil, fmt.Errorf("row %d date downloaded footer: %w", lineNum, dateErr)
+				}
+				asOfDate = parsedDate
+			}
+			continue
 		}
 
 		pos, ok, parseErr := parser.parse(row, lineNum)
@@ -172,7 +189,73 @@ func parsePositions(
 		}
 	}
 
+	return finalizePositions(positions, asOfDate)
+}
+
+func finalizePositions(positions []model.FidelityPosition, asOfDate time.Time) ([]model.FidelityPosition, error) {
+	if len(positions) == 0 {
+		return positions, nil
+	}
+	if asOfDate.IsZero() {
+		return nil, fmt.Errorf("fidelity CSV missing Date downloaded footer: %w", model.ErrMissingAsOfDate)
+	}
+	for i := range positions {
+		positions[i].AsOfDate = asOfDate
+	}
 	return positions, nil
+}
+
+func matchDateDownloadedField(row []string) (string, bool) {
+	for _, field := range row {
+		trimmed := strings.Trim(field, dateTrimCutset)
+		if trimmed != "" {
+			return trimmed, strings.HasPrefix(trimmed, dateDownloadedPrefix)
+		}
+	}
+	return "", false
+}
+
+// parseDateDownloaded is a behavior-identical port of legacy
+// datalake/model.ParseFidelityDateDownloaded, returning the instant in UTC.
+func parseDateDownloaded(line string) (time.Time, error) {
+	clean := strings.Trim(line, dateTrimCutset)
+	dateStr := strings.TrimPrefix(clean, dateDownloadedPrefix)
+	dateStr = strings.Trim(dateStr, dateTrimCutset)
+	dateStr = normalizeMeridiem(dateStr)
+
+	isET := strings.HasSuffix(strings.TrimSpace(dateStr), "ET")
+	dateStr = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(dateStr), "ET"))
+
+	loc := resolveDateLocation(isET)
+
+	parsed, err := time.ParseInLocation("Jan-02-2006 3:04 PM", dateStr, loc)
+	if err != nil {
+		var errSingle error
+		parsed, errSingle = time.ParseInLocation("Jan-2-2006 3:04 PM", dateStr, loc)
+		if errSingle != nil {
+			return time.Time{}, fmt.Errorf("failed to parse date %q: %w", dateStr, err)
+		}
+	}
+	return parsed.UTC(), nil
+}
+
+func normalizeMeridiem(s string) string {
+	s = strings.ReplaceAll(s, "p.m.", "PM")
+	s = strings.ReplaceAll(s, "a.m.", "AM")
+	s = strings.ReplaceAll(s, "p.m", "PM")
+	s = strings.ReplaceAll(s, "a.m", "AM")
+	return s
+}
+
+func resolveDateLocation(isET bool) *time.Location {
+	if !isET {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return time.FixedZone("EDT", edtOffsetSeconds)
+	}
+	return loc
 }
 
 func readNextRow(ctx context.Context, reader *csv.Reader) ([]string, int, error) {
