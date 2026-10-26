@@ -320,17 +320,21 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
 6. **Insertion & Error Wrapping**: Encodes document via `toSyncLogDoc` and executes `InsertOne(ctx, doc)`. Driver errors are wrapped with collection context: `mongo: log sync to dataSync: %w` (`TestLogSync_InsertErrorWrapped`).
 7. **Input Immutability**: The caller's `*model.SyncLog` instance is treated as read-only and is never mutated during mapping or insertion (`TestLogSync_DoesNotMutateInput`).
 
-### 5.3 `ListSyncLogs(ctx, limit)` (`port.Repository`)
+### 5.3 `ListSyncLogs(ctx, limit)` (*mongo.Repository / Future `SyncLogReader` Consumer Port)
 
 Authoritative implementation reference: [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go).
 
 Retrieves audit history records from the datalake `dataSync` collection, returning domain `[]model.SyncLog`. This read path replaces legacy `MongoRepository.GetSyncLogs` (consumed by desktop history) while preserving bit-for-bit document decoding parity.
 
+> [!NOTE]
+> **Hexagonal Port Boundary & Phase 4 Consumer Port**:
+> In Phase 3, `port.Repository` defines the core persistence driven port (`SaveBatch` and `LogSync`). `ListSyncLogs` is implemented directly on concrete `*mongo.Repository`. In Phase 4, a segregated consumer read port (`SyncLogReader`) will be formally introduced in `internal/domain/port/` and wired into application/service query handlers, adhering to interface segregation principles.
+
 #### Query Execution & Default Limit Semantics
 1. **Context Cancellation Short-Circuit**: Evaluates `ctx.Err()` immediately prior to issuing driver calls; returns `(nil, ctx.Err())` with zero side effects (`TestListSyncLogs_CancelledContext`).
-2. **Deterministic Default Limit**: Evaluates `limit`: non-positive values (`limit <= 0`) automatically default to `DefaultSyncLogLimit = 100`. This replicates legacy desktop behavior (`GetSyncLogs` calling `GetSyncLogsWithLimit(ctx, 100)`); unbounded reads are explicitly prohibited to prevent memory exhaustion (`TestListSyncLogs_DefaultLimit`).
+2. **Deterministic Default Limit**: Evaluates `limit`: non-positive values (`limit <= 0`) automatically default to `DefaultSyncLogLimit = 100`. This replicates legacy desktop behavior (`GetSyncLogs` calling `GetSyncLogsWithLimit(ctx, 100)`); unbounded reads are explicitly prohibited to prevent memory exhaustion (`TestListSyncLogs_LimitSemantics`).
 3. **Sorted Query Execution**: Dispatches `Find(ctx, bson.D{}, opts)` to the `dataSync` collection with sort criteria `{syncedAt: -1}` (`TestListSyncLogs_SortAndLimit`). Documents lacking `syncedAt` sort last naturally in MongoDB BSON sort order.
-4. **Lifecycle & Resource Cleanup**: The driver cursor is safely deferred for closure (`defer cursor.Close(ctx)`).
+4. **Lifecycle & Resource Cleanup**: The driver cursor is safely deferred for closure (`_ = cursor.Close(context.Background())`).
 5. **Empty Result Handling**: When no documents match or collection is empty, returns an allocated non-nil empty slice `[]model.SyncLog{}` (`TestListSyncLogs_EmptyResult`).
 6. **Error Context Wrapping**: Driver find and cursor decode failures wrap collection and operation context: `mongo: find sync logs in dataSync: %w` and `mongo: decode sync logs from dataSync: %w` (`TestListSyncLogs_FindErrorWrapped`, `TestListSyncLogs_DecodeErrorWrapped`).
 

@@ -22,6 +22,7 @@ type fakeCollection struct {
 	db                  *fakeDatabase
 	mu                  sync.Mutex
 	insertedDocs        []any
+	insertCalls         int32
 	createdIndex        [][]mongodrv.IndexModel
 	insertOneErr        error
 	createIdxErr        error
@@ -41,6 +42,7 @@ type fakeCollection struct {
 }
 
 func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error) {
+	atomic.AddInt32(&f.insertCalls, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.insertOneErr != nil {
@@ -48,6 +50,20 @@ func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.Ins
 	}
 	f.insertedDocs = append(f.insertedDocs, doc)
 	return &mongodrv.InsertOneResult{}, nil
+}
+
+// InsertCallCount returns the atomic count of InsertOne invocations.
+func (f *fakeCollection) InsertCallCount() int32 {
+	return atomic.LoadInt32(&f.insertCalls)
+}
+
+// InsertedDocs returns a thread-safe snapshot of all documents submitted to InsertOne.
+func (f *fakeCollection) InsertedDocs() []any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]any, len(f.insertedDocs))
+	copy(out, f.insertedDocs)
+	return out
 }
 
 func (f *fakeCollection) BulkWrite(
@@ -235,10 +251,11 @@ func TestLogSync_WritesDualFields(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	coll := fakeDB.dataSyncColl()
-	if len(coll.insertedDocs) != 1 {
-		t.Fatalf("expected 1 inserted doc, got %d", len(coll.insertedDocs))
+	inserted := coll.InsertedDocs()
+	if len(inserted) != 1 {
+		t.Fatalf("expected 1 inserted doc, got %d", len(inserted))
 	}
-	doc := coll.insertedDocs[0].(syncLogDoc)
+	doc := inserted[0].(syncLogDoc)
 	if doc.DualCollectionName != doc.CollectionName || !doc.DualSyncTimestamp.Equal(doc.SyncedAt) || doc.DualRecordsUploaded != doc.UpsertedCount {
 		t.Errorf("dual fields mismatch: got %+v", doc)
 	}
@@ -251,7 +268,7 @@ func TestLogSync_RejectsZeroSyncedAt(t *testing.T) {
 	if err := repo.LogSync(context.Background(), log); !errors.Is(err, model.ErrMissingSyncTime) {
 		t.Fatalf("expected ErrMissingSyncTime, got %v", err)
 	}
-	if len(fakeDB.dataSyncColl().insertedDocs) != 0 {
+	if len(fakeDB.dataSyncColl().InsertedDocs()) != 0 {
 		t.Fatalf("expected 0 inserted docs")
 	}
 }
@@ -276,7 +293,7 @@ func TestLogSync_CancelledContext(t *testing.T) {
 	if err := repo.LogSync(ctx, newTestSyncLog(model.SyncStatusSuccess)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if len(fakeDB.dataSyncColl().insertedDocs) != 0 {
+	if len(fakeDB.dataSyncColl().InsertedDocs()) != 0 {
 		t.Fatalf("expected 0 inserted docs")
 	}
 }

@@ -29,9 +29,12 @@ func (r *Repository) ListSyncLogs(ctx context.Context, limit int64) ([]model.Syn
 	if err != nil {
 		return nil, fmt.Errorf("mongo: find sync logs in %s: %w", dataSyncCollection, err)
 	}
-	if cursor != nil {
-		defer cursor.Close(ctx)
+	if cursor == nil {
+		return []model.SyncLog{}, nil
 	}
+	defer func() {
+		_ = cursor.Close(context.Background())
+	}()
 
 	var docs []syncLogDoc
 	if decodeErr := cursor.All(ctx, &docs); decodeErr != nil {
@@ -45,12 +48,14 @@ func (r *Repository) ListSyncLogs(ctx context.Context, limit int64) ([]model.Syn
 	return logs, nil
 }
 
+// fromSyncLogDoc translates a persistence DTO to a domain SyncLog, normalizing legacy
+// desktop fields with bit-for-bit parity to legacy datalake/model.SyncLog.Normalize.
 func fromSyncLogDoc(d syncLogDoc) model.SyncLog {
 	syncedAt := d.SyncedAt
-	if syncedAt.IsZero() && !d.DualSyncTimestamp.IsZero() {
-		syncedAt = d.DualSyncTimestamp.UTC()
-	} else if !syncedAt.IsZero() {
+	if !syncedAt.IsZero() {
 		syncedAt = syncedAt.UTC()
+	} else if !d.DualSyncTimestamp.IsZero() {
+		syncedAt = d.DualSyncTimestamp.UTC()
 	}
 
 	collectionName := d.CollectionName

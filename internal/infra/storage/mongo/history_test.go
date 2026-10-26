@@ -51,15 +51,20 @@ func TestListSyncLogs_SortAndLimit(t *testing.T) {
 	}
 }
 
-func TestListSyncLogs_DefaultLimit(t *testing.T) {
+func TestListSyncLogs_LimitSemantics(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    int64
 		expected int64
 	}{
+		{name: "large negative defaults", input: -100, expected: DefaultSyncLogLimit},
+		{name: "small negative defaults", input: -5, expected: DefaultSyncLogLimit},
+		{name: "boundary negative one defaults", input: -1, expected: DefaultSyncLogLimit},
 		{name: "zero limit defaults", input: 0, expected: DefaultSyncLogLimit},
-		{name: "negative limit defaults", input: -5, expected: DefaultSyncLogLimit},
-		{name: "large negative limit defaults", input: -100, expected: DefaultSyncLogLimit},
+		{name: "boundary positive one accepted", input: 1, expected: 1},
+		{name: "typical positive limit accepted", input: 25, expected: 25},
+		{name: "default-matching positive limit accepted", input: 100, expected: 100},
+		{name: "large positive limit accepted", input: 500, expected: 500},
 	}
 
 	for _, tt := range tests {
@@ -110,19 +115,18 @@ func TestListSyncLogs_DecodesCanonicalDocument(t *testing.T) {
 		t.Fatalf("expected 1 log, got %d", len(logs))
 	}
 
-	got := logs[0]
-	if got.FileName != "chase_checking.csv" ||
-		got.FileHash != "hash123" ||
-		got.CollectionName != "transactions_chase" ||
-		got.RecordCount != 50 ||
-		got.UpsertedCount != 40 ||
-		got.MatchedCount != 10 ||
-		got.Status != model.SyncStatusSuccess ||
-		got.ErrorMessage != "" ||
-		!got.SyncedAt.Equal(now) ||
-		got.DurationMs != 125 {
-		t.Errorf("decoded canonical log mismatch: %+v", got)
-	}
+	assertSyncLogParity(t, logs[0], model.SyncLog{
+		FileName:       "chase_checking.csv",
+		FileHash:       "hash123",
+		CollectionName: "transactions_chase",
+		RecordCount:    50,
+		UpsertedCount:  40,
+		MatchedCount:   10,
+		Status:         model.SyncStatusSuccess,
+		ErrorMessage:   "",
+		SyncedAt:       now,
+		DurationMs:     125,
+	})
 }
 
 func TestListSyncLogs_DecodesLegacyOnlyDocument(t *testing.T) {
@@ -130,6 +134,7 @@ func TestListSyncLogs_DecodesLegacyOnlyDocument(t *testing.T) {
 	legacyTime := time.Date(2025, 5, 20, 8, 30, 0, 0, time.UTC)
 	legacyDoc := bson.D{
 		{Key: "fileName", Value: "legacy_fidelity.csv"},
+		{Key: "fileHash", Value: "hash456"},
 		{Key: "collection_name", Value: "positions_fidelity"},
 		{Key: "sync_timestamp", Value: legacyTime},
 		{Key: "records_uploaded", Value: int64(42)},
@@ -150,25 +155,77 @@ func TestListSyncLogs_DecodesLegacyOnlyDocument(t *testing.T) {
 		t.Fatalf("expected 1 log, got %d", len(logs))
 	}
 
-	got := logs[0]
-	if got.FileName != "legacy_fidelity.csv" {
-		t.Errorf("expected FileName 'legacy_fidelity.csv', got %q", got.FileName)
+	assertSyncLogParity(t, logs[0], model.SyncLog{
+		FileName:       "legacy_fidelity.csv",
+		FileHash:       "hash456",
+		CollectionName: "positions_fidelity",
+		RecordCount:    42,
+		UpsertedCount:  42,
+		Status:         model.SyncStatusSuccess,
+		SyncedAt:       legacyTime,
+	})
+}
+
+func TestListSyncLogs_DecodesMultipleDocuments(t *testing.T) {
+	fakeDB := newFakeDatabase()
+	now := time.Date(2026, 10, 25, 14, 0, 0, 0, time.UTC)
+	earlier := now.Add(-1 * time.Hour)
+
+	docs := []any{
+		syncLogDoc{
+			FileName:       "batch1.csv",
+			FileHash:       "hash1",
+			CollectionName: "transactions_chase",
+			RecordCount:    20,
+			UpsertedCount:  20,
+			Status:         "SUCCESS",
+			SyncedAt:       now,
+			DurationMs:     50,
+		},
+		bson.D{
+			{Key: "fileName", Value: "batch2.csv"},
+			{Key: "fileHash", Value: "hash2"},
+			{Key: "collection_name", Value: "positions_fidelity"},
+			{Key: "sync_timestamp", Value: earlier},
+			{Key: "records_uploaded", Value: int64(15)},
+		},
 	}
-	if got.CollectionName != "positions_fidelity" {
-		t.Errorf("expected CollectionName backfilled to 'positions_fidelity', got %q", got.CollectionName)
+
+	cursor, err := mongodrv.NewCursorFromDocuments(docs, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to create cursor: %v", err)
 	}
-	if !got.SyncedAt.Equal(legacyTime) {
-		t.Errorf("expected SyncedAt backfilled to %v, got %v", legacyTime, got.SyncedAt)
+	fakeDB.dataSyncColl().findCursor = cursor
+	repo := newRepository(fakeDB)
+
+	logs, err := repo.ListSyncLogs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.RecordCount != 42 {
-		t.Errorf("expected RecordCount backfilled to 42, got %d", got.RecordCount)
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 logs, got %d", len(logs))
 	}
-	if got.UpsertedCount != 42 {
-		t.Errorf("expected UpsertedCount backfilled to 42, got %d", got.UpsertedCount)
-	}
-	if got.Status != model.SyncStatusSuccess {
-		t.Errorf("expected Status defaulted to %q, got %q", model.SyncStatusSuccess, got.Status)
-	}
+
+	assertSyncLogParity(t, logs[0], model.SyncLog{
+		FileName:       "batch1.csv",
+		FileHash:       "hash1",
+		CollectionName: "transactions_chase",
+		RecordCount:    20,
+		UpsertedCount:  20,
+		Status:         model.SyncStatusSuccess,
+		SyncedAt:       now,
+		DurationMs:     50,
+	})
+
+	assertSyncLogParity(t, logs[1], model.SyncLog{
+		FileName:       "batch2.csv",
+		FileHash:       "hash2",
+		CollectionName: "positions_fidelity",
+		RecordCount:    15,
+		UpsertedCount:  15,
+		Status:         model.SyncStatusSuccess,
+		SyncedAt:       earlier,
+	})
 }
 
 func TestFromSyncLogDoc_NormalizeParity(t *testing.T) {
@@ -306,6 +363,76 @@ func TestFromSyncLogDoc_NormalizeParity(t *testing.T) {
 				Status:         model.SyncStatusSuccess,
 			},
 		},
+		{
+			name: "both collection names empty remains empty",
+			in: syncLogDoc{
+				FileName:           "unknown.csv",
+				CollectionName:     "",
+				DualCollectionName: "",
+				SyncedAt:           canonicalTime,
+			},
+			want: model.SyncLog{
+				FileName:       "unknown.csv",
+				CollectionName: "",
+				SyncedAt:       canonicalTime,
+				Status:         model.SyncStatusSuccess,
+			},
+		},
+		{
+			name: "dual records uploaded zero does not overwrite zero recordCount",
+			in: syncLogDoc{
+				FileName:            "empty.csv",
+				CollectionName:      "coll",
+				RecordCount:         0,
+				UpsertedCount:       0,
+				DualRecordsUploaded: 0,
+				SyncedAt:            canonicalTime,
+			},
+			want: model.SyncLog{
+				FileName:       "empty.csv",
+				CollectionName: "coll",
+				RecordCount:    0,
+				UpsertedCount:  0,
+				SyncedAt:       canonicalTime,
+				Status:         model.SyncStatusSuccess,
+			},
+		},
+		{
+			name: "negative dual records uploaded ignored",
+			in: syncLogDoc{
+				FileName:            "neg.csv",
+				CollectionName:      "coll",
+				RecordCount:         0,
+				UpsertedCount:       0,
+				DualRecordsUploaded: -5,
+				SyncedAt:            canonicalTime,
+			},
+			want: model.SyncLog{
+				FileName:       "neg.csv",
+				CollectionName: "coll",
+				RecordCount:    0,
+				UpsertedCount:  0,
+				SyncedAt:       canonicalTime,
+				Status:         model.SyncStatusSuccess,
+			},
+		},
+		{
+			name: "status failed preserved even with empty error message",
+			in: syncLogDoc{
+				FileName:       "failed_no_err.csv",
+				CollectionName: "coll",
+				Status:         "FAILED",
+				ErrorMessage:   "",
+				SyncedAt:       canonicalTime,
+			},
+			want: model.SyncLog{
+				FileName:       "failed_no_err.csv",
+				CollectionName: "coll",
+				Status:         model.SyncStatusFailed,
+				ErrorMessage:   "",
+				SyncedAt:       canonicalTime,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -319,6 +446,9 @@ func assertSyncLogParity(t *testing.T, got, want model.SyncLog) {
 	t.Helper()
 	if got.FileName != want.FileName {
 		t.Errorf("FileName: got %q, want %q", got.FileName, want.FileName)
+	}
+	if got.FileHash != want.FileHash {
+		t.Errorf("FileHash: got %q, want %q", got.FileHash, want.FileHash)
 	}
 	if got.CollectionName != want.CollectionName {
 		t.Errorf("CollectionName: got %q, want %q", got.CollectionName, want.CollectionName)
@@ -436,10 +566,17 @@ func TestListSyncLogs_NoIndexCreation(t *testing.T) {
 	}
 
 	coll := fakeDB.dataSyncColl()
+	// RF-02: Strict AC-3G-3 verification: 0 indexes, 0 bulk writes, 0 single inserts
 	if coll.IdxCallCount() != 0 {
 		t.Fatalf("expected 0 CreateIndexes calls on read path, got %d", coll.IdxCallCount())
 	}
 	if len(coll.createdIndex) != 0 {
 		t.Fatalf("expected 0 created index batches, got %d", len(coll.createdIndex))
+	}
+	if coll.BulkCallCount() != 0 {
+		t.Fatalf("expected 0 BulkWrite calls on read path, got %d", coll.BulkCallCount())
+	}
+	if coll.InsertCallCount() != 0 {
+		t.Fatalf("expected 0 InsertOne calls on read path, got %d", coll.InsertCallCount())
 	}
 }
