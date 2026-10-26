@@ -321,9 +321,38 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
 7. **Input Immutability**: The caller's `*model.SyncLog` instance is treated as read-only and is never mutated during mapping or insertion (`TestLogSync_DoesNotMutateInput`).
 
 ### 5.3 `ListSyncLogs(ctx, limit)` (`port.Repository`)
-1. Non-positive `limit <= 0` defaults to `DefaultSyncLogLimit = 100`.
-2. Queries `dataSync` sorted by `syncedAt: -1`.
-3. Normalizes legacy dual fields where canonical fields are absent (`sync_timestamp` -> `SyncedAt`, `collection_name` -> `CollectionName`, `records_uploaded` -> `RecordCount`/`UpsertedCount`).
+
+Authoritative implementation reference: [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go).
+
+Retrieves audit history records from the datalake `dataSync` collection, returning domain `[]model.SyncLog`. This read path replaces legacy `MongoRepository.GetSyncLogs` (consumed by desktop history) while preserving bit-for-bit document decoding parity.
+
+#### Query Execution & Default Limit Semantics
+1. **Context Cancellation Short-Circuit**: Evaluates `ctx.Err()` immediately prior to issuing driver calls; returns `(nil, ctx.Err())` with zero side effects (`TestListSyncLogs_CancelledContext`).
+2. **Deterministic Default Limit**: Evaluates `limit`: non-positive values (`limit <= 0`) automatically default to `DefaultSyncLogLimit = 100`. This replicates legacy desktop behavior (`GetSyncLogs` calling `GetSyncLogsWithLimit(ctx, 100)`); unbounded reads are explicitly prohibited to prevent memory exhaustion (`TestListSyncLogs_DefaultLimit`).
+3. **Sorted Query Execution**: Dispatches `Find(ctx, bson.D{}, opts)` to the `dataSync` collection with sort criteria `{syncedAt: -1}` (`TestListSyncLogs_SortAndLimit`). Documents lacking `syncedAt` sort last naturally in MongoDB BSON sort order.
+4. **Lifecycle & Resource Cleanup**: The driver cursor is safely deferred for closure (`defer cursor.Close(ctx)`).
+5. **Empty Result Handling**: When no documents match or collection is empty, returns an allocated non-nil empty slice `[]model.SyncLog{}` (`TestListSyncLogs_EmptyResult`).
+6. **Error Context Wrapping**: Driver find and cursor decode failures wrap collection and operation context: `mongo: find sync logs in dataSync: %w` and `mongo: decode sync logs from dataSync: %w` (`TestListSyncLogs_FindErrorWrapped`, `TestListSyncLogs_DecodeErrorWrapped`).
+
+#### Read-Only Non-Mutating Invariant
+`ListSyncLogs` is strictly read-only and non-mutating:
+- **Zero Index Creation**: Unlike legacy `GetSyncLogs` which lazily invoked index creation, `ListSyncLogs` **never** calls `ensureIndexes` or driver `CreateIndexes` (`TestListSyncLogs_NoIndexCreation`). Index management is exclusively owned by write paths (`LogSync`, `SaveBatch`).
+- **Zero Document Mutation**: Performs zero writes, updates, or deletions against MongoDB.
+
+#### Legacy Document Normalization Matrix (`fromSyncLogDoc`)
+Historical MongoDB Atlas documents may have been written by legacy loaders prior to dual-field canonicalization. The unexported pure mapper `fromSyncLogDoc(d syncLogDoc) model.SyncLog` normalizes legacy-only attributes with complete bit-for-bit parity to legacy `datalake/model.SyncLog.Normalize` (`TestFromSyncLogDoc_NormalizeParity`, `TestListSyncLogs_DecodesLegacyOnlyDocument`):
+
+| Condition | Normalization Result | Legacy Parity Source |
+| :--- | :--- | :--- |
+| `syncedAt.IsZero()` and `!sync_timestamp.IsZero()` | `SyncedAt = sync_timestamp.UTC()` | `datalake/model.SyncLog.Normalize` |
+| `!syncedAt.IsZero()` | `SyncedAt = syncedAt.UTC()` | UTC normalization guarantee |
+| `collectionName == ""` and `collection_name != ""` | `CollectionName = collection_name` | `datalake/model.SyncLog.Normalize` |
+| `recordCount == 0` and `records_uploaded > 0` | `RecordCount = records_uploaded`<br>`UpsertedCount = records_uploaded` | `datalake/model.SyncLog.Normalize` |
+| `status == ""` | `Status = model.SyncStatusSuccess` (`"SUCCESS"`) | `datalake/model.SyncLog.Normalize` |
+| Canonical fields present | Transferred directly as stored | Canonical schema |
+
+> [!NOTE]
+> Historical documents returned from `ListSyncLogs` are **not** validated against domain model constructor invariants (`model.SyncLog.Validate()`). This intentional design ensures historic, partially populated audit logs remain visible and auditable in user interfaces without runtime rejection.
 
 ### 5.4 S3 Object Store Contract (`port.ObjectStore`)
 
@@ -383,7 +412,7 @@ The datalake object store adapter provides streaming raw statement retrieval and
 | :--- | :--- | :--- | :--- | :--- |
 | **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
 | **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
-| **M2** | Phase 3C / 3E / 3F | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, batch router, `SaveBatch` driver execution, bulk upsert, and error classification in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go), [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go), and [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go). | **Complete** | 92.1% statement test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/); 14 table-driven tests passing with `-race`, compile-time `var _ port.Repository = (*Repository)(nil)` verified, legacy index parity, upsert filters equal to unique keys, flattened lineage, and pure batch routing verified. |
+| **M2** | Phase 3C / 3E / 3F / 3G | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, batch router, `SaveBatch` driver execution, bulk upsert, error classification, and `ListSyncLogs` history read path in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go), [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go), [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go), and [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go). | **Complete** (100% across 3C, 3E, 3F, 3G) | 93.7% statement test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/); 10 table-driven unit tests passing with `-race`, compile-time `var _ port.Repository = (*Repository)(nil)` verified, legacy index parity, upsert filters equal to unique keys, flattened lineage, pure batch routing, non-mutating query execution, and legacy document normalization parity verified. |
 | **M3** | Phase 3D | AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go). | **Complete** | 96.2% statement test coverage in [`internal/infra/storage/s3/client_test.go`](../../internal/infra/storage/s3/client_test.go); hermetic S3 API mocks, streaming download, URL-escaping parity, and copy-then-delete ordering verified. |
 | **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
 
@@ -446,6 +475,18 @@ Key verified invariants include:
 - **Unordered Execution & Upsert Models**: `TestSaveBatch_UnorderedUpsertModels` validates options `Ordered == false` and exact `UpdateOneModel` construction per batch record.
 - **Clock Invariant & Clamped Duration**: `TestRepository_TimeNow` and `TestRepository_Elapsed_NegativeClampedToZero` verify that timestamps are sourced from the repository's clock and negative elapsed times are clamped to `0`.
 - **Context Cancellation Short-Circuit**: `TestSaveBatch_CancelledContext` validates that pre-cancelled contexts abort execution immediately without side effects.
+
+### 9.6 Phase 3G Verification & Test Coverage Evidence
+
+Phase 3G implements the `ListSyncLogs` read path and legacy document normalization in [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go). It elevates `internal/infra/storage/mongo` to **93.7% statement test coverage** (`go test -cover -race ./internal/infra/storage/mongo/...`) with 10 unit tests in [`internal/infra/storage/mongo/history_test.go`](../../internal/infra/storage/mongo/history_test.go) passing with zero race conditions, zero `depguard` violations, and 100% CI pass.
+
+Key verified invariants include:
+- **Default Limit & Sorted Query Execution**: `TestListSyncLogs_SortAndLimit` and `TestListSyncLogs_DefaultLimit` prove that non-positive limits (`0`, `-5`, `-100`) default to `DefaultSyncLogLimit = 100`, sort criteria is `{syncedAt: -1}`, and queries target the `dataSync` collection.
+- **Read-Only Non-Mutating Invariant**: `TestListSyncLogs_NoIndexCreation` validates that `ListSyncLogs` never executes `CreateIndexes` or mutates storage.
+- **Context Cancellation Short-Circuit**: `TestListSyncLogs_CancelledContext` validates that pre-cancelled contexts abort execution immediately without issuing driver `Find` calls.
+- **Legacy Normalization Parity**: `TestFromSyncLogDoc_NormalizeParity` (table-driven covering 7 edge cases) and `TestListSyncLogs_DecodesLegacyOnlyDocument` assert exact parity with legacy `datalake/model.SyncLog.Normalize` across missing timestamps, legacy dual field fallbacks (`collection_name`, `sync_timestamp`, `records_uploaded`), missing status defaulting (`"SUCCESS"`), and UTC instant conversion.
+- **Canonical Document Decoding**: `TestListSyncLogs_DecodesCanonicalDocument` verifies full canonical field mapping into domain `model.SyncLog`.
+- **Empty Result & Error Wrapping**: `TestListSyncLogs_EmptyResult`, `TestListSyncLogs_FindErrorWrapped`, and `TestListSyncLogs_DecodeErrorWrapped` verify allocation of non-nil empty slices and descriptive error wrapping naming `dataSync`.
 
 
 

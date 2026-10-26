@@ -11,12 +11,17 @@ import (
 	"babylon/dataloader/internal/domain/model"
 )
 
+const (
+	fieldSyncedAt = "syncedAt"
+	fieldFileName = "fileName"
+)
+
 func dataSyncIndexes() []indexSpec {
 	return []indexSpec{
-		{name: "idx_datasync_synced_at", keys: bson.D{{Key: "syncedAt", Value: -1}}},
+		{name: "idx_datasync_synced_at", keys: bson.D{{Key: fieldSyncedAt, Value: -1}}},
 		{
 			name: "idx_datasync_filename_synced_at",
-			keys: bson.D{{Key: "fileName", Value: 1}, {Key: "syncedAt", Value: -1}},
+			keys: bson.D{{Key: fieldFileName, Value: 1}, {Key: fieldSyncedAt, Value: -1}},
 		},
 	}
 }

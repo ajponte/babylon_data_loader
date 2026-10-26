@@ -33,6 +33,11 @@ type fakeCollection struct {
 	bulkWriteErr        error
 	bulkCalls           int32
 	returnNilBulkResult bool
+	findCursor          *mongodrv.Cursor
+	findErr             error
+	findFilter          any
+	findOpts            []*options.FindOptions
+	findCalls           int32
 }
 
 func (f *fakeCollection) InsertOne(_ context.Context, doc any, _ ...*options.InsertOneOptions) (*mongodrv.InsertOneResult, error) {
@@ -86,6 +91,21 @@ func (f *fakeCollection) CreateIndexes(_ context.Context, models []mongodrv.Inde
 	return nil
 }
 
+func (f *fakeCollection) Find(_ context.Context, filter any, opts ...*options.FindOptions) (*mongodrv.Cursor, error) {
+	atomic.AddInt32(&f.findCalls, 1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findFilter = filter
+	f.findOpts = append(f.findOpts, opts...)
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+	if f.findCursor != nil {
+		return f.findCursor, nil
+	}
+	return mongodrv.NewCursorFromDocuments(nil, nil, nil)
+}
+
 // BulkCallCount returns the atomic count of BulkWrite invocations.
 func (f *fakeCollection) BulkCallCount() int32 {
 	return atomic.LoadInt32(&f.bulkCalls)
@@ -94,6 +114,27 @@ func (f *fakeCollection) BulkCallCount() int32 {
 // IdxCallCount returns the atomic count of CreateIndexes invocations.
 func (f *fakeCollection) IdxCallCount() int32 {
 	return atomic.LoadInt32(&f.idxCalls)
+}
+
+// FindCallCount returns the atomic count of Find invocations.
+func (f *fakeCollection) FindCallCount() int32 {
+	return atomic.LoadInt32(&f.findCalls)
+}
+
+// FindOpts returns a thread-safe snapshot of all options submitted to Find.
+func (f *fakeCollection) FindOpts() []*options.FindOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*options.FindOptions, len(f.findOpts))
+	copy(out, f.findOpts)
+	return out
+}
+
+// FindFilter returns a thread-safe snapshot of the last filter submitted to Find.
+func (f *fakeCollection) FindFilter() any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.findFilter
 }
 
 // Models returns a thread-safe snapshot of all write models submitted to BulkWrite.

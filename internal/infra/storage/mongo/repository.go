@@ -60,6 +60,7 @@ type collection interface {
 		opts ...*options.BulkWriteOptions,
 	) (*mongodrv.BulkWriteResult, error)
 	CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error
+	Find(ctx context.Context, filter any, opts ...*options.FindOptions) (*mongodrv.Cursor, error)
 }
 
 type realDatabase struct {
@@ -93,6 +94,10 @@ func (c *realCollection) BulkWrite(
 func (c *realCollection) CreateIndexes(ctx context.Context, models []mongodrv.IndexModel) error {
 	_, err := c.coll.Indexes().CreateMany(ctx, models)
 	return err
+}
+
+func (c *realCollection) Find(ctx context.Context, filter any, opts ...*options.FindOptions) (*mongodrv.Cursor, error) {
+	return c.coll.Find(ctx, filter, opts...)
 }
 
 // Repository manages persistence in MongoDB.
