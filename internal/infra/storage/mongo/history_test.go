@@ -580,3 +580,208 @@ func TestListSyncLogs_NoIndexCreation(t *testing.T) {
 		t.Fatalf("expected 0 InsertOne calls on read path, got %d", coll.InsertCallCount())
 	}
 }
+
+func TestBuildSyncLogFindOptions(t *testing.T) {
+	tests := []struct {
+		name      string
+		limit     int64
+		wantLimit int64
+	}{
+		{name: "negative limit defaults", limit: -10, wantLimit: DefaultSyncLogLimit},
+		{name: "zero limit defaults", limit: 0, wantLimit: DefaultSyncLogLimit},
+		{name: "positive limit preserved", limit: 50, wantLimit: 50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := buildSyncLogFindOptions(tt.limit)
+			if opts == nil {
+				t.Fatal("expected non-nil options")
+			}
+			if opts.Limit == nil || *opts.Limit != tt.wantLimit {
+				t.Fatalf("expected limit %d, got %v", tt.wantLimit, opts.Limit)
+			}
+			wantSort := bson.D{{Key: fieldSyncedAt, Value: -1}}
+			if !reflect.DeepEqual(opts.Sort, wantSort) {
+				t.Fatalf("sort mismatch: got %+v, want %+v", opts.Sort, wantSort)
+			}
+		})
+	}
+}
+
+func TestDecodeSyncLogs_NilCursor(t *testing.T) {
+	logs, err := decodeSyncLogs(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if logs == nil {
+		t.Fatal("expected non-nil slice")
+	}
+	if len(logs) != 0 {
+		t.Fatalf("expected empty slice, got %d items", len(logs))
+	}
+}
+
+func TestNormalizeRecordCounts(t *testing.T) {
+	tests := []struct {
+		name         string
+		record       int64
+		upserted     int64
+		legacy       int64
+		wantRecord   int64
+		wantUpserted int64
+	}{
+		{
+			name:         "canonical counts preserved when non-zero",
+			record:       10,
+			upserted:     8,
+			legacy:       15,
+			wantRecord:   10,
+			wantUpserted: 8,
+		},
+		{
+			name:         "legacy fallback applied when record is zero and legacy > 0",
+			record:       0,
+			upserted:     0,
+			legacy:       25,
+			wantRecord:   25,
+			wantUpserted: 25,
+		},
+		{
+			name:         "zero record and zero legacy remains zero",
+			record:       0,
+			upserted:     0,
+			legacy:       0,
+			wantRecord:   0,
+			wantUpserted: 0,
+		},
+		{
+			name:         "negative legacy ignored when record is zero",
+			record:       0,
+			upserted:     0,
+			legacy:       -5,
+			wantRecord:   0,
+			wantUpserted: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRecord, gotUpserted := normalizeRecordCounts(tt.record, tt.upserted, tt.legacy)
+			if gotRecord != tt.wantRecord || gotUpserted != tt.wantUpserted {
+				t.Errorf("normalizeRecordCounts(%d, %d, %d) = (%d, %d), want (%d, %d)",
+					tt.record, tt.upserted, tt.legacy, gotRecord, gotUpserted, tt.wantRecord, tt.wantUpserted)
+			}
+		})
+	}
+}
+
+func TestNormalizeCollectionName(t *testing.T) {
+	tests := []struct {
+		name    string
+		primary string
+		legacy  string
+		want    string
+	}{
+		{name: "primary non-empty takes precedence", primary: "primary_coll", legacy: "legacy_coll", want: "primary_coll"},
+		{name: "fallback to legacy when primary empty", primary: "", legacy: "legacy_coll", want: "legacy_coll"},
+		{name: "both empty returns empty", primary: "", legacy: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeCollectionName(tt.primary, tt.legacy); got != tt.want {
+				t.Errorf("normalizeCollectionName(%q, %q) = %q, want %q", tt.primary, tt.legacy, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeSyncStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want model.SyncStatus
+	}{
+		{name: "empty raw defaults to SUCCESS", raw: "", want: model.SyncStatusSuccess},
+		{name: "SUCCESS preserved", raw: "SUCCESS", want: model.SyncStatusSuccess},
+		{name: "FAILED preserved", raw: "FAILED", want: model.SyncStatusFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeSyncStatus(tt.raw); got != tt.want {
+				t.Errorf("normalizeSyncStatus(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeSyncedAt(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	loc := time.FixedZone("EDT", -4*3600)
+	edtNow := time.Date(2026, 10, 25, 8, 0, 0, 0, loc)
+
+	tests := []struct {
+		name    string
+		primary time.Time
+		legacy  time.Time
+		want    time.Time
+	}{
+		{name: "primary non-zero takes precedence", primary: now, legacy: now.Add(-time.Hour), want: now},
+		{name: "primary converted to UTC", primary: edtNow, legacy: time.Time{}, want: edtNow.UTC()},
+		{name: "legacy fallback when primary zero", primary: time.Time{}, legacy: edtNow, want: edtNow.UTC()},
+		{name: "both zero returns zero time", primary: time.Time{}, legacy: time.Time{}, want: time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeSyncedAt(tt.primary, tt.legacy)
+			if !got.Equal(tt.want) {
+				t.Errorf("normalizeSyncedAt() = %v, want %v", got, tt.want)
+			}
+			if !got.IsZero() && got.Location() != time.UTC {
+				t.Errorf("expected UTC location, got %v", got.Location())
+			}
+		})
+	}
+}
+
+func TestSyncLogSortDesc(t *testing.T) {
+	got := syncLogSortDesc()
+	want := bson.D{{Key: fieldSyncedAt, Value: -1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("syncLogSortDesc() = %+v, want %+v", got, want)
+	}
+}
+
+func TestTransformSyncLogs(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	docs := []syncLogDoc{
+		{
+			FileName:       "file1.csv",
+			CollectionName: "coll1",
+			RecordCount:    10,
+			UpsertedCount:  10,
+			Status:         "SUCCESS",
+			SyncedAt:       now,
+		},
+		{
+			FileName:            "file2.csv",
+			DualCollectionName:  "legacy_coll",
+			DualRecordsUploaded: 5,
+			DualSyncTimestamp:   now,
+		},
+	}
+
+	logs := transformSyncLogs(docs)
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 logs, got %d", len(logs))
+	}
+	if logs[0].FileName != "file1.csv" || logs[0].CollectionName != "coll1" || logs[0].RecordCount != 10 {
+		t.Errorf("unexpected logs[0]: %+v", logs[0])
+	}
+	if logs[1].FileName != "file2.csv" || logs[1].CollectionName != "legacy_coll" || logs[1].RecordCount != 5 {
+		t.Errorf("unexpected logs[1]: %+v", logs[1])
+	}
+}
