@@ -536,21 +536,23 @@ func TestIntegration_LogSync_ListSyncLogs_RoundTrip(t *testing.T) {
 	if err != nil || len(logs) != 3 {
 		t.Fatalf("ListSyncLogs failed: err %v, count %d", err, len(logs))
 	}
+	// Invariant (Phase 3G §5 table): Documents are sorted in MongoDB by {syncedAt: -1}.
+	// Legacy-only documents lacking syncedAt evaluate as null/missing in BSON sort and sort last.
 	if !logs[0].SyncedAt.Equal(t3) || logs[0].Status != model.SyncStatusFailed || logs[0].ErrorMessage != "io error" {
 		t.Errorf("logs[0] mismatch: %+v", logs[0])
 	}
-	if !logs[1].SyncedAt.Equal(t2) || logs[1].Status != model.SyncStatusSuccess || logs[1].RecordCount != 25 || logs[1].UpsertedCount != 25 {
-		t.Errorf("logs[1] legacy normalization mismatch: %+v", logs[1])
+	if !logs[1].SyncedAt.Equal(t1) || logs[1].Status != model.SyncStatusSuccess || logs[1].RecordCount != 10 {
+		t.Errorf("logs[1] mismatch: %+v", logs[1])
 	}
-	if !logs[2].SyncedAt.Equal(t1) || logs[2].Status != model.SyncStatusSuccess || logs[2].RecordCount != 10 {
-		t.Errorf("logs[2] mismatch: %+v", logs[2])
+	if !logs[2].SyncedAt.Equal(t2) || logs[2].Status != model.SyncStatusSuccess || logs[2].RecordCount != 25 || logs[2].UpsertedCount != 25 {
+		t.Errorf("logs[2] legacy normalization mismatch: %+v", logs[2])
 	}
 
 	subLogs, err := repo.ListSyncLogs(ctx, 2)
 	if err != nil || len(subLogs) != 2 {
 		t.Fatalf("sub-limit ListSyncLogs failed: err %v, count %d", err, len(subLogs))
 	}
-	if !subLogs[0].SyncedAt.Equal(t3) || !subLogs[1].SyncedAt.Equal(t2) {
+	if !subLogs[0].SyncedAt.Equal(t3) || !subLogs[1].SyncedAt.Equal(t1) {
 		t.Errorf("subLogs ordering mismatch: %+v", subLogs)
 	}
 }
