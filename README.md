@@ -28,6 +28,13 @@ Run all checks (linting, tests, build):
 make all
 ```
 
+Run storage integration tests against a local MongoDB instance (e.g. from `babylon_deploy/local`):
+```bash
+MONGO_IT_URI="mongodb://localhost:27017" make test-integration
+```
+> [!NOTE]
+> Integration tests execute against isolated ephemeral databases (`babylon_it_<unixnano>`) with automatic cleanup upon completion (`t.Cleanup`), ensuring no state leakage. Multi-tiered safety guards strictly reject Atlas connection schemes (`mongodb+srv://`) and protected datalake database names (`datalake`).
+
 Populate your local MongoDB instance with 100 rows of synthetic data:
 ```bash
 make run-generate-mongo

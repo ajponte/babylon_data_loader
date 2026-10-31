@@ -32,15 +32,39 @@ make check-quality
 ```
 
 ### 3. Testing
-To run all unit tests:
+
+#### Unit Testing
+To run all hermetic unit tests:
 ```bash
 make unit-test
+```
+
+To run tests with CI JSON output:
+```bash
+make test-ci
 ```
 
 To see test coverage as an interactive webpage:
 ```bash
 make coverage
 ```
+
+#### Integration Testing
+Storage integration tests verify repository operations, unique index deduplication, conflict detection, and BSON type parity against a live MongoDB instance (such as the local Docker container in `babylon_deploy/local`):
+```bash
+MONGO_IT_URI="mongodb://localhost:27017" make test-integration
+```
+
+##### Safety Guards & Ephemeral Databases
+The integration test suite ([`internal/infra/storage/mongo/integration_test.go`](../internal/infra/storage/mongo/integration_test.go)) enforces strict isolation guards:
+- **Build Tag Separation**: Tagged with `//go:build integration`. Standard `make test-ci` and `go test ./...` exclude integration tests, ensuring unit tests remain 100% hermetic and network-free.
+- **Protocol Guard**: Rejects connection URIs with the `mongodb+srv://` scheme to prevent accidental execution against remote MongoDB Atlas clusters.
+- **Database Name Guard**: Forbids running against any database named `datalake` (case-insensitive check).
+- **Ephemeral Database Lifecycle**: Dynamically provisions a distinct database named `babylon_it_<unixnano>` for each test run and registers an automated cleanup hook via `t.Cleanup()` that drops the database and closes repository connections upon completion.
+- **Environment Gating**: The suite requires `MONGO_IT_URI`. The `make test-integration` target fails fast if the variable is unset, while the Go test runner invokes `t.Skip` if run directly without it.
+
+##### Continuous Integration (CI)
+Integration tests execute automatically in GitHub Actions ([`.github/workflows/go.yml`](../.github/workflows/go.yml)) on all pushes and pull requests targeting `main`. The `integration-test` job provisions a healthy containerized MongoDB service (`mongo:latest`) on port `27017` and executes `make test-integration` with `MONGO_IT_URI: mongodb://localhost:27017`.
 
 ## Troubleshooting
 

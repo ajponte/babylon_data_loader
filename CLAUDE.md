@@ -39,11 +39,24 @@ This project contains a comprehensive agent documentation harness under the [doc
 - **All Quality Checks (Lint, Format, Vet)**: `make check-quality`
 - **Run unit tests**: `make unit-test`
 - **Run Lambda tests**: `make test-lambda` (runs race-detected unit tests for Lambda handler, config, and storage)
-- **Run tests with JSON output (CI)**: `make test-ci`
+- **Run hermetic unit tests with JSON output (CI)**: `make test-ci`
+- **Run storage integration tests**: `MONGO_IT_URI="mongodb://localhost:27017" make test-integration` (executes `//go:build integration` tests against live Mongo; requires `MONGO_IT_URI`, provisions ephemeral `babylon_it_<unixnano>` DBs, and cleans up automatically)
 - **Show test coverage in HTML**: `make coverage`
 - **Format code**: `make fmt` (runs `goimports` and `gofumpt`)
 - **Lint code**: `make lint` (runs `golangci-lint`)
 - **Vet code**: `make vet` (runs `go vet`)
+
+---
+
+## Continuous Integration (CI)
+
+Continuous integration runs automatically via GitHub Actions ([`.github/workflows/go.yml`](.github/workflows/go.yml)) on all pushes and pull requests targeting `main`:
+
+- **Lint & Unit Testing (`build` job)**:
+  - Executes `golangci-lint-action`, binary build (`make build`), and hermetic unit testing (`make test-ci`).
+- **Automated Storage Integration Testing (`integration-test` job)**:
+  - Runs in parallel/sequence with a healthy containerized MongoDB service (`mongo:latest`) on port `27017`.
+  - Executes `make test-integration` with `MONGO_IT_URI: mongodb://localhost:27017`, validating real index creation, upsert idempotency, same-day charge deduplication, and BSON schemas in CI.
 
 ---
 
