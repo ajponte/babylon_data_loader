@@ -19,18 +19,15 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// validateIntegrationTarget enforces strict isolation guards for integration testing (AC-3H-3).
+// validateIntegrationTarget enforces strict isolation guards for integration testing (AC-3H-3, RF-01).
 func validateIntegrationTarget(rawURI, dbName string) error {
 	cleanedURI := strings.ToLower(strings.TrimSpace(rawURI))
-	if strings.HasPrefix(cleanedURI, "mongodb+srv://") {
-		return errors.New("mongodb+srv URIs are strictly forbidden for integration tests")
+	if cleanedURI == "" || strings.HasPrefix(cleanedURI, "mongodb+srv://") {
+		return errors.New("invalid or forbidden mongo URI")
 	}
 	cleanedDB := strings.ToLower(strings.TrimSpace(dbName))
-	if cleanedDB == "datalake" {
-		return errors.New("datalake database is strictly forbidden for integration tests")
-	}
-	if cleanedDB == "" {
-		return errors.New("database name cannot be empty")
+	if cleanedDB == "" || cleanedDB == "datalake" {
+		return errors.New("invalid or forbidden test database name")
 	}
 	return nil
 }
@@ -99,13 +96,21 @@ func assertIndex(t *testing.T, indexes map[string]indexRecord, name string, want
 	if !ok {
 		t.Fatalf("index %q not found in collection", name)
 	}
-	if idx.Unique != wantUnique || idx.Sparse != wantSparse || len(idx.Key) != len(wantKeys) {
-		t.Fatalf("index %q metadata mismatch: got unique=%v sparse=%v len=%d; want %v %v %d",
-			name, idx.Unique, idx.Sparse, len(idx.Key), wantUnique, wantSparse, len(wantKeys))
+	if idx.Unique != wantUnique || idx.Sparse != wantSparse {
+		t.Fatalf("index %q options mismatch: unique=%v sparse=%v; want %v %v",
+			name, idx.Unique, idx.Sparse, wantUnique, wantSparse)
 	}
-	for i, elem := range wantKeys {
-		if idx.Key[i].Key != elem.Key || toInt64(idx.Key[i].Value) != toInt64(elem.Value) {
-			t.Errorf("index %q key[%d] mismatch: got %v=%v, want %v=%v", name, i, idx.Key[i].Key, idx.Key[i].Value, elem.Key, elem.Value)
+	assertIndexKeyMatch(t, name, idx.Key, wantKeys)
+}
+
+func assertIndexKeyMatch(t *testing.T, name string, actual, expected bson.D) {
+	t.Helper()
+	if len(actual) != len(expected) {
+		t.Fatalf("index %q key length mismatch: got %d, want %d", name, len(actual), len(expected))
+	}
+	for i, elem := range expected {
+		if actual[i].Key != elem.Key || toInt64(actual[i].Value) != toInt64(elem.Value) {
+			t.Errorf("index %q key[%d] mismatch: got %v=%v, want %v=%v", name, i, actual[i].Key, actual[i].Value, elem.Key, elem.Value)
 		}
 	}
 }
@@ -131,41 +136,19 @@ func newIntegrationChaseTx(acct string, row int, isCreditCard bool, t time.Time)
 	}
 	bal := 100.50
 	return model.ChaseTransaction{
-		AccountID:       acct,
-		PostingDate:     t,
-		TransactionDate: txDate,
-		Description:     "GROCERY PURCHASE",
-		Amount:          -50.25,
-		Type:            "DEBIT",
-		Balance:         &bal,
-		Lineage: model.SourceLineage{
-			FileName: "chase_stmt.csv", FileHash: "chasehash123", RowNumber: row, IngestedAt: t,
-		},
+		AccountID: acct, PostingDate: t, TransactionDate: txDate, Description: "GROCERY PURCHASE",
+		Amount: -50.25, Type: "DEBIT", Balance: &bal,
+		Lineage: model.SourceLineage{FileName: "chase.csv", FileHash: "hash123", RowNumber: row, IngestedAt: t},
 	}
 }
 
 func newIntegrationFidelityPos(acct, sym string, asOf time.Time, row int) model.FidelityPosition {
 	return model.FidelityPosition{
-		AccountID:            acct,
-		AccountName:          "Brokerage",
-		Symbol:               sym,
-		Description:          "Total Stock Index",
-		Quantity:             15.0,
-		LastPrice:            200.0,
-		LastPriceChange:      1.5,
-		CurrentValue:         3000.0,
-		TodaysGainLossDollar: 22.5,
-		TodaysGainLossPct:    0.75,
-		TotalGainLossDollar:  450.0,
-		TotalGainLossPct:     17.65,
-		PercentOfAccount:     35.0,
-		CostBasis:            2550.0,
-		AverageCostBasis:     170.0,
-		Type:                 "Cash",
-		AsOfDate:             asOf,
-		Lineage: model.SourceLineage{
-			FileName: "fidelity_pos.csv", FileHash: "fidhash123", RowNumber: row, IngestedAt: asOf,
-		},
+		AccountID: acct, AccountName: "Brokerage", Symbol: sym, Description: "Total Stock Index",
+		Quantity: 15.0, LastPrice: 200.0, LastPriceChange: 1.5, CurrentValue: 3000.0,
+		TodaysGainLossDollar: 22.5, TodaysGainLossPct: 0.75, TotalGainLossDollar: 450.0, TotalGainLossPct: 17.65,
+		PercentOfAccount: 35.0, CostBasis: 2550.0, AverageCostBasis: 170.0, Type: "Cash", AsOfDate: asOf,
+		Lineage: model.SourceLineage{FileName: "fid.csv", FileHash: "fidhash123", RowNumber: row, IngestedAt: asOf},
 	}
 }
 
@@ -212,6 +195,8 @@ func TestIntegration_HarnessGuards(t *testing.T) {
 		db      string
 		wantErr bool
 	}{
+		{"refuses empty uri", "", "babylon_it_1", true},
+		{"refuses whitespace uri", "   ", "babylon_it_1", true},
 		{"refuses mongodb+srv", "mongodb+srv://atlas.mongodb.net", "babylon_it_1", true},
 		{"refuses datalake db", "mongodb://localhost:27017", "datalake", true},
 		{"refuses datalake case-insensitive", "mongodb://localhost:27017", "DataLake", true},
@@ -231,7 +216,10 @@ func TestIntegration_HarnessGuards(t *testing.T) {
 
 func TestIntegration_EnsureIndexes_CreatesLegacyCatalog(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = rawDB.CreateCollection(ctx, syntheticCollection)
 	if err := repo.EnsureIndexes(ctx); err != nil {
 		t.Fatalf("EnsureIndexes failed: %v", err)
 	}
@@ -243,22 +231,24 @@ func TestIntegration_EnsureIndexes_CreatesLegacyCatalog(t *testing.T) {
 	chaseIndexes := fetchIndexes(t, rawDB.Collection(chaseCollection))
 	assertIndex(t, chaseIndexes, "idx_chase_account_posting_date", bson.D{{Key: fieldAccountID, Value: 1}, {Key: fieldPostingDate, Value: -1}}, false, false)
 	assertIndex(t, chaseIndexes, "idx_chase_account_post_desc_amount_row", bson.D{
-		{Key: fieldAccountID, Value: 1},
-		{Key: fieldPostingDate, Value: 1},
-		{Key: fieldDescription, Value: 1},
-		{Key: fieldAmount, Value: 1},
-		{Key: fieldSourceRowNumber, Value: 1},
+		{Key: fieldAccountID, Value: 1}, {Key: fieldPostingDate, Value: 1}, {Key: fieldDescription, Value: 1}, {Key: fieldAmount, Value: 1}, {Key: fieldSourceRowNumber, Value: 1},
 	}, true, true)
 
 	fidelityIndexes := fetchIndexes(t, rawDB.Collection(fidelityCollection))
 	assertIndex(t, fidelityIndexes, "idx_account_symbol_asof", bson.D{
 		{Key: fieldAccountNumber, Value: 1}, {Key: fieldSymbol, Value: 1}, {Key: fieldAsOfDate, Value: 1},
 	}, true, false)
+
+	synthIndexes := fetchIndexes(t, rawDB.Collection(syntheticCollection))
+	if len(synthIndexes) != 1 || synthIndexes["_id_"].Name == "" {
+		t.Fatalf("expected exactly 1 index (_id_) on synthetic collection, got %+v", synthIndexes)
+	}
 }
 
 func TestIntegration_EnsureIndexes_NoOpOnPreexistingLegacyIndexes(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	for _, ci := range indexCatalog() {
 		models := toIndexModels(ci.indexes)
@@ -285,15 +275,12 @@ func TestIntegration_EnsureIndexes_NoOpOnPreexistingLegacyIndexes(t *testing.T) 
 
 func TestIntegration_EnsureIndexes_NameConflictFailsLoudly(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	conflictModel := mongodrv.IndexModel{
 		Keys: bson.D{
-			{Key: fieldAccountID, Value: 1},
-			{Key: fieldPostingDate, Value: 1},
-			{Key: fieldDescription, Value: 1},
-			{Key: fieldAmount, Value: 1},
-			{Key: fieldSourceRowNumber, Value: 1},
+			{Key: fieldAccountID, Value: 1}, {Key: fieldPostingDate, Value: 1}, {Key: fieldDescription, Value: 1}, {Key: fieldAmount, Value: 1}, {Key: fieldSourceRowNumber, Value: 1},
 		},
 		Options: options.Index().SetName("idx_chase_dedup").SetUnique(true).SetSparse(true),
 	}
@@ -312,7 +299,8 @@ func TestIntegration_EnsureIndexes_NameConflictFailsLoudly(t *testing.T) {
 
 func TestIntegration_SaveBatch_RerunIsIdempotent(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
 	txs := []model.ChaseTransaction{
@@ -343,7 +331,8 @@ func TestIntegration_SaveBatch_RerunIsIdempotent(t *testing.T) {
 
 func TestIntegration_SaveBatch_IdenticalSameDayChargesKeptByRowNumber(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
 	txs := []model.ChaseTransaction{
@@ -359,11 +348,29 @@ func TestIntegration_SaveBatch_IdenticalSameDayChargesKeptByRowNumber(t *testing
 	if err != nil || count != 2 {
 		t.Fatalf("expected count 2, got %d, err %v", count, err)
 	}
+
+	cursor, err := rawDB.Collection(chaseCollection).Find(ctx, bson.D{{Key: fieldAccountID, Value: "acct-dup"}})
+	if err != nil {
+		t.Fatalf("find failed: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var docs []bson.M
+	if decodeErr := cursor.All(ctx, &docs); decodeErr != nil || len(docs) != 2 {
+		t.Fatalf("expected 2 decoded docs, got %d, err %v", len(docs), decodeErr)
+	}
+	rows := make(map[int64]bool)
+	for _, d := range docs {
+		rows[d["source"].(bson.M)["rowNumber"].(int64)] = true
+	}
+	if !rows[1] || !rows[2] {
+		t.Errorf("expected distinct row numbers 1 and 2, got %v", rows)
+	}
 }
 
 func TestIntegration_SaveBatch_FidelitySnapshotHistoryPreserved(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	date1 := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 	date2 := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
 
@@ -393,16 +400,13 @@ func TestIntegration_SaveBatch_FidelitySnapshotHistoryPreserved(t *testing.T) {
 
 func TestIntegration_SaveBatch_PreservesLegacyOnlyFields(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	asOf := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 
 	seededFidelity := bson.M{
-		"accountNumber": "fid-pres", "symbol": "VTI", "todaysGainLossDollar": 10.0,
-		"asOfDate": asOf, "dataSource": dataSourceFidelity,
-		"source": bson.M{
-			"fileName": "old_f.csv", "rowNumber": int64(1), "ingestedAt": asOf,
-			"s3Uri": "s3://legacy-datalake/fidelity/old_f.csv",
-		},
+		"accountNumber": "fid-pres", "symbol": "VTI", "todaysGainLossDollar": 10.0, "asOfDate": asOf, "dataSource": dataSourceFidelity,
+		"source": bson.M{"fileName": "old_f.csv", "rowNumber": int64(1), "ingestedAt": asOf, "s3Uri": "s3://legacy-datalake/fidelity/old_f.csv"},
 	}
 	if _, err := rawDB.Collection(fidelityCollection).InsertOne(ctx, seededFidelity); err != nil {
 		t.Fatalf("failed seeding legacy fidelity doc: %v", err)
@@ -434,14 +438,16 @@ func TestIntegration_SaveBatch_PreservesLegacyOnlyFields(t *testing.T) {
 
 func TestIntegration_LegacyBSONParity_StoredDocuments(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
-	chaseTx := newIntegrationChaseTx("acct-parity", 1, true, now)
+	cardTx := newIntegrationChaseTx("acct-card", 1, true, now)
+	checkTx := newIntegrationChaseTx("acct-check", 2, false, now)
 	synthTx := newIntegrationChaseTx("acct-synth", 1, false, now)
 	fidPos := newIntegrationFidelityPos("acct-fid", "MSFT", now, 1)
 
-	if _, err := repo.SaveBatch(ctx, newIntegrationBatch(model.DestChaseChecking, "acct-parity", "c.csv", []model.ChaseTransaction{chaseTx}, 1, now)); err != nil {
+	if _, err := repo.SaveBatch(ctx, newIntegrationBatch(model.DestChaseChecking, "acct-chase", "c.csv", []model.ChaseTransaction{cardTx, checkTx}, 2, now)); err != nil {
 		t.Fatalf("save chase batch failed: %v", err)
 	}
 	if _, err := repo.SaveBatch(ctx, newIntegrationBatch(model.DestSynthetic, "acct-synth", "s.csv", []model.ChaseTransaction{synthTx}, 1, now)); err != nil {
@@ -454,42 +460,56 @@ func TestIntegration_LegacyBSONParity_StoredDocuments(t *testing.T) {
 		t.Fatalf("log sync failed: %v", err)
 	}
 
-	var chaseDoc bson.M
-	if err := rawDB.Collection(chaseCollection).FindOne(ctx, bson.D{{Key: fieldAccountID, Value: "acct-parity"}}).Decode(&chaseDoc); err != nil {
-		t.Fatalf("find chase doc failed: %v", err)
-	}
-	assertBSONDate(t, chaseDoc[fieldPostingDate], fieldPostingDate)
-	assertBSONDate(t, chaseDoc["transactionDate"], "transactionDate")
-	assertLineageBSON(t, chaseDoc["source"])
-
-	var fidDoc bson.M
-	if err := rawDB.Collection(fidelityCollection).FindOne(ctx, bson.D{{Key: fieldAccountNumber, Value: "acct-fid"}}).Decode(&fidDoc); err != nil {
-		t.Fatalf("find fidelity doc failed: %v", err)
-	}
-	assertBSONDate(t, fidDoc[fieldAsOfDate], fieldAsOfDate)
-	assertLineageBSON(t, fidDoc["source"])
-	for _, f := range []string{"lastPriceChange", "todaysGainLossDollar", "todaysGainLossPct", "totalGainLossDollar", "totalGainLossPct", "percentOfAccount", "averageCostBasis", "type"} {
-		if _, ok := fidDoc[f]; !ok {
-			t.Errorf("fidelity 2E field %q missing from stored document", f)
+	for _, tc := range []struct {
+		coll   string
+		filter bson.D
+		check  func(bson.M)
+	}{
+		{chaseCollection, bson.D{{Key: fieldAccountID, Value: "acct-card"}}, func(d bson.M) {
+			assertBSONDate(t, d[fieldPostingDate], fieldPostingDate)
+			assertBSONDate(t, d["transactionDate"], "transactionDate")
+			assertLineageBSON(t, d["source"])
+		}},
+		{chaseCollection, bson.D{{Key: fieldAccountID, Value: "acct-check"}}, func(d bson.M) {
+			if val, ok := d["transactionDate"]; ok && val != nil {
+				t.Errorf("transactionDate should be absent on checking insert, got %v", val)
+			}
+			if bal, ok := d["balance"].(float64); !ok || bal != 100.50 {
+				t.Errorf("balance expected float64 100.50, got %v (%T)", d["balance"], d["balance"])
+			}
+			assertLineageBSON(t, d["source"])
+		}},
+		{fidelityCollection, bson.D{{Key: fieldAccountNumber, Value: "acct-fid"}}, func(d bson.M) {
+			assertBSONDate(t, d[fieldAsOfDate], fieldAsOfDate)
+			assertLineageBSON(t, d["source"])
+			for _, f := range []string{"lastPriceChange", "todaysGainLossDollar", "todaysGainLossPct", "totalGainLossDollar", "totalGainLossPct", "percentOfAccount", "averageCostBasis", "type"} {
+				if _, ok := d[f]; !ok {
+					t.Errorf("fidelity 2E field %q missing from stored document", f)
+				}
+			}
+		}},
+		{dataSyncCollection, bson.D{{Key: fieldFileName, Value: "f.csv"}}, func(d bson.M) {
+			assertBSONDate(t, d[fieldSyncedAt], fieldSyncedAt)
+			assertBSONDate(t, d["sync_timestamp"], "sync_timestamp")
+			assertBSONInt64(t, d["recordCount"], "recordCount")
+			assertBSONInt64(t, d["records_uploaded"], "records_uploaded")
+			if d["collection_name"] != d["collectionName"] {
+				t.Errorf("collection_name (%v) != collectionName (%v)", d["collection_name"], d["collectionName"])
+			}
+		}},
+	} {
+		var d bson.M
+		if err := rawDB.Collection(tc.coll).FindOne(ctx, tc.filter).Decode(&d); err != nil {
+			t.Fatalf("find doc in %s failed: %v", tc.coll, err)
 		}
-	}
-
-	var syncDoc bson.M
-	if err := rawDB.Collection(dataSyncCollection).FindOne(ctx, bson.D{{Key: fieldFileName, Value: "f.csv"}}).Decode(&syncDoc); err != nil {
-		t.Fatalf("find sync doc failed: %v", err)
-	}
-	assertBSONDate(t, syncDoc[fieldSyncedAt], fieldSyncedAt)
-	assertBSONDate(t, syncDoc["sync_timestamp"], "sync_timestamp")
-	assertBSONInt64(t, syncDoc["recordCount"], "recordCount")
-	assertBSONInt64(t, syncDoc["records_uploaded"], "records_uploaded")
-	if syncDoc["collection_name"] != syncDoc["collectionName"] {
-		t.Errorf("collection_name (%v) != collectionName (%v)", syncDoc["collection_name"], syncDoc["collectionName"])
+		tc.check(d)
 	}
 }
 
 func TestIntegration_LogSync_ListSyncLogs_RoundTrip(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	base := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	t1 := base.Add(-2 * time.Minute)
 	t2 := base.Add(-1 * time.Minute)
@@ -501,10 +521,7 @@ func TestIntegration_LogSync_ListSyncLogs_RoundTrip(t *testing.T) {
 	}
 
 	legacyDoc := bson.M{
-		"fileName":         "legacy.csv",
-		"collection_name":  chaseCollection,
-		"sync_timestamp":   t2,
-		"records_uploaded": int64(25),
+		"fileName": "legacy.csv", "collection_name": chaseCollection, "sync_timestamp": t2, "records_uploaded": int64(25),
 	}
 	if _, err := rawDB.Collection(dataSyncCollection).InsertOne(ctx, legacyDoc); err != nil {
 		t.Fatalf("seed legacy sync doc failed: %v", err)
@@ -516,13 +533,9 @@ func TestIntegration_LogSync_ListSyncLogs_RoundTrip(t *testing.T) {
 	}
 
 	logs, err := repo.ListSyncLogs(ctx, 10)
-	if err != nil {
-		t.Fatalf("ListSyncLogs failed: %v", err)
+	if err != nil || len(logs) != 3 {
+		t.Fatalf("ListSyncLogs failed: err %v, count %d", err, len(logs))
 	}
-	if len(logs) != 3 {
-		t.Fatalf("expected 3 sync logs, got %d", len(logs))
-	}
-
 	if !logs[0].SyncedAt.Equal(t3) || logs[0].Status != model.SyncStatusFailed || logs[0].ErrorMessage != "io error" {
 		t.Errorf("logs[0] mismatch: %+v", logs[0])
 	}
@@ -532,40 +545,40 @@ func TestIntegration_LogSync_ListSyncLogs_RoundTrip(t *testing.T) {
 	if !logs[2].SyncedAt.Equal(t1) || logs[2].Status != model.SyncStatusSuccess || logs[2].RecordCount != 10 {
 		t.Errorf("logs[2] mismatch: %+v", logs[2])
 	}
+
+	subLogs, err := repo.ListSyncLogs(ctx, 2)
+	if err != nil || len(subLogs) != 2 {
+		t.Fatalf("sub-limit ListSyncLogs failed: err %v, count %d", err, len(subLogs))
+	}
+	if !subLogs[0].SyncedAt.Equal(t3) || !subLogs[1].SyncedAt.Equal(t2) {
+		t.Errorf("subLogs ordering mismatch: %+v", subLogs)
+	}
 }
 
 func TestIntegration_SaveBatch_SyntheticUsesChaseShape(t *testing.T) {
 	repo, rawDB := setupIntegration(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 
 	synthTx := newIntegrationChaseTx("acct-synth-shape", 1, false, now)
 	batch := newIntegrationBatch(model.DestSynthetic, "acct-synth-shape", "synth.csv", []model.ChaseTransaction{synthTx}, 1, now)
 
 	log, err := repo.SaveBatch(ctx, batch)
-	if err != nil {
-		t.Fatalf("SaveBatch synthetic failed: %v", err)
-	}
-	if log.CollectionName != syntheticCollection || log.UpsertedCount != 1 {
-		t.Fatalf("unexpected synthetic sync log: %+v", log)
+	if err != nil || log.CollectionName != syntheticCollection || log.UpsertedCount != 1 {
+		t.Fatalf("unexpected synthetic save result: err %v, log %+v", err, log)
 	}
 
 	var doc bson.M
 	if findErr := rawDB.Collection(syntheticCollection).FindOne(ctx, bson.D{{Key: fieldAccountID, Value: "acct-synth-shape"}}).Decode(&doc); findErr != nil {
 		t.Fatalf("FindOne synthetic failed: %v", findErr)
 	}
-	if doc["dataSource"] != dataSourceSynthetic {
-		t.Errorf("expected dataSource %q, got %v", dataSourceSynthetic, doc["dataSource"])
-	}
-	if doc[fieldDescription] != "GROCERY PURCHASE" {
-		t.Errorf("expected Chase field description %q, got %v", "GROCERY PURCHASE", doc[fieldDescription])
+	if doc["dataSource"] != dataSourceSynthetic || doc[fieldDescription] != "GROCERY PURCHASE" {
+		t.Errorf("mismatch in synthetic stored doc: dataSource=%v, desc=%v", doc["dataSource"], doc[fieldDescription])
 	}
 
 	synthIndexes := fetchIndexes(t, rawDB.Collection(syntheticCollection))
-	if len(synthIndexes) != 1 {
-		t.Fatalf("expected exactly 1 index (_id_) on synthetic collection, got %d", len(synthIndexes))
-	}
-	if _, hasID := synthIndexes["_id_"]; !hasID {
-		t.Errorf("expected _id_ index on synthetic collection")
+	if len(synthIndexes) != 1 || synthIndexes["_id_"].Name == "" {
+		t.Fatalf("expected exactly 1 index (_id_) on synthetic collection, got %+v", synthIndexes)
 	}
 }

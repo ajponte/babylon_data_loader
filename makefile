@@ -77,7 +77,7 @@ coverage: ## displays test coverage report in html mode
 
 test-integration: ## storage integration tests against local Docker Mongo (requires MONGO_IT_URI; not run in CI)
 	@test -n "$(MONGO_IT_URI)" || (echo "MONGO_IT_URI is required, e.g. the local babylon_deploy mongodb service" && exit 1)
-	go test -tags=integration -race -count=1 -v ./internal/infra/storage/...
+	go test -tags=integration -race -timeout 5m -count=1 -v ./internal/infra/storage/...
 
 
 ## Build
