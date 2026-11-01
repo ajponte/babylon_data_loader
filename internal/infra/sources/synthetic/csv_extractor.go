@@ -40,6 +40,8 @@ const (
 
 	utf8BOM = "\xef\xbb\xbf"
 
+	// initialBatchCapacity (64) accommodates typical monthly credit/checking statement slice sizing
+	// while keeping upfront heap allocation minimal for empty or small streaming batches.
 	initialBatchCapacity = 64
 	thousandsGroupSize   = 3
 	maxFractionDigits    = 2
@@ -129,6 +131,9 @@ func validateExtractParams(
 }
 
 func stripBOM(br *bufio.Reader) error {
+	if br == nil {
+		return ErrNilReader
+	}
 	peek, err := br.Peek(len(utf8BOM))
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -349,6 +354,7 @@ func parseDate(raw string) (time.Time, error) {
 		}
 	}
 
+	// Domain model does not expose ErrInvalidPostingDate; ErrMissingPostingDate is used for empty/invalid dates per domain contract.
 	return time.Time{}, fmt.Errorf("invalid date format %q: %w", raw, model.ErrMissingPostingDate)
 }
 
@@ -399,6 +405,9 @@ func parseCurrency(raw string) (float64, bool) {
 	}
 	if negative {
 		val = -val
+	}
+	if val == 0 {
+		val = 0.0
 	}
 	return val, true
 }
@@ -469,26 +478,37 @@ func stripThousandsSeparators(s string) (string, bool) {
 		return "", false
 	}
 	intPart, frac, hasFrac := strings.Cut(s, ".")
-	if hasFrac && (len(frac) > maxFractionDigits || !isASCIIDigits(frac)) {
+	if hasFrac && !validateFractionDigits(frac) {
 		return "", false
 	}
 
-	lead, rest, grouped := strings.Cut(intPart, ",")
-	if !isASCIIDigits(lead) || (grouped && len(lead) > thousandsGroupSize) {
+	if !validateThousandsGroups(intPart) {
 		return "", false
-	}
-	for grouped {
-		var group string
-		group, rest, grouped = strings.Cut(rest, ",")
-		if len(group) != thousandsGroupSize || !isASCIIDigits(group) {
-			return "", false
-		}
 	}
 
 	if !strings.Contains(intPart, ",") {
 		return s, true
 	}
 	return strings.ReplaceAll(s, ",", ""), true
+}
+
+func validateFractionDigits(frac string) bool {
+	return len(frac) <= maxFractionDigits && isASCIIDigits(frac)
+}
+
+func validateThousandsGroups(intPart string) bool {
+	lead, rest, grouped := strings.Cut(intPart, ",")
+	if !isASCIIDigits(lead) || (grouped && len(lead) > thousandsGroupSize) {
+		return false
+	}
+	for grouped {
+		var group string
+		group, rest, grouped = strings.Cut(rest, ",")
+		if len(group) != thousandsGroupSize || !isASCIIDigits(group) {
+			return false
+		}
+	}
+	return true
 }
 
 func isASCIIDigits(s string) bool {

@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -188,7 +189,8 @@ func TestCSVExtractor_KeepsCheckingOnlyFields(t *testing.T) {
 	meta := newValidTestMeta(t)
 
 	csvData := legacySyntheticHeader + "\n" +
-		"CHECK_ORDER,10/25/2026,ATM Withdrawal,banking,100.00,DEBIT,3500.25,CK#1042\n"
+		"CHECK_ORDER,10/25/2026,ATM Withdrawal,banking,100.00,DEBIT,3500.25,1042\n" +
+		"CHECK_PAYMENT,10/26/2026,Check Paid,banking,-250.00,DEBIT,3250.25,CK#1042\n"
 
 	batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
 	if err != nil {
@@ -199,19 +201,28 @@ func TestCSVExtractor_KeepsCheckingOnlyFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AsChaseTransactions failed: %v", err)
 	}
-	if len(txs) != 1 {
-		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	if len(txs) != 2 {
+		t.Fatalf("expected 2 transactions, got %d", len(txs))
 	}
 
-	tx := txs[0]
-	if tx.Details != "CHECK_ORDER" {
-		t.Errorf("expected Details %q, got %q", "CHECK_ORDER", tx.Details)
+	if txs[0].Details != "CHECK_ORDER" {
+		t.Errorf("expected Details %q, got %q", "CHECK_ORDER", txs[0].Details)
 	}
-	if tx.Balance == nil || *tx.Balance != 3500.25 {
-		t.Errorf("expected Balance 3500.25, got %v", tx.Balance)
+	if txs[0].Balance == nil || *txs[0].Balance != 3500.25 {
+		t.Errorf("expected Balance 3500.25, got %v", txs[0].Balance)
 	}
-	if tx.CheckOrSlipNum != "CK#1042" {
-		t.Errorf("expected CheckOrSlipNum %q, got %q", "CK#1042", tx.CheckOrSlipNum)
+	if txs[0].CheckOrSlipNum != "1042" {
+		t.Errorf("expected CheckOrSlipNum %q, got %q", "1042", txs[0].CheckOrSlipNum)
+	}
+
+	if txs[1].Details != "CHECK_PAYMENT" {
+		t.Errorf("expected Details %q, got %q", "CHECK_PAYMENT", txs[1].Details)
+	}
+	if txs[1].Balance == nil || *txs[1].Balance != 3250.25 {
+		t.Errorf("expected Balance 3250.25, got %v", txs[1].Balance)
+	}
+	if txs[1].CheckOrSlipNum != "CK#1042" {
+		t.Errorf("expected CheckOrSlipNum %q, got %q", "CK#1042", txs[1].CheckOrSlipNum)
 	}
 }
 
@@ -248,6 +259,128 @@ func TestCSVExtractor_EmptyBalanceIsNil(t *testing.T) {
 			}
 			if txs[0].Balance != nil {
 				t.Errorf("expected nil Balance, got %v", *txs[0].Balance)
+			}
+		})
+	}
+}
+
+func TestCSVExtractor_PlaceholderBalances(t *testing.T) {
+	t.Parallel()
+	extractor := synthetic.NewCSVExtractor()
+	meta := newValidTestMeta(t)
+
+	placeholders := []string{
+		"-",
+		"--",
+		"---",
+		"n/a",
+		"N/A",
+		"na",
+		"NA",
+		"#n/a",
+		"#N/A",
+		"none",
+		"None",
+		"NONE",
+		"null",
+		"Null",
+		"NULL",
+		"nil",
+		"Nil",
+		"NIL",
+	}
+
+	for _, ph := range placeholders {
+		t.Run("placeholder_"+ph, func(t *testing.T) {
+			t.Parallel()
+			csvData := fmt.Sprintf("%s\nSALE,10/31/2026,Desc,Cat,10.00,DEBIT,%s,\n", legacySyntheticHeader, ph)
+			batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+			if err != nil {
+				t.Fatalf("Extract failed unexpectedly for placeholder %q: %v", ph, err)
+			}
+			txs, err := batch.AsChaseTransactions()
+			if err != nil {
+				t.Fatalf("AsChaseTransactions failed: %v", err)
+			}
+			if len(txs) != 1 {
+				t.Fatalf("expected 1 transaction, got %d", len(txs))
+			}
+			if txs[0].Balance != nil {
+				t.Errorf("expected nil Balance for placeholder %q, got %v", ph, *txs[0].Balance)
+			}
+		})
+	}
+}
+
+func TestCSVExtractor_BlankLinesBeforeHeader(t *testing.T) {
+	t.Parallel()
+	extractor := synthetic.NewCSVExtractor()
+	meta := newValidTestMeta(t)
+
+	// Multiple empty lines (including whitespace) preceding the header row.
+	csvData := "\n  \r\n\n" + legacySyntheticHeader + "\n" +
+		"SALE,10/31/2026,Synthetic tx,cat,25.00,DEBIT,1000.00,\n"
+
+	batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+	if err != nil {
+		t.Fatalf("Extract failed with blank lines before header: %v", err)
+	}
+
+	txs, err := batch.AsChaseTransactions()
+	if err != nil {
+		t.Fatalf("AsChaseTransactions failed: %v", err)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("expected 1 transaction, got %d", len(txs))
+	}
+	if txs[0].Description != "Synthetic tx" {
+		t.Errorf("expected Description 'Synthetic tx', got %q", txs[0].Description)
+	}
+	// Line 1: \n, Line 2: "  \r\n", Line 3: \n, Line 4: Header, Line 5: Data row
+	if txs[0].Lineage.RowNumber != 5 {
+		t.Errorf("expected RowNumber 5, got %d", txs[0].Lineage.RowNumber)
+	}
+}
+
+func TestCSVExtractor_AccountingCurrencyFormats(t *testing.T) {
+	t.Parallel()
+	extractor := synthetic.NewCSVExtractor()
+	meta := newValidTestMeta(t)
+
+	tests := []struct {
+		name       string
+		amountRaw  string
+		wantAmount float64
+	}{
+		{name: "accounting parentheses outside dollar $(10.00)", amountRaw: "$(10.00)", wantAmount: -10.00},
+		{name: "accounting parentheses inside dollar ($10.00)", amountRaw: "($10.00)", wantAmount: -10.00},
+		{name: "negative dollar -$10.00", amountRaw: "-$10.00", wantAmount: -10.00},
+		{name: "dollar negative $-10.00", amountRaw: "$-10.00", wantAmount: -10.00},
+		{name: "negative zero normalized -$0.00", amountRaw: "-$0.00", wantAmount: 0.0},
+		{name: "accounting negative zero $(0.00)", amountRaw: "$(0.00)", wantAmount: 0.0},
+		{name: "positive dollar +$10.00", amountRaw: "+$10.00", wantAmount: 10.00},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			csvData := fmt.Sprintf("%s\nSALE,10/31/2026,Desc,cat,%s,DEBIT,1000.00,\n", legacySyntheticHeader, tt.amountRaw)
+			batch, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
+			if err != nil {
+				t.Fatalf("Extract failed for amount %q: %v", tt.amountRaw, err)
+			}
+			txs, err := batch.AsChaseTransactions()
+			if err != nil {
+				t.Fatalf("AsChaseTransactions failed: %v", err)
+			}
+			if len(txs) != 1 {
+				t.Fatalf("expected 1 transaction, got %d", len(txs))
+			}
+			if txs[0].Amount != tt.wantAmount {
+				t.Errorf("Amount mismatch: got %v, want %v", txs[0].Amount, tt.wantAmount)
+			}
+			if tt.wantAmount == 0.0 && math.Signbit(txs[0].Amount) {
+				t.Errorf("Amount %v retained negative sign bit (-0.0)", txs[0].Amount)
 			}
 		})
 	}
@@ -471,70 +604,90 @@ func TestCSVExtractor_InvalidRows(t *testing.T) {
 
 	tests := []struct {
 		name       string
+		preamble   string
 		row        string
 		wantDomain error
+		wantLine   int
 	}{
 		{
 			name:       "bad date format",
 			row:        "SALE,invalid-date,Synthetic tx,synthetic,10.00,DEBIT,100.00,",
 			wantDomain: model.ErrMissingPostingDate,
+			wantLine:   2,
 		},
 		{
 			name:       "empty date",
 			row:        "SALE,,Synthetic tx,synthetic,10.00,DEBIT,100.00,",
 			wantDomain: model.ErrMissingPostingDate,
+			wantLine:   2,
 		},
 		{
 			name:       "empty description",
 			row:        "SALE,10/31/2026,,synthetic,10.00,DEBIT,100.00,",
 			wantDomain: model.ErrMissingDescription,
+			wantLine:   2,
 		},
 		{
 			name:       "whitespace description",
 			row:        "SALE,10/31/2026,   ,synthetic,10.00,DEBIT,100.00,",
 			wantDomain: model.ErrMissingDescription,
+			wantLine:   2,
 		},
 		{
 			name:       "nan amount",
 			row:        "SALE,10/31/2026,Synthetic tx,synthetic,NaN,DEBIT,100.00,",
 			wantDomain: model.ErrInvalidAmount,
+			wantLine:   2,
 		},
 		{
 			name:       "unparseable amount",
 			row:        "SALE,10/31/2026,Synthetic tx,synthetic,not-an-amount,DEBIT,100.00,",
 			wantDomain: model.ErrInvalidAmount,
+			wantLine:   2,
 		},
 		{
 			name:       "empty amount",
 			row:        "SALE,10/31/2026,Synthetic tx,synthetic,,DEBIT,100.00,",
 			wantDomain: model.ErrInvalidAmount,
+			wantLine:   2,
 		},
 		{
 			name:       "excess fraction digits amount",
 			row:        "SALE,10/31/2026,Synthetic tx,synthetic,10.999,DEBIT,100.00,",
 			wantDomain: model.ErrInvalidAmount,
+			wantLine:   2,
 		},
 		{
 			name:       "bad comma grouping amount",
 			row:        "SALE,10/31/2026,Synthetic tx,synthetic,\"1,23.45\",DEBIT,100.00,",
 			wantDomain: model.ErrInvalidAmount,
+			wantLine:   2,
 		},
 		{
 			name:       "short row missing description",
 			row:        "SALE,10/31/2026",
 			wantDomain: model.ErrMissingDescription,
+			wantLine:   2,
 		},
 		{
 			name:       "bad balance",
 			row:        "SALE,10/31/2026,Synthetic tx,synthetic,10.00,DEBIT,not-a-balance,",
 			wantDomain: model.ErrInvalidBalance,
+			wantLine:   2,
+		},
+		{
+			name:       "bad amount on line 3 after valid row",
+			preamble:   "SALE,10/31/2026,Valid tx,synthetic,10.00,DEBIT,100.00,\n",
+			row:        "SALE,10/30/2026,Invalid tx,synthetic,not-an-amount,DEBIT,100.00,",
+			wantDomain: model.ErrInvalidAmount,
+			wantLine:   3,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			csvData := legacySyntheticHeader + "\n" + tt.row + "\n"
+			csvData := legacySyntheticHeader + "\n" + tt.preamble + tt.row + "\n"
 			_, err := extractor.Extract(context.Background(), strings.NewReader(csvData), meta)
 			if err == nil {
 				t.Fatalf("expected error for %s, got nil", tt.name)
@@ -545,8 +698,13 @@ func TestCSVExtractor_InvalidRows(t *testing.T) {
 			if !errors.Is(err, tt.wantDomain) {
 				t.Errorf("expected domain error %v, got: %v", tt.wantDomain, err)
 			}
-			if !strings.Contains(err.Error(), "line 2") {
-				t.Errorf("expected error to contain 'line 2', got: %v", err)
+			expectedLine := tt.wantLine
+			if expectedLine == 0 {
+				expectedLine = 2
+			}
+			expectedLineStr := fmt.Sprintf("line %d", expectedLine)
+			if !strings.Contains(err.Error(), expectedLineStr) {
+				t.Errorf("expected error to contain %q, got: %v", expectedLineStr, err)
 			}
 		})
 	}
