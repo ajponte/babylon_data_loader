@@ -78,10 +78,7 @@ func (e *CSVExtractor) Extract(
 		return nil, handleStreamErr(ctx, bomErr)
 	}
 
-	reader := csv.NewReader(br)
-	reader.FieldsPerRecord = -1
-	reader.ReuseRecord = true
-	reader.TrimLeadingSpace = true
+	reader := newConfiguredCSVReader(br)
 
 	indices, err := readAndIndexHeader(ctx, reader)
 	if err != nil {
@@ -93,6 +90,26 @@ func (e *CSVExtractor) Extract(
 		return nil, err
 	}
 
+	return buildValidatedBatch(records, meta)
+}
+
+// newConfiguredCSVReader initializes a CSV reader with settings optimized for streaming statements:
+//   - FieldsPerRecord = -1 allows variable-length rows, safely guarded by getField bounds checking.
+//   - ReuseRecord = true reuses the slice backing array across Read calls for memory efficiency,
+//     which is safe because parsed values are immediately copied out into value-type domain records.
+//   - TrimLeadingSpace = true strips unquoted leading whitespace from fields.
+func newConfiguredCSVReader(br *bufio.Reader) *csv.Reader {
+	reader := csv.NewReader(br)
+	reader.FieldsPerRecord = -1
+	reader.ReuseRecord = true
+	reader.TrimLeadingSpace = true
+	return reader
+}
+
+func buildValidatedBatch(
+	records []model.ChaseTransaction,
+	meta model.FileMetadata,
+) (*model.IngestionBatch, error) {
 	batch := &model.IngestionBatch{
 		Destination: model.DestSynthetic,
 		AccountID:   meta.AccountID,
@@ -210,26 +227,38 @@ func readAndIndexHeader(ctx context.Context, reader *csv.Reader) (colIndices, er
 func indexHeader(record []string) (colIndices, error) {
 	indices := newColIndices()
 	for i, col := range record {
-		switch normalizeHeader(col) {
-		case "posting date":
-			indices.postingDate = i
-		case "description":
-			indices.description = i
-		case "amount":
-			indices.amount = i
-		case "details":
-			indices.details = i
-		case "category":
-			indices.category = i
-		case "type":
-			indices.txType = i
-		case "balance":
-			indices.balance = i
-		case "check or slip #", "check or slip num":
-			indices.checkOrSlipNum = i
-		}
+		assignColumnIndex(&indices, normalizeHeader(col), i)
 	}
 
+	if err := validateRequiredColumns(indices); err != nil {
+		return colIndices{}, err
+	}
+
+	return indices, nil
+}
+
+func assignColumnIndex(indices *colIndices, header string, idx int) {
+	switch header {
+	case "posting date":
+		indices.postingDate = idx
+	case "description":
+		indices.description = idx
+	case "amount":
+		indices.amount = idx
+	case "details":
+		indices.details = idx
+	case "category":
+		indices.category = idx
+	case "type":
+		indices.txType = idx
+	case "balance":
+		indices.balance = idx
+	case "check or slip #", "check or slip num":
+		indices.checkOrSlipNum = idx
+	}
+}
+
+func validateRequiredColumns(indices colIndices) error {
 	var missing []string
 	if indices.postingDate == -1 {
 		missing = append(missing, "Posting Date")
@@ -241,10 +270,9 @@ func indexHeader(record []string) (colIndices, error) {
 		missing = append(missing, "Amount")
 	}
 	if len(missing) > 0 {
-		return colIndices{}, fmt.Errorf("%w: %s", ErrMissingRequiredColumns, strings.Join(missing, ", "))
+		return fmt.Errorf("%w: %s", ErrMissingRequiredColumns, strings.Join(missing, ", "))
 	}
-
-	return indices, nil
+	return nil
 }
 
 func parseRows(
@@ -310,6 +338,19 @@ func parseSyntheticRow(
 		return model.ChaseTransaction{}, err
 	}
 
+	return buildChaseTransaction(meta, lineNum, postingDate, desc, amount, balance, row, indices)
+}
+
+func buildChaseTransaction(
+	meta model.FileMetadata,
+	lineNum int,
+	date time.Time,
+	desc string,
+	amount float64,
+	balance *float64,
+	row []string,
+	indices colIndices,
+) (model.ChaseTransaction, error) {
 	tx := model.ChaseTransaction{
 		Lineage: model.SourceLineage{
 			FileName:   meta.FileName,
@@ -318,7 +359,7 @@ func parseSyntheticRow(
 			IngestedAt: meta.IngestedAt,
 		},
 		AccountID:      meta.AccountID,
-		PostingDate:    postingDate,
+		PostingDate:    date,
 		Description:    desc,
 		Details:        strings.TrimSpace(getField(row, indices.details)),
 		Amount:         amount,
@@ -445,7 +486,17 @@ func isPlaceholderNumeric(val string) bool {
 }
 
 func cleanNumeric(val string) (string, bool, bool) {
-	clean := strings.Map(func(r rune) rune {
+	clean := sanitizeNumericRunes(val)
+	rawDigits, negative := extractSignAndUnwrap(clean)
+	digits, ok := stripThousandsSeparators(rawDigits)
+	if !ok {
+		return "", false, false
+	}
+	return digits, negative, true
+}
+
+func sanitizeNumericRunes(val string) string {
+	return strings.Map(func(r rune) rune {
 		if unicode.IsSpace(r) {
 			return -1
 		}
@@ -454,7 +505,9 @@ func cleanNumeric(val string) (string, bool, bool) {
 		}
 		return r
 	}, val)
+}
 
+func extractSignAndUnwrap(clean string) (string, bool) {
 	negative := false
 	clean = strings.TrimPrefix(clean, "$")
 	switch {
@@ -465,12 +518,7 @@ func cleanNumeric(val string) (string, bool, bool) {
 		negative = clean[0] == '-'
 		clean = strings.TrimPrefix(clean[1:], "$")
 	}
-
-	digits, ok := stripThousandsSeparators(clean)
-	if !ok {
-		return "", false, false
-	}
-	return digits, negative, true
+	return clean, negative
 }
 
 func stripThousandsSeparators(s string) (string, bool) {
