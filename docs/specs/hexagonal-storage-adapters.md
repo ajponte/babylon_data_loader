@@ -329,6 +329,8 @@ Retrieves audit history records from the datalake `dataSync` collection, returni
 > [!NOTE]
 > **Hexagonal Port Boundary & Phase 4 Consumer Port**:
 > In Phase 3, `port.Repository` defines the core persistence driven port (`SaveBatch` and `LogSync`). `ListSyncLogs` is implemented directly on concrete `*mongo.Repository`. In Phase 4, a segregated consumer read port (`SyncLogReader`) will be formally introduced in `internal/domain/port/` and wired into application/service query handlers, adhering to interface segregation principles.
+>
+> The consumer port is formally specified in [hexagonal-application-pipeline.md](./hexagonal-application-pipeline.md#synclogreader-consumer-port) and lands in Phase 4J.
 
 #### Query Execution & Default Limit Semantics
 1. **Context Cancellation Short-Circuit**: Evaluates `ctx.Err()` immediately prior to issuing driver calls; returns `(nil, ctx.Err())` with zero side effects (`TestListSyncLogs_CancelledContext`).
