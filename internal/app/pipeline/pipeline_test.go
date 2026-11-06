@@ -392,6 +392,23 @@ func TestRecordFailure_UnknownSourceType(t *testing.T) {
 	}
 }
 
+func TestRecordFailure_AuditFailureReturnsJoinedError(t *testing.T) {
+	p, repo, _ := newTestHarness()
+	_ = p.Register("fidelity", &fakeExtractor{}, model.DestFidelityPosition)
+	cause := errors.New("file too large")
+	auditErr := errors.New("audit disk full")
+	repo.logSyncFn = func(_ context.Context, _ *model.SyncLog) error { return auditErr }
+
+	log, err := p.RecordFailure(context.Background(), "fidelity", newValidMeta(), cause)
+	if log == nil {
+		t.Fatalf("expected non-nil failed log")
+	}
+	if !errors.Is(err, cause) || !errors.Is(err, pipeline.ErrAuditWrite) || !errors.Is(err, auditErr) {
+		t.Fatalf("expected joined errors, got %v", err)
+	}
+	assertValidLog(t, log)
+}
+
 func TestRun_ExtractorReturnsNilBatch_HandledDefensively(t *testing.T) {
 	p, repo, ext := newTestHarness()
 	ext.extractFn = func(_ context.Context, _ io.Reader, _ model.FileMetadata) (*model.IngestionBatch, error) {

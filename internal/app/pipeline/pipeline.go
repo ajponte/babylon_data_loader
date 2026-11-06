@@ -118,6 +118,7 @@ func (p *Pipeline) elapsedMs(start time.Time) int64 {
 	return max(0, p.timeNow().Sub(start).Milliseconds())
 }
 
+// restamp ensures orchestrator start time and elapsed duration override adapter timings.
 func (p *Pipeline) restamp(log *model.SyncLog, start time.Time) {
 	log.SyncedAt = start.UTC()
 	log.DurationMs = p.elapsedMs(start)
@@ -131,6 +132,7 @@ func (p *Pipeline) notify(ctx context.Context, notif port.ProgressNotifier, stag
 	}
 }
 
+// auditDetached ensures failure audit persistence uses a detached context with timeout.
 func (p *Pipeline) auditDetached(ctx context.Context, log *model.SyncLog) error {
 	detachedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditTimeout)
 	defer cancel()
@@ -142,6 +144,35 @@ func (p *Pipeline) logFailure(ctx context.Context, log *model.SyncLog, cause err
 		return log, errors.Join(cause, fmt.Errorf("%w: %w", ErrAuditWrite, auditErr))
 	}
 	return log, cause
+}
+
+// fail creates a new failed SyncLog and persists it via detached context.
+func (p *Pipeline) fail(
+	ctx context.Context,
+	meta model.FileMetadata,
+	dest string,
+	err error,
+	count int,
+	start time.Time,
+) (*model.SyncLog, error) {
+	failedLog := p.newFailedLog(meta, dest, err, count, start)
+	return p.logFailure(ctx, failedLog, err)
+}
+
+// failBatch resolves the destination from the batch or fallback and invokes fail.
+func (p *Pipeline) failBatch(
+	ctx context.Context,
+	meta model.FileMetadata,
+	batch *model.IngestionBatch,
+	fallback model.Destination,
+	err error,
+	start time.Time,
+) (*model.SyncLog, error) {
+	count := 0
+	if batch != nil {
+		count = batch.RecordCount
+	}
+	return p.fail(ctx, meta, resolveDestination(batch, fallback), err, count, start)
 }
 
 func (p *Pipeline) newFailedLog(
@@ -190,6 +221,105 @@ func (p *Pipeline) validateRequest(ctx context.Context, req Request) (registrati
 	return reg, nil
 }
 
+// extractStage coordinates progress notification, stream extraction, provenance transfer,
+// and domain validation. Returns the validated batch or a persisted failed SyncLog and cause.
+func (p *Pipeline) extractStage(
+	ctx context.Context,
+	reg registration,
+	req Request,
+	start time.Time,
+) (*model.IngestionBatch, *model.SyncLog, error) {
+	p.notify(ctx, req.Notifier, port.StageParsing, 0, 0)
+
+	batch, err := reg.extractor.Extract(ctx, req.Reader, req.Meta)
+	if err != nil {
+		failedLog, failErr := p.fail(ctx, req.Meta, string(reg.fallback), err, 0, start)
+		return nil, failedLog, failErr
+	}
+	if batch == nil {
+		failedLog, failErr := p.fail(ctx, req.Meta, string(reg.fallback), ErrNilBatch, 0, start)
+		return nil, failedLog, failErr
+	}
+
+	// Provenance transfer from request metadata to ingestion batch before domain validation.
+	batch.SourceURI = req.Meta.SourceURI
+	if valErr := batch.Validate(); valErr != nil {
+		failedLog, failErr := p.failBatch(ctx, req.Meta, batch, reg.fallback, valErr, start)
+		return nil, failedLog, failErr
+	}
+
+	return batch, nil, nil
+}
+
+// persistStage coordinates the saving progress notification and repository batch persistence,
+// handling nil log defensiveness and restamping on error.
+func (p *Pipeline) persistStage(
+	ctx context.Context,
+	reg registration,
+	req Request,
+	batch *model.IngestionBatch,
+	start time.Time,
+) (*model.SyncLog, error) {
+	p.notify(ctx, req.Notifier, port.StageSaving, 0, batch.RecordCount)
+
+	syncLog, err := p.repo.SaveBatch(ctx, batch)
+	if err != nil {
+		if syncLog != nil {
+			// Restamp timing parity over storage adapter.
+			p.restamp(syncLog, start)
+			return p.logFailure(ctx, syncLog, err)
+		}
+		return p.failBatch(ctx, req.Meta, batch, reg.fallback, err, start)
+	}
+	if syncLog == nil {
+		return p.failBatch(ctx, req.Meta, batch, reg.fallback, ErrNilSyncLog, start)
+	}
+	return syncLog, nil
+}
+
+// finalizeStage executes post-persistence file archival (if requested). On failure, it
+// constructs and audits a failure record upon archival failure.
+//
+//nolint:nilnil // nil SyncLog indicates successful finalization with no failure audit record required.
+func (p *Pipeline) finalizeStage(
+	ctx context.Context,
+	reg registration,
+	req Request,
+	batch *model.IngestionBatch,
+	start time.Time,
+) (*model.SyncLog, error) {
+	if req.Finalize == nil {
+		return nil, nil
+	}
+	if finErr := req.Finalize(ctx); finErr != nil {
+		// Emit a single failure audit log if post-persistence finalization fails.
+		cause := fmt.Errorf("storage succeeded but file archival failed: %w", finErr)
+		return p.failBatch(ctx, req.Meta, batch, reg.fallback, cause, start)
+	}
+	return nil, nil
+}
+
+// completeStage restamps the success sync log, persists it to the repository,
+// and emits the final completion notification.
+func (p *Pipeline) completeStage(
+	ctx context.Context,
+	req Request,
+	batch *model.IngestionBatch,
+	syncLog *model.SyncLog,
+	start time.Time,
+) (*model.SyncLog, error) {
+	// Restamp ensures orchestrator end-to-end timing parity on success.
+	p.restamp(syncLog, start)
+
+	// Non-fatal success audit returns the success log alongside wrapped ErrAuditWrite on audit failure.
+	if auditErr := p.repo.LogSync(ctx, syncLog); auditErr != nil {
+		return syncLog, fmt.Errorf("%w: %w", ErrAuditWrite, auditErr)
+	}
+
+	p.notify(ctx, req.Notifier, port.StageComplete, batch.RecordCount, batch.RecordCount)
+	return syncLog, nil
+}
+
 // Run executes a complete ingestion request across extract, persist, and audit stages.
 func (p *Pipeline) Run(ctx context.Context, req Request) (*model.SyncLog, error) {
 	reg, err := p.validateRequest(ctx, req)
@@ -198,53 +328,26 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*model.SyncLog, error)
 	}
 
 	start := p.timeNow().UTC()
-	p.notify(ctx, req.Notifier, port.StageParsing, 0, 0)
 
-	batch, err := reg.extractor.Extract(ctx, req.Reader, req.Meta)
+	// 1. Extraction Stage
+	batch, failedLog, err := p.extractStage(ctx, reg, req, start)
 	if err != nil {
-		return p.logFailure(ctx, p.newFailedLog(req.Meta, string(reg.fallback), err, 0, start), err)
-	}
-	if batch == nil {
-		return p.logFailure(ctx, p.newFailedLog(req.Meta, string(reg.fallback), ErrNilBatch, 0, start), ErrNilBatch)
+		return failedLog, err
 	}
 
-	batch.SourceURI = req.Meta.SourceURI
-	if valErr := batch.Validate(); valErr != nil {
-		coll := resolveDestination(batch, reg.fallback)
-		return p.logFailure(ctx, p.newFailedLog(req.Meta, coll, valErr, batch.RecordCount, start), valErr)
-	}
-
-	p.notify(ctx, req.Notifier, port.StageSaving, 0, batch.RecordCount)
-
-	syncLog, err := p.repo.SaveBatch(ctx, batch)
+	// 2. Persistence Stage
+	syncLog, err := p.persistStage(ctx, reg, req, batch, start)
 	if err != nil {
-		if syncLog == nil {
-			syncLog = p.newFailedLog(req.Meta, resolveDestination(batch, reg.fallback), err, batch.RecordCount, start)
-		} else {
-			p.restamp(syncLog, start)
-		}
-		return p.logFailure(ctx, syncLog, err)
-	}
-	if syncLog == nil {
-		coll := resolveDestination(batch, reg.fallback)
-		return p.logFailure(ctx, p.newFailedLog(req.Meta, coll, ErrNilSyncLog, batch.RecordCount, start), ErrNilSyncLog)
+		return syncLog, err
 	}
 
-	if req.Finalize != nil {
-		if finErr := req.Finalize(ctx); finErr != nil {
-			cause := fmt.Errorf("storage succeeded but file archival failed: %w", finErr)
-			coll := resolveDestination(batch, reg.fallback)
-			return p.logFailure(ctx, p.newFailedLog(req.Meta, coll, cause, batch.RecordCount, start), cause)
-		}
+	// 3. Finalization Stage
+	if finLog, finErr := p.finalizeStage(ctx, reg, req, batch, start); finErr != nil {
+		return finLog, finErr
 	}
 
-	p.restamp(syncLog, start)
-	if auditErr := p.repo.LogSync(ctx, syncLog); auditErr != nil {
-		return syncLog, fmt.Errorf("%w: %w", ErrAuditWrite, auditErr)
-	}
-
-	p.notify(ctx, req.Notifier, port.StageComplete, batch.RecordCount, batch.RecordCount)
-	return syncLog, nil
+	// 4. Completion & Audit Stage
+	return p.completeStage(ctx, req, batch, syncLog, start)
 }
 
 // RecordFailure writes a failure audit record for errors occurring prior to batch creation.
@@ -259,9 +362,9 @@ func (p *Pipeline) RecordFailure(
 		return nil, ErrUnknownSourceType
 	}
 	meta.FileHash = ""
-	failedLog := p.newFailedLog(meta, string(reg.fallback), cause, 0, p.timeNow().UTC())
-	if auditErr := p.auditDetached(ctx, failedLog); auditErr != nil {
-		return failedLog, errors.Join(cause, fmt.Errorf("%w: %w", ErrAuditWrite, auditErr))
+	failedLog, err := p.fail(ctx, meta, string(reg.fallback), cause, 0, p.timeNow().UTC())
+	if errors.Is(err, ErrAuditWrite) {
+		return failedLog, err
 	}
 	return failedLog, nil
 }
