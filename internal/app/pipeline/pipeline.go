@@ -18,6 +18,8 @@ var (
 	ErrInvalidRegistration = errors.New("invalid extractor registration")
 	ErrNilReader           = errors.New("reader cannot be nil")
 	ErrAuditWrite          = errors.New("audit log write failed")
+	ErrNilBatch            = errors.New("extractor returned nil batch")
+	ErrNilSyncLog          = errors.New("repository returned nil sync log on success")
 )
 
 // DefaultAuditTimeout is the maximum duration allocated for detached audit logging.
@@ -117,7 +119,7 @@ func (p *Pipeline) elapsedMs(start time.Time) int64 {
 }
 
 func (p *Pipeline) restamp(log *model.SyncLog, start time.Time) {
-	log.SyncedAt = start
+	log.SyncedAt = start.UTC()
 	log.DurationMs = p.elapsedMs(start)
 }
 
@@ -153,53 +155,85 @@ func (p *Pipeline) newFailedLog(
 	if err != nil {
 		msg = err.Error()
 	}
-	return model.NewFailedSyncLog(meta.FileName, meta.FileHash, dest, msg, int64(count), start, p.elapsedMs(start))
+	return model.NewFailedSyncLog(
+		meta.FileName,
+		meta.FileHash,
+		dest,
+		msg,
+		int64(count),
+		start.UTC(),
+		p.elapsedMs(start),
+	)
+}
+
+func resolveDestination(batch *model.IngestionBatch, fallback model.Destination) string {
+	if batch != nil && batch.Destination != "" {
+		return string(batch.Destination)
+	}
+	return string(fallback)
+}
+
+func (p *Pipeline) validateRequest(ctx context.Context, req Request) (registration, error) {
+	if err := ctx.Err(); err != nil {
+		return registration{}, err
+	}
+	if req.Reader == nil {
+		return registration{}, ErrNilReader
+	}
+	if err := req.Meta.Validate(); err != nil {
+		return registration{}, err
+	}
+	reg, ok := p.getRegistration(req.SourceType)
+	if !ok {
+		return registration{}, ErrUnknownSourceType
+	}
+	return reg, nil
 }
 
 // Run executes a complete ingestion request across extract, persist, and audit stages.
 func (p *Pipeline) Run(ctx context.Context, req Request) (*model.SyncLog, error) {
-	if err := ctx.Err(); err != nil {
+	reg, err := p.validateRequest(ctx, req)
+	if err != nil {
 		return nil, err
-	}
-	if req.Reader == nil {
-		return nil, ErrNilReader
-	}
-	if err := req.Meta.Validate(); err != nil {
-		return nil, err
-	}
-	reg, ok := p.getRegistration(req.SourceType)
-	if !ok {
-		return nil, ErrUnknownSourceType
 	}
 
-	start := p.timeNow()
+	start := p.timeNow().UTC()
 	p.notify(ctx, req.Notifier, port.StageParsing, 0, 0)
 
 	batch, err := reg.extractor.Extract(ctx, req.Reader, req.Meta)
 	if err != nil {
 		return p.logFailure(ctx, p.newFailedLog(req.Meta, string(reg.fallback), err, 0, start), err)
 	}
+	if batch == nil {
+		return p.logFailure(ctx, p.newFailedLog(req.Meta, string(reg.fallback), ErrNilBatch, 0, start), ErrNilBatch)
+	}
 
 	batch.SourceURI = req.Meta.SourceURI
+	if valErr := batch.Validate(); valErr != nil {
+		coll := resolveDestination(batch, reg.fallback)
+		return p.logFailure(ctx, p.newFailedLog(req.Meta, coll, valErr, batch.RecordCount, start), valErr)
+	}
+
 	p.notify(ctx, req.Notifier, port.StageSaving, 0, batch.RecordCount)
 
 	syncLog, err := p.repo.SaveBatch(ctx, batch)
 	if err != nil {
 		if syncLog == nil {
-			syncLog = p.newFailedLog(req.Meta, string(reg.fallback), err, batch.RecordCount, start)
+			syncLog = p.newFailedLog(req.Meta, resolveDestination(batch, reg.fallback), err, batch.RecordCount, start)
 		} else {
 			p.restamp(syncLog, start)
 		}
 		return p.logFailure(ctx, syncLog, err)
 	}
+	if syncLog == nil {
+		coll := resolveDestination(batch, reg.fallback)
+		return p.logFailure(ctx, p.newFailedLog(req.Meta, coll, ErrNilSyncLog, batch.RecordCount, start), ErrNilSyncLog)
+	}
 
 	if req.Finalize != nil {
 		if finErr := req.Finalize(ctx); finErr != nil {
 			cause := fmt.Errorf("storage succeeded but file archival failed: %w", finErr)
-			coll := string(batch.Destination)
-			if coll == "" {
-				coll = string(reg.fallback)
-			}
+			coll := resolveDestination(batch, reg.fallback)
 			return p.logFailure(ctx, p.newFailedLog(req.Meta, coll, cause, batch.RecordCount, start), cause)
 		}
 	}
@@ -225,7 +259,7 @@ func (p *Pipeline) RecordFailure(
 		return nil, ErrUnknownSourceType
 	}
 	meta.FileHash = ""
-	failedLog := p.newFailedLog(meta, string(reg.fallback), cause, 0, p.timeNow())
+	failedLog := p.newFailedLog(meta, string(reg.fallback), cause, 0, p.timeNow().UTC())
 	if auditErr := p.auditDetached(ctx, failedLog); auditErr != nil {
 		return failedLog, errors.Join(cause, fmt.Errorf("%w: %w", ErrAuditWrite, auditErr))
 	}

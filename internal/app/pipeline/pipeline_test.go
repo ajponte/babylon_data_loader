@@ -86,6 +86,16 @@ func newTestHarness(opts ...pipeline.Option) (*pipeline.Pipeline, *fakeRepo, *fa
 	return p, repo, ext
 }
 
+func assertValidLog(t *testing.T, log *model.SyncLog) {
+	t.Helper()
+	if log == nil {
+		t.Fatalf("expected non-nil sync log")
+	}
+	if err := log.Validate(); err != nil {
+		t.Fatalf("sync log failed validation: %v, log: %+v", err, log)
+	}
+}
+
 func assertAudited(t *testing.T, repo *fakeRepo, wantStatus model.SyncStatus, wantColl string) {
 	t.Helper()
 	repo.mu.Lock()
@@ -94,8 +104,12 @@ func assertAudited(t *testing.T, repo *fakeRepo, wantStatus model.SyncStatus, wa
 		t.Fatalf("expected audit log, got none")
 	}
 	last := repo.syncedLogs[len(repo.syncedLogs)-1]
-	if last.Status != wantStatus || (wantColl != "" && last.CollectionName != wantColl) || last.Validate() != nil {
-		t.Fatalf("unexpected or invalid audited log: %+v", last)
+	assertValidLog(t, last)
+	if last.Status != wantStatus {
+		t.Fatalf("expected status %v, got %v", wantStatus, last.Status)
+	}
+	if wantColl != "" && last.CollectionName != wantColl {
+		t.Fatalf("expected collection %q, got %q", wantColl, last.CollectionName)
 	}
 }
 
@@ -162,6 +176,7 @@ func TestRun_SuccessPersistsAndAudits(t *testing.T) {
 	if err != nil || log.RecordCount != 2 || log.SyncedAt != fixed {
 		t.Fatalf("unexpected result: err=%v, log=%+v", err, log)
 	}
+	assertValidLog(t, log)
 	assertAudited(t, repo, model.SyncStatusSuccess, "transactions_chase")
 }
 
@@ -169,9 +184,11 @@ func TestRun_CopiesSourceURIToBatch(t *testing.T) {
 	p, repo, _ := newTestHarness()
 	req := newValidTestRequest()
 	req.Meta.SourceURI = "s3://bucket/data.csv"
-	if _, err := p.Run(context.Background(), req); err != nil {
+	log, err := p.Run(context.Background(), req)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	assertValidLog(t, log)
 	if len(repo.savedBatches) != 1 || repo.savedBatches[0].SourceURI != "s3://bucket/data.csv" {
 		t.Fatalf("expected provenance copy, got %+v", repo.savedBatches)
 	}
@@ -187,6 +204,7 @@ func TestRun_ExtractFailureAuditsWithFallbackCollection(t *testing.T) {
 	if !errors.Is(err, extErr) || log == nil || log.RecordCount != 0 {
 		t.Fatalf("unexpected result: err=%v, log=%+v", err, log)
 	}
+	assertValidLog(t, log)
 	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
 }
 
@@ -199,6 +217,7 @@ func TestRun_SaveBatchFailedLogIsAudited(t *testing.T) {
 	if !errors.Is(err, saveErr) || log.SyncedAt.IsZero() {
 		t.Fatalf("unexpected result: err=%v, log=%+v", err, log)
 	}
+	assertValidLog(t, log)
 	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
 }
 
@@ -210,6 +229,7 @@ func TestRun_SaveBatchNilLogBuildsFailedLog(t *testing.T) {
 	if !errors.Is(err, saveErr) || log == nil || log.RecordCount != 2 {
 		t.Fatalf("unexpected result: err=%v, log=%+v", err, log)
 	}
+	assertValidLog(t, log)
 	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
 }
 
@@ -246,9 +266,11 @@ func TestRun_FinalizeRunsBeforeSuccessAudit(t *testing.T) {
 	repo.logSyncFn = func(_ context.Context, _ *model.SyncLog) error { steps = append(steps, "audit"); return nil }
 	req := newValidTestRequest()
 	req.Finalize = func(_ context.Context) error { steps = append(steps, "finalize"); return nil }
-	if _, err := p.Run(context.Background(), req); err != nil {
+	log, err := p.Run(context.Background(), req)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	assertValidLog(t, log)
 	if strings.Join(steps, "->") != "save->finalize->audit" {
 		t.Fatalf("expected save->finalize->audit, got %v", steps)
 	}
@@ -263,6 +285,7 @@ func TestRun_FinalizeFailureWritesSingleFailedLog(t *testing.T) {
 	if !errors.Is(err, finErr) || log == nil || !strings.Contains(log.ErrorMessage, "file archival failed") {
 		t.Fatalf("unexpected result: err=%v, log=%+v", err, log)
 	}
+	assertValidLog(t, log)
 	if len(repo.syncedLogs) != 1 {
 		t.Fatalf("expected 1 audit log, got %d", len(repo.syncedLogs))
 	}
@@ -277,6 +300,7 @@ func TestRun_SuccessAuditFailureIsNonFatal(t *testing.T) {
 	if log == nil || log.Status != model.SyncStatusSuccess {
 		t.Fatalf("expected success log, got %+v", log)
 	}
+	assertValidLog(t, log)
 	if !errors.Is(err, pipeline.ErrAuditWrite) || !errors.Is(err, auditErr) {
 		t.Fatalf("expected wrapped ErrAuditWrite, got %v", err)
 	}
@@ -289,10 +313,15 @@ func TestRun_FailureAuditFailureIsJoined(t *testing.T) {
 		return nil, extErr
 	}
 	repo.logSyncFn = func(_ context.Context, _ *model.SyncLog) error { return auditErr }
-	_, err := p.Run(context.Background(), newValidTestRequest())
+	log, err := p.Run(context.Background(), newValidTestRequest())
 	if !errors.Is(err, extErr) || !errors.Is(err, pipeline.ErrAuditWrite) || !errors.Is(err, auditErr) {
 		t.Fatalf("expected joined errors, got %v", err)
 	}
+	assertValidLog(t, log)
+	if len(repo.syncedLogs) != 1 {
+		t.Fatalf("expected 1 audit attempt, got %d", len(repo.syncedLogs))
+	}
+	assertValidLog(t, repo.syncedLogs[0])
 }
 
 func TestRun_NotifierStages(t *testing.T) {
@@ -301,9 +330,11 @@ func TestRun_NotifierStages(t *testing.T) {
 	_ = p.Register("chase", &fakeExtractor{}, model.DestChaseChecking)
 	req := newValidTestRequest()
 	req.Notifier = reqNotifier
-	if _, err := p.Run(context.Background(), req); err != nil {
+	log, err := p.Run(context.Background(), req)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	assertValidLog(t, log)
 	want := []port.ProgressStage{port.StageParsing, port.StageSaving, port.StageComplete}
 	if len(defNotifier.stages) != 0 || len(reqNotifier.stages) != 3 || !slices.Equal(reqNotifier.stages, want) {
 		t.Fatalf("unexpected stages: default=%v, req=%v", defNotifier.stages, reqNotifier.stages)
@@ -346,6 +377,7 @@ func TestRecordFailure_AuditsWithFallbackAndEmptyHash(t *testing.T) {
 	if err != nil || log == nil || log.FileHash != "" || log.ErrorMessage != cause.Error() {
 		t.Fatalf("unexpected result: err=%v, log=%+v", err, log)
 	}
+	assertValidLog(t, log)
 	assertAudited(t, repo, model.SyncStatusFailed, "positions_fidelity")
 }
 
@@ -358,4 +390,203 @@ func TestRecordFailure_UnknownSourceType(t *testing.T) {
 	if len(repo.syncedLogs) != 0 {
 		t.Fatalf("expected no audits, got %d", len(repo.syncedLogs))
 	}
+}
+
+func TestRun_ExtractorReturnsNilBatch_HandledDefensively(t *testing.T) {
+	p, repo, ext := newTestHarness()
+	ext.extractFn = func(_ context.Context, _ io.Reader, _ model.FileMetadata) (*model.IngestionBatch, error) {
+		return nil, nil //nolint:nilnil // intentionally testing defensive handling when extractor returns nil batch on success
+	}
+	log, err := p.Run(context.Background(), newValidTestRequest())
+	if !errors.Is(err, pipeline.ErrNilBatch) {
+		t.Fatalf("expected ErrNilBatch, got %v", err)
+	}
+	assertValidLog(t, log)
+	if log.RecordCount != 0 {
+		t.Fatalf("expected record count 0, got %d", log.RecordCount)
+	}
+	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
+}
+
+func TestRun_SaveBatchReturnsNilLogOnSuccess_HandledDefensively(t *testing.T) {
+	p, repo, _ := newTestHarness()
+	repo.saveBatchFn = func(_ context.Context, _ *model.IngestionBatch) (*model.SyncLog, error) {
+		return nil, nil //nolint:nilnil // Test stub explicitly simulates repo returning (nil, nil) on success
+	}
+	log, err := p.Run(context.Background(), newValidTestRequest())
+	if !errors.Is(err, pipeline.ErrNilSyncLog) {
+		t.Fatalf("expected ErrNilSyncLog, got %v", err)
+	}
+	assertValidLog(t, log)
+	if log.RecordCount != 2 {
+		t.Fatalf("expected record count 2, got %d", log.RecordCount)
+	}
+	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
+}
+
+func TestRun_FailureAuditUsesDefaultTimeoutDetachedContext(t *testing.T) {
+	p, repo, ext := newTestHarness()
+	parentCtx, cancel := context.WithCancel(context.Background())
+	ext.extractFn = func(_ context.Context, _ io.Reader, _ model.FileMetadata) (*model.IngestionBatch, error) {
+		cancel()
+		return nil, errors.New("extract failed")
+	}
+
+	var detachedCtxErr error
+	var hasDeadline bool
+	var remaining time.Duration
+
+	repo.logSyncFn = func(detachedCtx context.Context, _ *model.SyncLog) error {
+		detachedCtxErr = detachedCtx.Err()
+		if dl, ok := detachedCtx.Deadline(); ok {
+			hasDeadline = true
+			remaining = time.Until(dl)
+		}
+		return nil
+	}
+
+	log, err := p.Run(parentCtx, newValidTestRequest())
+	if err == nil {
+		t.Fatalf("expected extract error")
+	}
+	if parentCtx.Err() != context.Canceled {
+		t.Fatalf("expected parent context to be canceled, got %v", parentCtx.Err())
+	}
+	if detachedCtxErr != nil {
+		t.Fatalf("expected detached context ctx.Err() == nil, got %v", detachedCtxErr)
+	}
+	if !hasDeadline {
+		t.Fatalf("expected detached context to have a deadline")
+	}
+	if remaining < 4500*time.Millisecond || remaining > 5000*time.Millisecond {
+		t.Fatalf("expected remaining timeout in [4.5s, 5.0s], got %v", remaining)
+	}
+	assertValidLog(t, log)
+	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
+}
+
+func TestRun_TimestampsNormalizedToUTC(t *testing.T) {
+	est := time.FixedZone("EST", -5*3600)
+	nonUTCTime := time.Date(2026, 3, 15, 14, 30, 0, 0, est)
+	p, repo, _ := newTestHarness(pipeline.WithClock(func() time.Time { return nonUTCTime }))
+
+	log, err := p.Run(context.Background(), newValidTestRequest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if log.SyncedAt.Location() != time.UTC {
+		t.Fatalf("expected SyncedAt location UTC, got %v", log.SyncedAt.Location())
+	}
+	if !log.SyncedAt.Equal(nonUTCTime) {
+		t.Fatalf("expected SyncedAt equal to clock time, got %v", log.SyncedAt)
+	}
+	assertValidLog(t, log)
+	assertAudited(t, repo, model.SyncStatusSuccess, "transactions_chase")
+}
+
+func TestRun_InvalidBatchValidationFailsFastAndAudited(t *testing.T) {
+	p, repo, ext := newTestHarness()
+	ext.extractFn = func(_ context.Context, _ io.Reader, meta model.FileMetadata) (*model.IngestionBatch, error) {
+		return &model.IngestionBatch{
+			Destination: model.DestChaseChecking,
+			AccountID:   "", // missing account ID violates batch domain invariant
+			SourceFile:  meta.FileName,
+			FileHash:    meta.FileHash,
+			IngestedAt:  meta.IngestedAt,
+			RecordCount: 2,
+			Payload:     []model.ChaseTransaction{},
+		}, nil
+	}
+	log, err := p.Run(context.Background(), newValidTestRequest())
+	if !errors.Is(err, model.ErrMissingAccountID) {
+		t.Fatalf("expected ErrMissingAccountID, got %v", err)
+	}
+	if len(repo.savedBatches) != 0 {
+		t.Fatalf("expected SaveBatch not to be called, got %d saved batches", len(repo.savedBatches))
+	}
+	assertValidLog(t, log)
+	assertAudited(t, repo, model.SyncStatusFailed, "transactions_chase")
+}
+
+func TestRun_ResolveDestinationPrioritizesBatchDestination(t *testing.T) {
+	p, repo, ext := newTestHarness()
+	saveErr := errors.New("save failed")
+	ext.extractFn = func(_ context.Context, _ io.Reader, meta model.FileMetadata) (*model.IngestionBatch, error) {
+		return &model.IngestionBatch{
+			Destination: model.DestSynthetic, // differs from registration fallback (transactions_chase)
+			AccountID:   meta.AccountID,
+			SourceFile:  meta.FileName,
+			FileHash:    meta.FileHash,
+			IngestedAt:  meta.IngestedAt,
+			RecordCount: 1,
+			Payload:     []model.ChaseTransaction{},
+		}, nil
+	}
+	repo.saveBatchFn = func(_ context.Context, _ *model.IngestionBatch) (*model.SyncLog, error) {
+		return nil, saveErr
+	}
+	log, err := p.Run(context.Background(), newValidTestRequest())
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("expected saveErr, got %v", err)
+	}
+	assertValidLog(t, log)
+	assertAudited(t, repo, model.SyncStatusFailed, "transactions_synthetic")
+}
+
+func TestRun_PreflightContextExpired_ReturnsUnwrappedErrorWithoutAuditing(t *testing.T) {
+	pastCtx, cancelPast := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
+	defer cancelPast()
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		wantErr error
+	}{
+		{name: "context_canceled", ctx: canceledCtx, wantErr: context.Canceled},
+		{name: "deadline_exceeded", ctx: pastCtx, wantErr: context.DeadlineExceeded},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, repo, _ := newTestHarness()
+			log, err := p.Run(tc.ctx, newValidTestRequest())
+			if log != nil {
+				t.Fatalf("expected nil log, got %+v", log)
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("expected %v, got %v", tc.wantErr, err)
+			}
+			if len(repo.syncedLogs) != 0 {
+				t.Fatalf("expected no audits, got %d", len(repo.syncedLogs))
+			}
+		})
+	}
+}
+
+func TestRun_FinalizeFailureAndAuditFailure_ReturnsJoinedErrors(t *testing.T) {
+	p, repo, _ := newTestHarness()
+	finErr := errors.New("s3 archive timeout")
+	auditErr := errors.New("audit disk full")
+	req := newValidTestRequest()
+	req.Finalize = func(_ context.Context) error { return finErr }
+	repo.logSyncFn = func(_ context.Context, _ *model.SyncLog) error { return auditErr }
+
+	log, err := p.Run(context.Background(), req)
+	if !errors.Is(err, finErr) {
+		t.Fatalf("expected joined error to contain finErr, got %v", err)
+	}
+	if !errors.Is(err, pipeline.ErrAuditWrite) {
+		t.Fatalf("expected joined error to contain ErrAuditWrite, got %v", err)
+	}
+	if !errors.Is(err, auditErr) {
+		t.Fatalf("expected joined error to contain auditErr, got %v", err)
+	}
+	assertValidLog(t, log)
+	if len(repo.syncedLogs) != 1 {
+		t.Fatalf("expected 1 audit attempt, got %d", len(repo.syncedLogs))
+	}
+	assertValidLog(t, repo.syncedLogs[0])
 }
