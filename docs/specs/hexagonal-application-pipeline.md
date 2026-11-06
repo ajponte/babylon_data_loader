@@ -63,6 +63,63 @@ The `pipeline.Pipeline` orchestrates stream extraction, provenance copying, repo
 5. **Pre-Extraction Failure Audit (`RecordFailure`)**: For failures occurring prior to batch creation (such as `ErrInputTooLarge`), `RecordFailure` writes a FAILED audit log with the registered fallback collection and empty `FileHash` using the detached context.
 6. **Provenance Transfer Policy (P8)**: Upon successful extraction, `Run` transfers `req.Meta.SourceURI` to `batch.SourceURI`. Extractors do not parse or handle file transport URIs. Storage adapters receive `batch.SourceURI` and emit `source.s3Uri: <uri>` as a dotted `$set` path when non-empty, omitting it when empty (E6). `SourceURI` is strictly excluded from upsert filters.
 
+### 3.3 Pipeline Types, Constructors & Sentinel Errors
+
+```go
+package pipeline
+
+import (
+	"context"
+	"errors"
+	"io"
+	"time"
+
+	"babylon/dataloader/internal/domain/model"
+	"babylon/dataloader/internal/domain/port"
+)
+
+// DefaultAuditTimeout is the maximum duration allocated for detached audit logging.
+const DefaultAuditTimeout = 5 * time.Second
+
+var (
+	ErrUnknownSourceType   = errors.New("unknown source type")
+	ErrDuplicateSourceType = errors.New("source type already registered")
+	ErrInvalidRegistration = errors.New("invalid extractor registration")
+	ErrNilReader           = errors.New("reader cannot be nil")
+	ErrAuditWrite          = errors.New("audit log write failed")
+)
+
+// Request encapsulates the input stream and metadata for a pipeline ingestion execution.
+type Request struct {
+	Reader     io.Reader
+	Meta       model.FileMetadata
+	SourceType string
+	Finalize   func(ctx context.Context) error
+	Notifier   port.ProgressNotifier
+}
+
+// Option configures pipeline behavior.
+type Option func(*Pipeline)
+
+// WithClock overrides the timestamp generator used for audit durations.
+func WithClock(clock func() time.Time) Option
+
+// WithAuditTimeout configures the timeout for detached failure audit persistence.
+func WithAuditTimeout(timeout time.Duration) Option
+
+// New creates a new application pipeline orchestrator.
+func New(repo port.Repository, notifier port.ProgressNotifier, opts ...Option) *Pipeline
+
+// Register registers an extractor and fallback destination for a given source type.
+func (p *Pipeline) Register(sourceType string, ext port.Extractor, fallback model.Destination) error
+
+// Run executes a complete ingestion request across extract, persist, and audit stages.
+func (p *Pipeline) Run(ctx context.Context, req Request) (*model.SyncLog, error)
+
+// RecordFailure writes a failure audit record for errors occurring prior to batch creation.
+func (p *Pipeline) RecordFailure(ctx context.Context, src string, meta model.FileMetadata, cause error) (*model.SyncLog, error)
+```
+
 ---
 
 ## 4. Source Resolution, Fingerprinting & Registration Rules
@@ -92,7 +149,7 @@ Composition roots register extractors using `pipeline.Register(sourceType, ext, 
 | Source Type | Extractor Adapter | Target Collection / Fallback Destination | Record Model | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `chase` | `chase.Extractor` | `model.DestChaseChecking` / `transactions_chase` | `model.ChaseTransaction` | Checking and credit card statements. |
-| `fidelity` | `fidelity.Extractor` | `model.DestFidelityPositions` / `positions_fidelity` | `model.FidelityPosition` | Brokerage position exports. |
+| `fidelity` | `fidelity.Extractor` | `model.DestFidelityPosition` / `positions_fidelity` | `model.FidelityPosition` | Brokerage position exports. |
 | `synthetic` | `synthetic.CSVExtractor` (2G) | `model.DestSynthetic` / `transactions_synthetic` | `model.ChaseTransaction` | Dedicated parser preserving `details`, `balance`, `checkOrSlipNum` (U2). |
 
 ---
@@ -116,7 +173,7 @@ sequenceDiagram
     I->>S3C: DownloadStream(ctx, key)
     S3C-->>I: io.ReadCloser (stream)
     I->>I: Fingerprint (SHA-256 <= 32MB)
-    I->>P: Run(ctx, Request{SourceURI: s3://bucket/key})
+    I->>P: Run(ctx, Request{Meta: {SourceURI: s3://bucket/key}})
     P->>R: SaveBatch(ctx, batch)
     R-->>P: SyncLog (records persisted)
     P->>S3C: ArchiveProcessed(ctx, key)
@@ -230,7 +287,7 @@ sequenceDiagram
 | **2G** | Synthetic CSV Extractor | `TestCSVExtractor_ExtractSuccess`, `TestCSVExtractor_PreservesFields`, `TestCSVExtractor_RejectsInvalidRow` |
 | **4A** | Spec & Guardrails | `TestDepguard_AppIsolation`, `TestDepguard_InfraNoApp`, `make check-quality` |
 | **4B** | S3 URI Provenance | `TestWritePlan_SourceURI_EmittedAsDottedPath`, `TestWritePlan_SourceURI_EmptyOmitted`, `TestWritePlan_SourceURI_NotInFilter`, `TestFileMetadata_ValidateIgnoresSourceURI` |
-| **4C** | Pipeline Orchestrator | `TestRun_SuccessPersistsAndAudits`, `TestRun_FailureAuditUsesDetachedContext`, `TestRun_FinalizeRunsBeforeSuccessAudit` |
+| **4C** | Pipeline Orchestrator | `TestRegister_RejectsInvalid`, `TestRun_SuccessPersistsAndAudits`, `TestRun_CopiesSourceURIToBatch`, `TestRun_FailureAuditUsesDetachedContext`, `TestRun_FinalizeRunsBeforeSuccessAudit`, `TestRun_FinalizeFailureWritesSingleFailedLog`, `TestRun_SuccessAuditFailureIsNonFatal`, `TestRun_FailureAuditFailureIsJoined`, `TestRun_CancelledContextUnwrapped`, `TestRecordFailure_AuditsWithFallbackAndEmptyHash` |
 | **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize` |
 | **4E** | LocalFS Store | `TestLocalFS_List`, `TestLocalFS_DownloadStream`, `TestLocalFS_ArchiveProcessed` |
 | **4F** | Object Ingestion | `TestIngestor_IngestObject_Success`, `TestIngestor_TooLargeAuditsFailure`, `TestIngestor_DeterministicFailureRetainsObject` |
