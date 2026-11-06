@@ -61,6 +61,7 @@ The `pipeline.Pipeline` orchestrates stream extraction, provenance copying, repo
 3. **Audit Timing Parity (P4)**: The orchestrator restamps `SyncedAt` with the pipeline start timestamp and `DurationMs` with the end-to-end execution duration for both success and failure logs, overriding storage adapter write-only timings.
 4. **Non-Fatal Success Audit (P5)**: When data records are persisted successfully but writing the success `SyncLog` fails, `Run` returns `(successLog, fmt.Errorf("%w: %w", ErrAuditWrite, err))`. Callers treat the ingestion as succeeded while logging the audit warning.
 5. **Pre-Extraction Failure Audit (`RecordFailure`)**: For failures occurring prior to batch creation (such as `ErrInputTooLarge`), `RecordFailure` writes a FAILED audit log with the registered fallback collection and empty `FileHash` using the detached context.
+6. **Provenance Transfer Policy (P8)**: Upon successful extraction, `Run` transfers `req.Meta.SourceURI` to `batch.SourceURI`. Extractors do not parse or handle file transport URIs. Storage adapters receive `batch.SourceURI` and emit `source.s3Uri: <uri>` as a dotted `$set` path when non-empty, omitting it when empty (E6). `SourceURI` is strictly excluded from upsert filters.
 
 ---
 
@@ -228,7 +229,7 @@ sequenceDiagram
 | :--- | :--- | :--- |
 | **2G** | Synthetic CSV Extractor | `TestCSVExtractor_ExtractSuccess`, `TestCSVExtractor_PreservesFields`, `TestCSVExtractor_RejectsInvalidRow` |
 | **4A** | Spec & Guardrails | `TestDepguard_AppIsolation`, `TestDepguard_InfraNoApp`, `make check-quality` |
-| **4B** | S3 URI Provenance | `TestBuildWritePlan_SetsS3URI`, `TestSaveBatch_S3URIPersistedAndPreserved` |
+| **4B** | S3 URI Provenance | `TestWritePlan_SourceURI_EmittedAsDottedPath`, `TestWritePlan_SourceURI_EmptyOmitted`, `TestWritePlan_SourceURI_NotInFilter`, `TestFileMetadata_ValidateIgnoresSourceURI` |
 | **4C** | Pipeline Orchestrator | `TestRun_SuccessPersistsAndAudits`, `TestRun_FailureAuditUsesDetachedContext`, `TestRun_FinalizeRunsBeforeSuccessAudit` |
 | **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize` |
 | **4E** | LocalFS Store | `TestLocalFS_List`, `TestLocalFS_DownloadStream`, `TestLocalFS_ArchiveProcessed` |

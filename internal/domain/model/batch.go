@@ -67,6 +67,8 @@ type IngestionBatch struct {
 	IngestedAt  time.Time
 	RecordCount int
 	Payload     any
+	// SourceURI is copied from FileMetadata by the application pipeline; extractors do not set it.
+	SourceURI string
 }
 
 // Validate validates the core integrity of the IngestionBatch.
@@ -167,6 +169,8 @@ type FileMetadata struct {
 	FileHash   string
 	AccountID  string
 	IngestedAt time.Time
+	// SourceURI is optional provenance (e.g. "s3://bucket/unprocessed/x.csv"). Empty when unknown.
+	SourceURI string
 }
 
 // Validate validates the core fields of FileMetadata.

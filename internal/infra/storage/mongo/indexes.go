@@ -209,7 +209,7 @@ func planChaseBatch(batch *model.IngestionBatch, dataSource string) ([]mongodrv.
 	if err != nil {
 		return nil, err
 	}
-	return buildChaseWriteModels(txs, dataSource)
+	return buildChaseWriteModels(txs, dataSource, batch.SourceURI)
 }
 
 func planFidelityBatch(batch *model.IngestionBatch) ([]mongodrv.WriteModel, error) {
@@ -217,13 +217,13 @@ func planFidelityBatch(batch *model.IngestionBatch) ([]mongodrv.WriteModel, erro
 	if err != nil {
 		return nil, err
 	}
-	return buildFidelityWriteModels(positions)
+	return buildFidelityWriteModels(positions, batch.SourceURI)
 }
 
-func buildChaseWriteModels(txs []model.ChaseTransaction, dataSource string) ([]mongodrv.WriteModel, error) {
+func buildChaseWriteModels(txs []model.ChaseTransaction, dataSource, sourceURI string) ([]mongodrv.WriteModel, error) {
 	models := make([]mongodrv.WriteModel, 0, len(txs))
 	for _, tx := range txs {
-		m, err := buildChaseUpdateModel(tx, dataSource)
+		m, err := buildChaseUpdateModel(tx, dataSource, sourceURI)
 		if err != nil {
 			return nil, err
 		}
@@ -232,8 +232,11 @@ func buildChaseWriteModels(txs []model.ChaseTransaction, dataSource string) ([]m
 	return models, nil
 }
 
-func buildChaseUpdateModel(tx model.ChaseTransaction, dataSource string) (*mongodrv.UpdateOneModel, error) {
+func buildChaseUpdateModel(tx model.ChaseTransaction, dataSource, sourceURI string) (*mongodrv.UpdateOneModel, error) {
 	d := toChaseDoc(tx, dataSource)
+	if sourceURI != "" {
+		d.Source.S3URI = sourceURI
+	}
 	u, err := setDocument(d)
 	if err != nil {
 		return nil, fmt.Errorf("mongo: build chase update model: %w", err)
@@ -244,10 +247,10 @@ func buildChaseUpdateModel(tx model.ChaseTransaction, dataSource string) (*mongo
 		SetUpsert(true), nil
 }
 
-func buildFidelityWriteModels(positions []model.FidelityPosition) ([]mongodrv.WriteModel, error) {
+func buildFidelityWriteModels(positions []model.FidelityPosition, sourceURI string) ([]mongodrv.WriteModel, error) {
 	models := make([]mongodrv.WriteModel, 0, len(positions))
 	for _, p := range positions {
-		m, err := buildFidelityUpdateModel(p)
+		m, err := buildFidelityUpdateModel(p, sourceURI)
 		if err != nil {
 			return nil, err
 		}
@@ -256,11 +259,14 @@ func buildFidelityWriteModels(positions []model.FidelityPosition) ([]mongodrv.Wr
 	return models, nil
 }
 
-func buildFidelityUpdateModel(p model.FidelityPosition) (*mongodrv.UpdateOneModel, error) {
+func buildFidelityUpdateModel(p model.FidelityPosition, sourceURI string) (*mongodrv.UpdateOneModel, error) {
 	if p.AsOfDate.IsZero() {
 		return nil, model.ErrMissingAsOfDate
 	}
 	d := toFidelityDoc(p)
+	if sourceURI != "" {
+		d.Source.S3URI = sourceURI
+	}
 	u, err := setDocument(d)
 	if err != nil {
 		return nil, fmt.Errorf("mongo: build fidelity update model: %w", err)

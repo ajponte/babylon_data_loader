@@ -201,6 +201,8 @@ type IngestionBatch struct {
     IngestedAt  time.Time
     RecordCount int
     Payload     any
+    // SourceURI is copied from FileMetadata by the application pipeline; extractors do not set it.
+    SourceURI   string
 }
 ```
 
@@ -213,6 +215,7 @@ type IngestionBatch struct {
 | `IngestedAt` | `time.Time` | Required (`!IngestedAt.IsZero()`) | UTC timestamp when the batch was processed into memory. |
 | `RecordCount` | `int` | Must be `>= 0` | Total number of extracted records in `Payload`. |
 | `Payload` | `any` | Non-nil when `RecordCount > 0` | Generic slice holding domain records (`[]ChaseTransaction`, `[]FidelityPosition`). |
+| `SourceURI` | `string` | Optional (`""` when unknown) | Provenance URI (e.g. `s3://bucket/unprocessed/x.csv`) copied from `FileMetadata` by application pipeline; ignored by `Validate()`. |
 
 #### Typed Accessor Methods
 To protect downstream adapters from unsafe runtime casting panics, `IngestionBatch` exposes typed accessor methods:
@@ -243,6 +246,8 @@ type FileMetadata struct {
     FileHash   string
     AccountID  string
     IngestedAt time.Time
+    // SourceURI is optional provenance (e.g. "s3://bucket/unprocessed/x.csv"). Empty when unknown.
+    SourceURI  string
 }
 ```
 
@@ -252,6 +257,7 @@ type FileMetadata struct {
 | `FileHash` | `string` | Optional | SHA-256 checksum of the incoming stream. |
 | `AccountID` | `string` | Required (`!= ""`) | Extracted or configured account identifier. |
 | `IngestedAt` | `time.Time` | Required (`!IngestedAt.IsZero()`) | Execution timestamp. |
+| `SourceURI` | `string` | Optional (`""` when unknown) | Statement file provenance URI (e.g. `s3://bucket/unprocessed/x.csv`); empty when unknown or local; ignored by `Validate()`. |
 
 #### `SourceLineage` (Embedded Record Coordinate)
 Embedded inside each domain record to establish provenance back to the raw source file row:

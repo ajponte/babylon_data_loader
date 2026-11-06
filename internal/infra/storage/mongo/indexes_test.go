@@ -890,3 +890,326 @@ func TestBuildWritePlan_DuplicateKeysPreservedInBatch(t *testing.T) {
 		t.Errorf("expected identical filters for duplicate input records, got %+v and %+v", filt1, filt2)
 	}
 }
+
+func extractSetDoc(t *testing.T, m mongodrv.WriteModel) bson.D {
+	t.Helper()
+	um, ok := m.(*mongodrv.UpdateOneModel)
+	if !ok {
+		t.Fatalf("expected *UpdateOneModel, got %T", m)
+	}
+	upd, ok := um.Update.(bson.D)
+	if !ok || len(upd) == 0 || upd[0].Key != "$set" {
+		t.Fatalf("expected update document with root $set, got %+v", um.Update)
+	}
+	setDoc, ok := upd[0].Value.(bson.D)
+	if !ok {
+		t.Fatalf("expected $set value to be bson.D, got %T", upd[0].Value)
+	}
+	return setDoc
+}
+
+func extractFilterDoc(t *testing.T, m mongodrv.WriteModel) bson.D {
+	t.Helper()
+	um, ok := m.(*mongodrv.UpdateOneModel)
+	if !ok {
+		t.Fatalf("expected *UpdateOneModel, got %T", m)
+	}
+	filt, ok := um.Filter.(bson.D)
+	if !ok {
+		t.Fatalf("expected filter to be bson.D, got %T", um.Filter)
+	}
+	return filt
+}
+
+func newTestChaseCheckingBatch(sourceURI string) *model.IngestionBatch {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	tx := newTestChaseTx("chk-1", 1, false)
+	return &model.IngestionBatch{
+		Destination: model.DestChaseChecking,
+		AccountID:   "chk-1",
+		SourceFile:  "chase_checking.csv",
+		SourceURI:   sourceURI,
+		IngestedAt:  now,
+		RecordCount: 1,
+		Payload:     []model.ChaseTransaction{tx},
+	}
+}
+
+func newTestChaseCreditCardBatch(sourceURI string) *model.IngestionBatch {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	tx := newTestChaseTx("cc-1", 1, true)
+	return &model.IngestionBatch{
+		Destination: model.DestChaseCreditCard,
+		AccountID:   "cc-1",
+		SourceFile:  "chase_credit.csv",
+		SourceURI:   sourceURI,
+		IngestedAt:  now,
+		RecordCount: 1,
+		Payload:     []model.ChaseTransaction{tx},
+	}
+}
+
+func newTestSyntheticBatch(sourceURI string) *model.IngestionBatch {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	tx := newTestChaseTx("syn-1", 1, false)
+	return &model.IngestionBatch{
+		Destination: model.DestSynthetic,
+		AccountID:   "syn-1",
+		SourceFile:  "synthetic.csv",
+		SourceURI:   sourceURI,
+		IngestedAt:  now,
+		RecordCount: 1,
+		Payload:     []model.ChaseTransaction{tx},
+	}
+}
+
+func newTestFidelityBatch(sourceURI string) *model.IngestionBatch {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	pos := newTestFidelityPos("fid-1", "AAPL", now)
+	return &model.IngestionBatch{
+		Destination: model.DestFidelityPosition,
+		AccountID:   "fid-1",
+		SourceFile:  "fidelity.csv",
+		SourceURI:   sourceURI,
+		IngestedAt:  now,
+		RecordCount: 1,
+		Payload:     []model.FidelityPosition{pos},
+	}
+}
+
+// 16. TestWritePlan_SourceURI_EmittedAsDottedPath: Table-driven test verifying that non-empty SourceURI
+// produces dotted source.s3Uri without top-level source subdocuments across all supported batch destinations.
+func TestWritePlan_SourceURI_EmittedAsDottedPath(t *testing.T) {
+	tests := []struct {
+		name  string
+		batch *model.IngestionBatch
+	}{
+		{
+			name:  "Chase Checking",
+			batch: newTestChaseCheckingBatch("s3://my-bucket/unprocessed/chase_checking.csv"),
+		},
+		{
+			name:  "Chase Credit Card",
+			batch: newTestChaseCreditCardBatch("s3://my-bucket/unprocessed/chase_credit.csv"),
+		},
+		{
+			name:  "Synthetic",
+			batch: newTestSyntheticBatch("s3://my-bucket/unprocessed/synthetic.csv"),
+		},
+		{
+			name:  "Fidelity Position",
+			batch: newTestFidelityBatch("s3://my-bucket/unprocessed/fidelity.csv"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := buildWritePlan(tt.batch)
+			if err != nil {
+				t.Fatalf("buildWritePlan failed: %v", err)
+			}
+			if len(plan.models) != 1 {
+				t.Fatalf("expected 1 write model, got %d", len(plan.models))
+			}
+
+			setDoc := extractSetDoc(t, plan.models[0])
+
+			// Contract: $set contains source.s3Uri equal to input URI
+			val, ok := findDocValue(setDoc, "source.s3Uri")
+			if !ok {
+				t.Fatalf("missing dotted path key %q in $set", "source.s3Uri")
+			}
+			if val != tt.batch.SourceURI {
+				t.Errorf("source.s3Uri = %v; want %v", val, tt.batch.SourceURI)
+			}
+
+			// Contract: no forbidden top-level "source" subdocument
+			if _, found := findDocValue(setDoc, "source"); found {
+				t.Errorf("found forbidden top-level 'source' key in $set; lineage must be dotted")
+			}
+		})
+	}
+}
+
+// 17. TestWritePlan_SourceURI_EmptyOmitted: Table-driven regression guard verifying that empty SourceURI
+// omits source.s3Uri from the $set document across all destinations (decision E6).
+func TestWritePlan_SourceURI_EmptyOmitted(t *testing.T) {
+	tests := []struct {
+		name  string
+		batch *model.IngestionBatch
+	}{
+		{
+			name:  "Chase Checking",
+			batch: newTestChaseCheckingBatch(""),
+		},
+		{
+			name:  "Chase Credit Card",
+			batch: newTestChaseCreditCardBatch(""),
+		},
+		{
+			name:  "Synthetic",
+			batch: newTestSyntheticBatch(""),
+		},
+		{
+			name:  "Fidelity Position",
+			batch: newTestFidelityBatch(""),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := buildWritePlan(tt.batch)
+			if err != nil {
+				t.Fatalf("buildWritePlan failed: %v", err)
+			}
+			if len(plan.models) != 1 {
+				t.Fatalf("expected 1 write model, got %d", len(plan.models))
+			}
+
+			setDoc := extractSetDoc(t, plan.models[0])
+
+			if _, found := findDocValue(setDoc, "source.s3Uri"); found {
+				t.Errorf("forbidden key %q found in $set when SourceURI is empty", "source.s3Uri")
+			}
+			if _, found := findDocValue(setDoc, "s3Uri"); found {
+				t.Errorf("forbidden key %q found in $set when SourceURI is empty", "s3Uri")
+			}
+			if _, found := findDocValue(setDoc, "source"); found {
+				t.Errorf("forbidden top-level 'source' key in $set; lineage must be dotted")
+			}
+		})
+	}
+}
+
+// 18. TestWritePlan_SourceURI_NotInFilter: Verifies that upsert filters remain identical byte-for-byte
+// regardless of whether SourceURI is set or empty (decision D1).
+func TestWritePlan_SourceURI_NotInFilter(t *testing.T) {
+	testURIs := []string{
+		"s3://test-bucket/unprocessed/chase_checking.csv",
+		"s3://test-bucket/unprocessed/chase_credit.csv",
+		"s3://test-bucket/unprocessed/synthetic.csv",
+		"s3://test-bucket/unprocessed/fidelity.csv",
+	}
+
+	tests := []struct {
+		name       string
+		batchEmpty *model.IngestionBatch
+		batchWith  *model.IngestionBatch
+	}{
+		{
+			name:       "Chase Checking",
+			batchEmpty: newTestChaseCheckingBatch(""),
+			batchWith:  newTestChaseCheckingBatch(testURIs[0]),
+		},
+		{
+			name:       "Chase Credit Card",
+			batchEmpty: newTestChaseCreditCardBatch(""),
+			batchWith:  newTestChaseCreditCardBatch(testURIs[1]),
+		},
+		{
+			name:       "Synthetic",
+			batchEmpty: newTestSyntheticBatch(""),
+			batchWith:  newTestSyntheticBatch(testURIs[2]),
+		},
+		{
+			name:       "Fidelity Position",
+			batchEmpty: newTestFidelityBatch(""),
+			batchWith:  newTestFidelityBatch(testURIs[3]),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			planEmpty, err := buildWritePlan(tt.batchEmpty)
+			if err != nil {
+				t.Fatalf("buildWritePlan without URI failed: %v", err)
+			}
+			planWith, err := buildWritePlan(tt.batchWith)
+			if err != nil {
+				t.Fatalf("buildWritePlan with URI failed: %v", err)
+			}
+
+			filterEmpty := extractFilterDoc(t, planEmpty.models[0])
+			filterWith := extractFilterDoc(t, planWith.models[0])
+
+			// Invariant: filter must match byte-for-byte regardless of SourceURI
+			if !reflect.DeepEqual(filterEmpty, filterWith) {
+				t.Errorf("filter with SourceURI differs from filter without SourceURI:\nempty: %+v\nwith:  %+v", filterEmpty, filterWith)
+			}
+
+			// Invariant: filter must never contain provenance fields
+			for _, elem := range filterWith {
+				if elem.Key == "source.s3Uri" || elem.Key == "s3Uri" {
+					t.Errorf("forbidden provenance key %q found in filter", elem.Key)
+				}
+			}
+		})
+	}
+}
+
+// 19. TestFileMetadata_ValidateIgnoresSourceURI: Verifies that FileMetadata and IngestionBatch
+// validation ignores SourceURI provenance (contract §4 row 4).
+func TestFileMetadata_ValidateIgnoresSourceURI(t *testing.T) {
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+
+	t.Run("FileMetadata with and without SourceURI", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			sourceURI string
+		}{
+			{name: "empty SourceURI", sourceURI: ""},
+			{name: "s3 URI", sourceURI: "s3://bucket/unprocessed/statement.csv"},
+			{name: "arbitrary URI", sourceURI: "custom://datalake/path/data.csv"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				meta := &model.FileMetadata{
+					FileName:   "statement.csv",
+					FileHash:   "hash123",
+					AccountID:  "act-1",
+					IngestedAt: now,
+					SourceURI:  tt.sourceURI,
+				}
+				if err := meta.Validate(); err != nil {
+					t.Errorf("FileMetadata.Validate() failed with SourceURI=%q: %v", tt.sourceURI, err)
+				}
+			})
+		}
+	})
+
+	t.Run("FileMetadata validation errors independent of SourceURI", func(t *testing.T) {
+		invalidMeta := &model.FileMetadata{
+			SourceURI: "s3://bucket/unprocessed/statement.csv",
+		}
+		if err := invalidMeta.Validate(); !errors.Is(err, model.ErrMissingFileName) {
+			t.Errorf("expected ErrMissingFileName, got %v", err)
+		}
+	})
+
+	t.Run("IngestionBatch with and without SourceURI", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			sourceURI string
+		}{
+			{name: "empty SourceURI", sourceURI: ""},
+			{name: "s3 URI", sourceURI: "s3://bucket/unprocessed/statement.csv"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				batch := &model.IngestionBatch{
+					Destination: model.DestChaseChecking,
+					AccountID:   "act-1",
+					SourceFile:  "statement.csv",
+					IngestedAt:  now,
+					RecordCount: 0,
+					SourceURI:   tt.sourceURI,
+				}
+				if err := batch.Validate(); err != nil {
+					t.Errorf("IngestionBatch.Validate() failed with SourceURI=%q: %v", tt.sourceURI, err)
+				}
+			})
+		}
+	})
+}
