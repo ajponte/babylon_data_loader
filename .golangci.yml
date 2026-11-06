@@ -249,6 +249,28 @@ linters:
             - babylon/dataloader/internal/domain
             - babylon/dataloader/internal/infra/storage/s3
             - github.com/aws/aws-sdk-go-v2
+        "app-isolation":
+          list-mode: strict
+          files:
+            - "**/internal/app/**"
+          allow:
+            - $gostd
+            - babylon/dataloader/internal/domain
+            - babylon/dataloader/internal/app
+        "storage-localfs-isolation":
+          list-mode: strict
+          files:
+            - "**/internal/infra/storage/localfs/**"
+          allow:
+            - $gostd
+            - babylon/dataloader/internal/domain
+            - babylon/dataloader/internal/infra/storage/localfs
+        "infra-no-app":
+          files:
+            - "**/internal/infra/**"
+          deny:
+            - pkg: "babylon/dataloader/internal/app"
+              desc: "adapters must not depend on application use cases"
         "internal-no-legacy":
           files:
             - "**/internal/**"
