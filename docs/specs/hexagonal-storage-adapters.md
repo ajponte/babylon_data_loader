@@ -200,7 +200,7 @@ Persistence transformations are implemented as pure, side-effect-free functions 
 
 - `toChaseDoc(tx model.ChaseTransaction, dataSource string) chaseDoc`: Maps domain Chase transactions (and synthetic transactions) to persistence DTO `chaseDoc`, parameterizing `dataSource` (`"chase"` or `"synthetic"`).
 - `toFidelityDoc(p model.FidelityPosition) fidelityDoc`: Maps domain Fidelity positions to persistence DTO `fidelityDoc`, binding `dataSource` to `"fidelity"`.
-- `toLineageDoc(l model.SourceLineage) lineageDoc`: Maps domain lineage metadata to embedded subdocument `lineageDoc`, converting `RowNumber` to `int64` (BSON int64 compatibility) and leaving `S3URI` empty for Phase 4.
+- `toLineageDoc(l model.SourceLineage) lineageDoc`: Maps domain lineage metadata to embedded subdocument `lineageDoc`, converting `RowNumber` to `int64` (BSON int64 compatibility) and leaving `S3URI` empty. (In Phase 4B, file provenance `SourceURI` is populated at the document level from `batch.SourceURI` in `indexes.go`).
 - `toSyncLogDoc(log *model.SyncLog) syncLogDoc`: Maps domain audit logs to persistence DTO `syncLogDoc` in [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), converting `SyncedAt` to UTC and mapping legacy desktop dual fields (`collection_name`, `sync_timestamp`, and conditional `records_uploaded`).
 
 #### Memory Safety & Immutability Invariants
@@ -263,12 +263,12 @@ Authoritative implementation reference: [`internal/infra/storage/mongo/indexes.g
    - `fidelityFilter(d fidelityDoc) bson.D`: Returns 3-field filter matching the unique compound index keys: `{accountNumber, symbol, asOfDate}`. Value types match stored BSON types (string, string, UTC BSON Date).
 2. **Flattened Dotted `$set` Builder (`setDocument`)**:
    - Marshals the persistence DTO to BSON, decodes into `bson.D`, and flattens embedded `source` subdocument elements into dotted paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`).
-   - `source.s3Uri` is omitted when empty due to `lineageDoc.S3URI` `omitempty` tag (decision E6), preserving any existing historical values in MongoDB Atlas.
+   - `source.s3Uri` Provenance (Phase 4B): When `batch.SourceURI` is non-empty, write model builders (`buildChaseUpdateModel`, `buildFidelityUpdateModel`) set `d.Source.S3URI = sourceURI` on the document before calling `setDocument`, which flattens into `source.s3Uri: <sourceURI>` dotted path in `$set`. When `batch.SourceURI` is empty, `source.s3Uri` is omitted due to the `omitempty` tag, preserving any existing historical values in MongoDB Atlas (decision E6). `source.s3Uri` is strictly excluded from upsert filters (`chaseFilter`, `fidelityFilter`).
    - Restored A1 fields (2E zero-value numeric fields `0.0`, empty string `""`, and 2F `transactionDate` for credit card) are preserved in `$set`.
    - Wraps the flattened document in `bson.D{{Key: "$set", Value: flattened}}`.
 3. **Destination Router & Write Planner**:
    - `collectionFor(dest model.Destination) (string, error)`: Maps destinations to target collection names. `DestChaseChecking` and `DestChaseCreditCard` share the identical underlying string value (`"transactions_chase"`); matching `DestChaseChecking` avoids Go duplicate-case compile errors while covering both destinations.
-   - `buildWritePlan(batch *model.IngestionBatch) (writePlan, error)`: Routes batches into collection names and unordered `mongodrv.UpdateOneModel` slices with `Upsert = true`.
+   - `buildWritePlan(batch *model.IngestionBatch) (writePlan, error)`: Routes batches into collection names and unordered `mongodrv.UpdateOneModel` slices with `Upsert = true`. Threads `batch.SourceURI` through `routeWriteModels`, `planChaseBatch`, `planFidelityBatch`, `buildChaseWriteModels`, and `buildFidelityWriteModels` (Phase 4B).
    - Zero `AsOfDate` guard on Fidelity batches returns `model.ErrMissingAsOfDate` (defense-in-depth for decision D2). Empty batches (`RecordCount == 0`) return a valid plan with 0 models and nil error.
 
 ---
@@ -400,7 +400,7 @@ The datalake object store adapter provides streaming raw statement retrieval and
 
 1. **2E Fidelity Placeholder Superset**: Accepts extended placeholder tokens (`-`, `pending`, `unknown`, accounting parens) mapping to `0.0` or `""`.
 2. **2F Strict Transaction Date Rejection**: Rejects unparseable non-placeholder dates with `ErrInvalidRow` instead of silently storing null.
-3. **`source.s3Uri` Deferred**: New records omit `source.s3Uri` until Phase 4 supplies it from entrypoint metadata.
+3. **`source.s3Uri` Population (Phase 4B)**: Supplied from entrypoint metadata via `model.FileMetadata` and `model.IngestionBatch`; emitted as dotted path `source.s3Uri: <uri>` in `$set` when non-empty, and omitted when empty.
 4. **S3 Streaming Download vs. Disk Spooling**: Legacy [`storage/s3.go`](../../storage/s3.go) forced S3 object downloads into local disk files via `os.Create` and `io.Copy`. The hexagonal adapter [`s3.Client`](../../internal/infra/storage/s3/client.go) returns an unbuffered `io.ReadCloser` stream directly to the caller (`port.ObjectStore.DownloadStream`), eliminating disk I/O bottlenecks and temporary file leakage in serverless execution environments.
 
 ---
@@ -464,7 +464,7 @@ Phase 3E implements the record write keys, legacy index catalog registration, un
 Key verified invariants include:
 - **Legacy Index Catalog Parity**: `TestIndexCatalog_LegacyParity` and `TestIndexCatalog_RegisteredInRepository` verify that `chaseIndexes()` and `fidelityIndexes()` match Atlas indexes byte-for-byte in names, key order, sort direction, unique constraints, and sparse options. Indexes are ensured in deterministic order (`dataSync`, `transactions_chase`, `positions_fidelity`), and `transactions_synthetic` has zero index specifications (decision D1).
 - **Upsert Filter Invariant**: `TestUpsertFilter_ChaseLegacyParity`, `TestUpsertFilter_FidelityLegacyParity`, and `TestUpsertFilter_EqualsUniqueIndexKeys` prove that for all collections, the upsert filter keys match the unique compound index keys in order and data types (UTC dates, float64 amounts, int64 row numbers).
-- **Dotted `$set` Lineage Preservation**: `TestSetDocument_FlattensSourceLineage` and `TestSetDocument_OmitsS3URIPlaceholder` verify that lineage fields are flattened to dotted paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`) with no top-level `source` object and no empty `source.s3Uri`, preserving historical unmapped lineage in MongoDB Atlas (decision E6).
+- **Dotted `$set` Lineage Preservation**: `TestSetDocument_FlattensSourceLineage` and `TestSetDocument_OmitsS3URIPlaceholder` verify that lineage fields are flattened to dotted paths (`source.fileName`, `source.rowNumber`, `source.ingestedAt`, `source.sha256`) with no top-level `source` object and no empty `source.s3Uri`, preserving historical unmapped lineage in MongoDB Atlas (decision E6). Phase 4B tests (`TestWritePlan_SourceURI_EmittedAsDottedPath`, `TestWritePlan_SourceURI_EmptyOmitted`, `TestWritePlan_SourceURI_NotInFilter`, and `TestFileMetadata_ValidateIgnoresSourceURI`) verify non-empty provenance emission, empty omission, and filter invariance.
 - **Restored A1 Fields**: `TestSetDocument_IncludesRestoredA1Fields` verifies that all eight restored 2E fields appear in Fidelity `$set` updates (even when zero), and 2F `transactionDate` is present for credit cards and omitted for checking.
 - **Pure Batch Router & Write Planner**: `TestCollectionFor_AllDestinations`, `TestBuildWritePlan_PayloadMismatch`, `TestBuildWritePlan_SyntheticUsesChaseShape`, `TestBuildWritePlan_UpsertModels`, `TestBuildWritePlan_FidelityMissingAsOfDate`, and `TestBuildWritePlan_EmptyPayload` verify destination mapping without duplicate switch cases, payload type assertion guards, synthetic document routing with Chase shape (decision D4), zero `AsOfDate` sentinel error enforcement (decision D2), and empty batch handling with zero allocations.
 
