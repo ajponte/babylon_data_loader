@@ -38,14 +38,22 @@ func New(root string) (*Store, error) {
 		return nil, ErrMissingRoot
 	}
 	cleanRoot := filepath.Clean(root)
-	fi, err := os.Stat(cleanRoot)
-	if err != nil {
-		return nil, fmt.Errorf("localfs: root directory: %w", sanitizeError(err))
-	}
-	if !fi.IsDir() {
-		return nil, fmt.Errorf("localfs: root must be a directory: %w", fs.ErrInvalid)
+	if err := validateRootDirectory(cleanRoot); err != nil {
+		return nil, err
 	}
 	return &Store{root: cleanRoot, rename: os.Rename}, nil
+}
+
+// validateRootDirectory verifies that root exists and is a directory.
+func validateRootDirectory(root string) error {
+	fi, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("localfs: root directory: %w", sanitizeError(err))
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("localfs: root must be a directory: %w", fs.ErrInvalid)
+	}
+	return nil
 }
 
 // DownloadStream opens the object identified by key for reading.
@@ -53,10 +61,15 @@ func (s *Store) DownloadStream(ctx context.Context, key string) (io.ReadCloser, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	fullPath, resolveErr := s.resolvePath(key)
-	if resolveErr != nil {
-		return nil, resolveErr
+	fullPath, err := s.resolvePath(key)
+	if err != nil {
+		return nil, err
 	}
+	return openRegularFile(fullPath, key)
+}
+
+// openRegularFile opens fullPath and validates that it is a regular file.
+func openRegularFile(fullPath, key string) (io.ReadCloser, error) {
 	f, err := os.Open(fullPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -113,9 +126,6 @@ func (s *Store) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
 
 // verifyArchiveSource validates that source exists, is a regular file, and does not collide with destPath.
 func (s *Store) verifyArchiveSource(srcPath, destPath, srcKey, destKey string) error {
-	if srcPath == destPath {
-		return ErrSameSourceAndDestination
-	}
 	srcFi, err := os.Stat(srcPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -126,16 +136,24 @@ func (s *Store) verifyArchiveSource(srcPath, destPath, srcKey, destKey string) e
 	if !srcFi.Mode().IsRegular() {
 		return fmt.Errorf("localfs: archive %q -> %q: source is not a regular file: %w", srcKey, destKey, fs.ErrInvalid)
 	}
-	if destFi, destStatErr := os.Stat(destPath); destStatErr == nil && os.SameFile(srcFi, destFi) {
+	if isSameFile(srcFi, srcPath, destPath) {
 		return ErrSameSourceAndDestination
 	}
 	return nil
 }
 
+// isSameFile reports whether srcPath and destPath point to the same file.
+func isSameFile(srcFi os.FileInfo, srcPath, destPath string) bool {
+	if srcPath == destPath {
+		return true
+	}
+	destFi, err := os.Stat(destPath)
+	return err == nil && os.SameFile(srcFi, destFi)
+}
+
 // ensureParentDir ensures the parent directory for targetPath exists with 0o750 permissions.
 func ensureParentDir(targetPath, srcKey, destKey string) error {
-	const dirPerm = 0o750
-	if err := os.MkdirAll(filepath.Dir(targetPath), dirPerm); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
 		return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, sanitizeError(err))
 	}
 	return nil
@@ -146,17 +164,13 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	prefixPath, cleanPrefix := s.root, ""
-	if prefix != "" && prefix != "." {
-		resolved, resolveErr := s.resolvePath(prefix)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
-		prefixPath, cleanPrefix = resolved, path.Clean(prefix)
-	}
-	entries, err := os.ReadDir(prefixPath)
+	dirPath, cleanPrefix, err := s.resolvePrefixPath(prefix)
 	if err != nil {
-		return nil, fmt.Errorf("localfs: list %q: %w", prefix, sanitizeError(err))
+		return nil, err
+	}
+	entries, readErr := os.ReadDir(dirPath)
+	if readErr != nil {
+		return nil, fmt.Errorf("localfs: list %q: %w", prefix, sanitizeError(readErr))
 	}
 	keys := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -166,6 +180,18 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	}
 	sort.Strings(keys)
 	return keys, nil
+}
+
+// resolvePrefixPath resolves the target directory path and normalized prefix for List.
+func (s *Store) resolvePrefixPath(prefix string) (string, string, error) {
+	if prefix == "" || prefix == "." {
+		return s.root, "", nil
+	}
+	resolved, err := s.resolvePath(prefix)
+	if err != nil {
+		return "", "", err
+	}
+	return resolved, path.Clean(prefix), nil
 }
 
 // formatListKey joins the normalized prefix and file name.
@@ -202,8 +228,7 @@ func copyToFile(ctx context.Context, src io.Reader, destPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	const filePerm = 0o600
-	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, filePerm)
+	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -251,10 +276,7 @@ func isRelativeKey(key string) bool {
 // isWithinRoot verifies that fullPath is strictly contained within root.
 func isWithinRoot(root, fullPath string) bool {
 	relPath, err := filepath.Rel(root, fullPath)
-	if err != nil {
-		return false
-	}
-	return relPath != "." && relPath != ".." &&
+	return err == nil && relPath != "." && relPath != ".." &&
 		!strings.HasPrefix(relPath, ".."+string(filepath.Separator)) && !filepath.IsAbs(relPath)
 }
 
