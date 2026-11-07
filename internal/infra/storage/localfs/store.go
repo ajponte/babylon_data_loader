@@ -101,18 +101,11 @@ func (s *Store) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if srcKey == destKey {
-		return ErrSameSourceAndDestination
+	srcPath, destPath, resolveErr := s.resolveArchiveKeys(srcKey, destKey)
+	if resolveErr != nil {
+		return resolveErr
 	}
-	srcPath, srcErr := s.resolvePath(srcKey)
-	if srcErr != nil {
-		return srcErr
-	}
-	destPath, destErr := s.resolvePath(destKey)
-	if destErr != nil {
-		return destErr
-	}
-	if verifyErr := s.verifyArchiveSource(srcPath, destPath, srcKey, destKey); verifyErr != nil {
+	if verifyErr := verifyArchiveSource(srcPath, destPath, srcKey, destKey); verifyErr != nil {
 		return verifyErr
 	}
 	if dirErr := ensureParentDir(destPath, srcKey, destKey); dirErr != nil {
@@ -124,22 +117,50 @@ func (s *Store) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
 	return s.copyAndRemove(ctx, srcPath, destPath, srcKey, destKey)
 }
 
-// verifyArchiveSource validates that source exists, is a regular file, and does not collide with destPath.
-func (s *Store) verifyArchiveSource(srcPath, destPath, srcKey, destKey string) error {
-	srcFi, err := os.Stat(srcPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, port.ErrObjectNotFound)
-		}
-		return fmt.Errorf("localfs: archive %q -> %q: stat source: %w", srcKey, destKey, sanitizeError(err))
+func (s *Store) resolveArchiveKeys(srcKey, destKey string) (string, string, error) {
+	if srcKey == destKey {
+		return "", "", ErrSameSourceAndDestination
 	}
-	if !srcFi.Mode().IsRegular() {
-		return fmt.Errorf("localfs: archive %q -> %q: source is not a regular file: %w", srcKey, destKey, fs.ErrInvalid)
+	srcPath, srcErr := s.resolvePath(srcKey)
+	if srcErr != nil {
+		return "", "", srcErr
+	}
+	destPath, destErr := s.resolvePath(destKey)
+	if destErr != nil {
+		return "", "", destErr
+	}
+	return srcPath, destPath, nil
+}
+
+// verifyArchiveSource validates that source exists, is a regular file, and does not collide with destPath.
+func verifyArchiveSource(srcPath, destPath, srcKey, destKey string) error {
+	srcFi, err := statRegularFile(srcPath)
+	if err != nil {
+		return archiveError(srcKey, destKey, err)
 	}
 	if isSameFile(srcFi, srcPath, destPath) {
 		return ErrSameSourceAndDestination
 	}
 	return nil
+}
+
+// statRegularFile stats path and ensures it is a regular file.
+func statRegularFile(path string) (os.FileInfo, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, port.ErrObjectNotFound
+		}
+		return nil, sanitizeError(err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fs.ErrInvalid
+	}
+	return fi, nil
+}
+
+func archiveError(srcKey, destKey string, err error) error {
+	return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, err)
 }
 
 // isSameFile reports whether srcPath and destPath point to the same file.
@@ -154,7 +175,7 @@ func isSameFile(srcFi os.FileInfo, srcPath, destPath string) bool {
 // ensureParentDir ensures the parent directory for targetPath exists with 0o750 permissions.
 func ensureParentDir(targetPath, srcKey, destKey string) error {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
-		return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, sanitizeError(err))
+		return archiveError(srcKey, destKey, sanitizeError(err))
 	}
 	return nil
 }
@@ -203,22 +224,22 @@ func formatListKey(cleanPrefix, entryName string) string {
 }
 
 func (s *Store) copyAndRemove(ctx context.Context, srcPath, destPath, srcKey, destKey string) error {
-	srcFile, err := os.Open(srcPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, port.ErrObjectNotFound)
+	srcFile, openErr := os.Open(srcPath)
+	if openErr != nil {
+		if errors.Is(openErr, fs.ErrNotExist) {
+			return archiveError(srcKey, destKey, port.ErrObjectNotFound)
 		}
-		return fmt.Errorf("localfs: archive %q -> %q: open source: %w", srcKey, destKey, sanitizeError(err))
+		return archiveError(srcKey, destKey, sanitizeError(openErr))
 	}
 	defer srcFile.Close()
 
 	if copyErr := copyToFile(ctx, srcFile, destPath); copyErr != nil {
-		return fmt.Errorf("localfs: archive %q -> %q: copy: %w", srcKey, destKey, sanitizeError(copyErr))
+		return archiveError(srcKey, destKey, sanitizeError(copyErr))
 	}
 	_ = srcFile.Close()
 
 	if removeErr := os.Remove(srcPath); removeErr != nil {
-		return fmt.Errorf("localfs: archive %q -> %q: remove source: %w", srcKey, destKey, sanitizeError(removeErr))
+		return archiveError(srcKey, destKey, sanitizeError(removeErr))
 	}
 	return nil
 }
@@ -234,16 +255,15 @@ func copyToFile(ctx context.Context, src io.Reader, destPath string) error {
 	}
 	_, copyErr := io.Copy(destFile, src)
 	closeErr := destFile.Close()
-	if copyErr != nil || closeErr != nil {
+	if copyErr != nil || closeErr != nil || ctx.Err() != nil {
 		_ = os.Remove(destPath)
 		if copyErr != nil {
 			return copyErr
 		}
-		return closeErr
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		_ = os.Remove(destPath)
-		return ctxErr
+		if closeErr != nil {
+			return closeErr
+		}
+		return ctx.Err()
 	}
 	return nil
 }

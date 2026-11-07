@@ -156,33 +156,16 @@ func TestArchiveFile_Archiving(t *testing.T) {
 	}
 }
 
-func TestArchiveFile_SameResolvedPath(t *testing.T) {
-	root, store := newTestStore(t)
-	content := []byte("untruncated record")
-	mkdir(t, filepath.Join(root, "sub"))
-	srcPath := filepath.Join(root, "sub", "file.csv")
-	writeFile(t, srcPath, content)
-	_ = os.Link(srcPath, filepath.Join(root, "sub", "linked.csv"))
-
-	ctx := context.Background()
-	for _, tc := range []struct{ src, dest string }{
-		{"sub/file.csv", "sub/file.csv"},
-		{"sub/file.csv", "sub//file.csv"},
-		{"sub/file.csv", "sub/linked.csv"},
-	} {
-		if err := store.ArchiveFile(ctx, tc.src, tc.dest); !errors.Is(err, ErrSameSourceAndDestination) {
-			t.Errorf("ArchiveFile(%q, %q) got %v, want ErrSameSourceAndDestination", tc.src, tc.dest, err)
-		}
-	}
-	assertFileContent(t, srcPath, content, 0)
-}
-
 func TestArchiveFile_ErrorScenarios(t *testing.T) {
 	root, store := newTestStore(t)
 	writeFile(t, filepath.Join(root, "src.csv"), []byte("data"))
 	writeFile(t, filepath.Join(root, "conflict"), []byte("blocker"))
 	mkdir(t, filepath.Join(root, "dest_dir"))
 	mkdir(t, filepath.Join(root, "src_dir"))
+	mkdir(t, filepath.Join(root, "sub"))
+	subSrc := filepath.Join(root, "sub", "file.csv")
+	writeFile(t, subSrc, []byte("untruncated record"))
+	_ = os.Link(subSrc, filepath.Join(root, "sub", "linked.csv"))
 	store.rename = func(_, _ string) error { return errors.New("simulated rename failure") }
 	ctx := context.Background()
 
@@ -194,11 +177,15 @@ func TestArchiveFile_ErrorScenarios(t *testing.T) {
 		{"src.csv", "conflict/dest.csv", nil},
 		{"src.csv", "dest_dir", nil},
 		{"src_dir", "dest.csv", fs.ErrInvalid},
+		{"sub/file.csv", "sub/file.csv", ErrSameSourceAndDestination},
+		{"sub/file.csv", "sub//file.csv", ErrSameSourceAndDestination},
+		{"sub/file.csv", "sub/linked.csv", ErrSameSourceAndDestination},
 	} {
 		if err := store.ArchiveFile(ctx, tc.src, tc.dest); err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
 			t.Errorf("ArchiveFile(%q, %q) got %v, want wrap: %v", tc.src, tc.dest, err, tc.wantErr)
 		}
 	}
+	assertFileContent(t, subSrc, []byte("untruncated record"), 0)
 	if _, err := os.Stat(filepath.Join(root, "orphaned")); !os.IsNotExist(err) {
 		t.Error("orphaned directory should not have been created")
 	}
