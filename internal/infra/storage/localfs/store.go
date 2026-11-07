@@ -42,7 +42,7 @@ func New(root string) (*Store, error) {
 	cleanRoot := filepath.Clean(root)
 	fi, err := os.Stat(cleanRoot)
 	if err != nil {
-		return nil, fmt.Errorf("localfs: root directory: %w", err)
+		return nil, fmt.Errorf("localfs: root directory: %w", sanitizeError(err))
 	}
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("localfs: root must be a directory: %w", fs.ErrInvalid)
@@ -74,6 +74,16 @@ func (s *Store) DownloadStream(ctx context.Context, key string) (io.ReadCloser, 
 		return nil, fmt.Errorf("localfs: download %q: %w", key, sanitizeError(err))
 	}
 
+	fi, statErr := f.Stat()
+	if statErr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("localfs: download %q: %w", key, sanitizeError(statErr))
+	}
+	if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("localfs: download %q: %w", key, fs.ErrInvalid)
+	}
+
 	return f, nil
 }
 
@@ -96,6 +106,24 @@ func (s *Store) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
 		return resolveErr
 	}
 
+	srcFi, statErr := os.Stat(srcPath)
+	if statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, port.ErrObjectNotFound)
+		}
+		return fmt.Errorf("localfs: archive %q -> %q: stat source: %w", srcKey, destKey, sanitizeError(statErr))
+	}
+	if !srcFi.Mode().IsRegular() {
+		return fmt.Errorf("localfs: archive %q -> %q: %w", srcKey, destKey, fs.ErrInvalid)
+	}
+
+	if srcPath == destPath {
+		return ErrSameSourceAndDestination
+	}
+	if destFi, err := os.Stat(destPath); err == nil && os.SameFile(srcFi, destFi) {
+		return ErrSameSourceAndDestination
+	}
+
 	destDir := filepath.Dir(destPath)
 	const dirPerm = 0o750
 	if mkdirErr := os.MkdirAll(destDir, dirPerm); mkdirErr != nil {
@@ -106,7 +134,7 @@ func (s *Store) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
 		return nil
 	}
 
-	return s.copyAndRemove(srcPath, destPath, srcKey, destKey)
+	return s.copyAndRemove(ctx, srcPath, destPath, srcKey, destKey)
 }
 
 // List returns the sorted keys of all regular files located under prefix.
@@ -116,18 +144,13 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		return nil, err
 	}
 
-	var prefixPath string
-	var cleanPrefix string
-	if prefix == "" || prefix == "." {
-		prefixPath = s.root
-		cleanPrefix = ""
-	} else {
+	prefixPath, cleanPrefix := s.root, ""
+	if prefix != "" && prefix != "." {
 		resolved, resolveErr := s.resolvePath(prefix)
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
-		prefixPath = resolved
-		cleanPrefix = path.Clean(prefix)
+		prefixPath, cleanPrefix = resolved, path.Clean(prefix)
 	}
 
 	entries, err := os.ReadDir(prefixPath)
@@ -135,7 +158,7 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		return nil, fmt.Errorf("localfs: list %q: %w", prefix, sanitizeError(err))
 	}
 
-	var keys []string
+	keys := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -151,7 +174,11 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
-func (s *Store) copyAndRemove(srcPath, destPath, srcKey, destKey string) error {
+func (s *Store) copyAndRemove(ctx context.Context, srcPath, destPath, srcKey, destKey string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -178,6 +205,11 @@ func (s *Store) copyAndRemove(srcPath, destPath, srcKey, destKey string) error {
 		return fmt.Errorf("localfs: archive %q -> %q: copy: %w", srcKey, destKey, sanitizeError(cause))
 	}
 
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = os.Remove(destPath)
+		return ctxErr
+	}
+
 	_ = srcFile.Close()
 
 	if removeErr := os.Remove(srcPath); removeErr != nil {
@@ -191,6 +223,9 @@ func (s *Store) resolvePath(key string) (string, error) {
 	if key == "" || strings.HasPrefix(key, "/") || strings.HasPrefix(key, "\\") || filepath.IsAbs(key) {
 		return "", ErrInvalidKey
 	}
+	if strings.Contains(key, "\x00") || filepath.VolumeName(filepath.FromSlash(key)) != "" {
+		return "", ErrInvalidKey
+	}
 
 	for _, seg := range strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if seg == "." || seg == ".." {
@@ -200,7 +235,8 @@ func (s *Store) resolvePath(key string) (string, error) {
 
 	fullPath := filepath.Join(s.root, filepath.Clean(filepath.FromSlash(key)))
 	relPath, err := filepath.Rel(s.root, fullPath)
-	if err != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) || filepath.IsAbs(relPath) {
+	if err != nil || relPath == "." || relPath == ".." ||
+		strings.HasPrefix(relPath, ".."+string(filepath.Separator)) || filepath.IsAbs(relPath) {
 		return "", ErrInvalidKey
 	}
 
@@ -208,6 +244,10 @@ func (s *Store) resolvePath(key string) (string, error) {
 }
 
 func sanitizeError(err error) error {
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return linkErr.Err
+	}
 	var pathErr *fs.PathError
 	if errors.As(err, &pathErr) {
 		return pathErr.Err
