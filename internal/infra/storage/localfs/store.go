@@ -70,12 +70,9 @@ func (s *Store) DownloadStream(ctx context.Context, key string) (io.ReadCloser, 
 
 // openRegularFile opens fullPath and validates that it is a regular file.
 func openRegularFile(fullPath, key string) (io.ReadCloser, error) {
-	f, err := os.Open(fullPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("localfs: download %q: %w", key, port.ErrObjectNotFound)
-		}
-		return nil, fmt.Errorf("localfs: download %q: %w", key, sanitizeError(err))
+	f, openErr := os.Open(fullPath)
+	if openErr != nil {
+		return nil, fmt.Errorf("localfs: download %q: %w", key, mapNotFound(openErr))
 	}
 	if valErr := validateRegularFile(f); valErr != nil {
 		_ = f.Close()
@@ -148,10 +145,7 @@ func verifyArchiveSource(srcPath, destPath, srcKey, destKey string) error {
 func statRegularFile(path string) (os.FileInfo, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, port.ErrObjectNotFound
-		}
-		return nil, sanitizeError(err)
+		return nil, mapNotFound(err)
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, fs.ErrInvalid
@@ -193,6 +187,11 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 	if readErr != nil {
 		return nil, fmt.Errorf("localfs: list %q: %w", prefix, sanitizeError(readErr))
 	}
+	return collectFileKeys(entries, cleanPrefix), nil
+}
+
+// collectFileKeys filters out directories, formats key paths, and returns sorted keys.
+func collectFileKeys(entries []os.DirEntry, cleanPrefix string) []string {
 	keys := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -200,7 +199,7 @@ func (s *Store) List(ctx context.Context, prefix string) ([]string, error) {
 		}
 	}
 	sort.Strings(keys)
-	return keys, nil
+	return keys
 }
 
 // resolvePrefixPath resolves the target directory path and normalized prefix for List.
@@ -224,22 +223,27 @@ func formatListKey(cleanPrefix, entryName string) string {
 }
 
 func (s *Store) copyAndRemove(ctx context.Context, srcPath, destPath, srcKey, destKey string) error {
+	if err := transferFile(ctx, srcPath, destPath); err != nil {
+		return archiveError(srcKey, destKey, err)
+	}
+	return nil
+}
+
+// transferFile copies srcPath to destPath and deletes srcPath upon success.
+func transferFile(ctx context.Context, srcPath, destPath string) error {
 	srcFile, openErr := os.Open(srcPath)
 	if openErr != nil {
-		if errors.Is(openErr, fs.ErrNotExist) {
-			return archiveError(srcKey, destKey, port.ErrObjectNotFound)
-		}
-		return archiveError(srcKey, destKey, sanitizeError(openErr))
+		return mapNotFound(openErr)
 	}
 	defer srcFile.Close()
 
 	if copyErr := copyToFile(ctx, srcFile, destPath); copyErr != nil {
-		return archiveError(srcKey, destKey, sanitizeError(copyErr))
+		return sanitizeError(copyErr)
 	}
 	_ = srcFile.Close()
 
-	if removeErr := os.Remove(srcPath); removeErr != nil {
-		return archiveError(srcKey, destKey, sanitizeError(removeErr))
+	if remErr := os.Remove(srcPath); remErr != nil {
+		return sanitizeError(remErr)
 	}
 	return nil
 }
@@ -310,4 +314,12 @@ func sanitizeError(err error) error {
 		return pathErr.Err
 	}
 	return err
+}
+
+// mapNotFound maps fs.ErrNotExist to port.ErrObjectNotFound and sanitizes other errors.
+func mapNotFound(err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return port.ErrObjectNotFound
+	}
+	return sanitizeError(err)
 }

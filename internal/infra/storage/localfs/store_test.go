@@ -55,13 +55,13 @@ func TestNew_RequiresExistingDirectory(t *testing.T) {
 	missingDir := filepath.Join(tmp, "missing_subdir")
 
 	for _, tc := range []struct {
-		name, root string
-		want       error
+		root string
+		want error
 	}{
-		{"empty root", "", ErrMissingRoot},
-		{"whitespace root", "   ", ErrMissingRoot},
-		{"missing directory", missingDir, fs.ErrNotExist},
-		{"file as root", filePath, fs.ErrInvalid},
+		{"", ErrMissingRoot},
+		{"   ", ErrMissingRoot},
+		{missingDir, fs.ErrNotExist},
+		{filePath, fs.ErrInvalid},
 	} {
 		store, err := New(tc.root)
 		if err == nil || !errors.Is(err, tc.want) || store != nil {
@@ -95,9 +95,6 @@ func TestDownloadStream_Scenarios(t *testing.T) {
 		t.Errorf("expected ErrObjectNotFound, got: %v", missErr)
 	}
 	if rcDir, dirErr := store.DownloadStream(ctx, "subdir"); rcDir != nil || !errors.Is(dirErr, fs.ErrInvalid) {
-		if rcDir != nil {
-			_ = rcDir.Close()
-		}
 		t.Errorf("expected fs.ErrInvalid for dir stream, got rc=%v, err=%v", rcDir, dirErr)
 	}
 }
@@ -259,16 +256,14 @@ func TestErrors_DoNotLeakRoot(t *testing.T) {
 	root, store := newTestStore(t)
 	ctx := context.Background()
 
-	for _, tc := range []struct {
-		op  func() error
-		key string
-	}{
-		{func() error { _, err := store.DownloadStream(ctx, "not_found.csv"); return err }, "not_found.csv"},
-		{func() error { return store.ArchiveFile(ctx, "missing.csv", "dest.csv") }, "missing.csv"},
-		{func() error { _, err := store.List(ctx, "missing_folder"); return err }, "missing_folder"},
-	} {
-		if err := tc.op(); err == nil || strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), tc.key) {
-			t.Fatalf("failed validation: err=%v, root=%s, key=%s", err, root, tc.key)
+	ops := map[string]func() error{
+		"not_found.csv":  func() error { _, err := store.DownloadStream(ctx, "not_found.csv"); return err },
+		"missing.csv":    func() error { return store.ArchiveFile(ctx, "missing.csv", "dest.csv") },
+		"missing_folder": func() error { _, err := store.List(ctx, "missing_folder"); return err },
+	}
+	for key, op := range ops {
+		if err := op(); err == nil || strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), key) {
+			t.Fatalf("failed validation: err=%v, root=%s, key=%s", err, root, key)
 		}
 	}
 
