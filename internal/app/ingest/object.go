@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -90,13 +91,7 @@ func (i *Ingestor) IngestObject(ctx context.Context, req ObjectRequest) (*model.
 		return nil, err
 	}
 
-	stream, err := i.store.DownloadStream(ctx, req.Key)
-	if err != nil {
-		return nil, err
-	}
-	defer stream.Close()
-
-	body, hash, err := Fingerprint(stream, i.maxBytes)
+	body, hash, err := i.downloadAndFingerprint(ctx, req.Key)
 	if err != nil {
 		return i.handleFingerprintError(ctx, req, ref, err)
 	}
@@ -111,6 +106,15 @@ func (i *Ingestor) IngestObject(ctx context.Context, req ObjectRequest) (*model.
 	})
 }
 
+func (i *Ingestor) downloadAndFingerprint(ctx context.Context, key string) (io.Reader, string, error) {
+	stream, err := i.store.DownloadStream(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	defer stream.Close()
+	return Fingerprint(stream, i.maxBytes)
+}
+
 func (i *Ingestor) resolveRequestSource(req ObjectRequest) (SourceRef, error) {
 	if req.Override != nil {
 		return *req.Override, nil
@@ -121,6 +125,7 @@ func (i *Ingestor) resolveRequestSource(req ObjectRequest) (SourceRef, error) {
 func (i *Ingestor) handleFingerprintError(
 	ctx context.Context, req ObjectRequest, ref SourceRef, err error,
 ) (*model.SyncLog, error) {
+	// Only size-cap violations past source resolution are audited prior to extraction.
 	if !errors.Is(err, ErrInputTooLarge) {
 		return nil, err
 	}
@@ -147,6 +152,7 @@ func (i *Ingestor) IngestAll(ctx context.Context, reqs []ObjectRequest) RunStats
 		TotalFiles: len(reqs),
 		Failures:   make(map[string]string),
 	}
+	// Continue batch iteration regardless of individual file failures.
 	for _, req := range reqs {
 		_, err := i.IngestObject(ctx, req)
 		stats.recordResult(req.Key, err)
@@ -178,6 +184,7 @@ func ArchiveKeyFor(key, fromPrefix, toPrefix string) (string, bool) {
 	return normalizePrefix(toPrefix) + rel, true
 }
 
+// normalizePrefix ensures directory prefixes end with a slash to avoid false sibling matches.
 func normalizePrefix(p string) string {
 	if p == "" || strings.HasSuffix(p, "/") {
 		return p

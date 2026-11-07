@@ -26,13 +26,12 @@ func (t *trackingReadCloser) Close() error {
 }
 
 type fakeRunner struct {
-	runFn           func(context.Context, pipeline.Request) (*model.SyncLog, error)
-	recordFailureFn func(context.Context, string, model.FileMetadata, error) (*model.SyncLog, error)
-	runCalls        int
-	failureCalls    int
-	lastRequest     pipeline.Request
-	lastSourceType  string
-	lastMeta        model.FileMetadata
+	runFn                  func(context.Context, pipeline.Request) (*model.SyncLog, error)
+	recordFailureFn        func(context.Context, string, model.FileMetadata, error) (*model.SyncLog, error)
+	runCalls, failureCalls int
+	lastRequest            pipeline.Request
+	lastSourceType         string
+	lastMeta               model.FileMetadata
 }
 
 func (f *fakeRunner) Run(ctx context.Context, req pipeline.Request) (*model.SyncLog, error) {
@@ -54,11 +53,10 @@ func (f *fakeRunner) RecordFailure(ctx context.Context, sourceType string, meta 
 }
 
 type fakeStore struct {
-	downloadFn   func(context.Context, string) (io.ReadCloser, error)
-	archiveFn    func(context.Context, string, string) error
-	downloadKeys []string
-	archivedSrc  string
-	archivedDest string
+	downloadFn                func(context.Context, string) (io.ReadCloser, error)
+	archiveFn                 func(context.Context, string, string) error
+	downloadKeys              []string
+	archivedSrc, archivedDest string
 }
 
 func (f *fakeStore) DownloadStream(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -284,12 +282,9 @@ func TestIngestAll_ContinuesAndCounts(t *testing.T) {
 func TestRunStats_JSONMatchesLegacy(t *testing.T) {
 	stats := RunStats{TotalFiles: 2, ProcessedFiles: 1, FailedFiles: 1, Failures: map[string]string{"err.csv": "parse error"}}
 	data, err := json.Marshal(stats)
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
-	}
 	wantJSON := `{"totalFiles":2,"processedFiles":1,"failedFiles":1,"failures":{"err.csv":"parse error"}}`
-	if string(data) != wantJSON {
-		t.Errorf("json mismatch: got %s, want %s", string(data), wantJSON)
+	if err != nil || string(data) != wantJSON {
+		t.Errorf("json mismatch: got %s (err=%v), want %s", string(data), err, wantJSON)
 	}
 }
 
