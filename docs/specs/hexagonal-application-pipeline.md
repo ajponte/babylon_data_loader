@@ -135,14 +135,78 @@ Filename resolution matches legacy `datalake/datasource.GenericExtractor.Extract
 3. **Synthetic**: `synthetic` anywhere in base name $\rightarrow$ `("synthetic", "0000")`.
 4. **Fallback**: If no rule matches, returns `ErrUnresolvableSource`. Pre-resolution failures are logged and counted in stats, but unaudited (U1).
 
+Path normalization converts backslashes to forward slashes before extracting the base name. Empty inputs, directory paths, or root paths (`.`, `/`) return `ErrUnresolvableSource`.
+
 ### 4.2 Stream Fingerprinting (`Fingerprint`)
 
-- Reads stream into an in-memory buffer up to `DefaultMaxInputBytes = 32 MiB` (P7).
+- Validates reader presence; a `nil` reader immediately returns `ErrNilReader`.
+- Reads stream into an in-memory buffer up to `DefaultMaxInputBytes = 32 MiB` (P7) via `io.LimitReader(r, maxBytes+1)`. A non-positive `maxBytes` (`<= 0`) defaults to `DefaultMaxInputBytes`.
 - Computes SHA-256 hash returned as a lowercase hex string.
-- If stream length exceeds the cap, immediately returns `ErrInputTooLarge` without hashing.
+- If stream length exceeds the cap (`len(buf) > maxBytes`), immediately returns `ErrInputTooLarge` without hashing.
 - Returns `*bytes.Reader` allowing downstream extractors to read the buffered stream from offset 0.
+- Stream read errors propagate wrapped as `fmt.Errorf("ingest: read stream: %w", err)`.
 
-### 4.3 Extractor & Destination Registration Table
+### 4.3 File Metadata Construction (`NewFileMetadata`)
+
+Constructs a domain `model.FileMetadata` instance:
+- Cleans and normalizes `FileName` to the file base name (stripping Unix/Windows/S3 prefixes).
+- Associates the lowercase SHA-256 `FileHash`.
+- Populates `AccountID` from the resolved `SourceRef`.
+- Standardizes `IngestedAt` timestamp to UTC (`ingestedAt.UTC()`).
+- Captures `SourceURI` from transport context (e.g., `s3://bucket/key`).
+
+### 4.4 Ingest Types, Constants & Sentinel Errors
+
+```go
+package ingest
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"time"
+
+	"babylon/dataloader/internal/domain/model"
+)
+
+const (
+	// SourceChase identifies Chase bank and credit card statement sources.
+	SourceChase = "chase"
+	// SourceFidelity identifies Fidelity brokerage statement sources.
+	SourceFidelity = "fidelity"
+	// SourceSynthetic identifies synthetic transaction sources.
+	SourceSynthetic = "synthetic"
+
+	// DefaultMaxInputBytes is the default maximum size (32 MiB) allowed for input streams.
+	DefaultMaxInputBytes int64 = 32 << 20
+)
+
+var (
+	// ErrUnresolvableSource indicates that the source type could not be determined from the file name.
+	ErrUnresolvableSource = errors.New("ingest: cannot resolve source from file name")
+	// ErrInputTooLarge indicates that the input stream exceeds the maximum allowed size.
+	ErrInputTooLarge = errors.New("ingest: input exceeds maximum size")
+	// ErrNilReader indicates that the provided reader is nil.
+	ErrNilReader = errors.New("ingest: reader cannot be nil")
+)
+
+// SourceRef identifies the resolved data source and account.
+type SourceRef struct {
+	SourceType string
+	AccountID  string
+}
+
+// ResolveSource determines the source type and account ID from a file or object name.
+func ResolveSource(name string) (SourceRef, error)
+
+// Fingerprint reads up to maxBytes from r, computes its SHA-256 digest, and returns a re-readable body.
+func Fingerprint(r io.Reader, maxBytes int64) (*bytes.Reader, string, error)
+
+// NewFileMetadata constructs a validated FileMetadata model with a UTC timestamp and clean base name.
+func NewFileMetadata(name string, ref SourceRef, sha256Hex, sourceURI string, ingestedAt time.Time) model.FileMetadata
+```
+
+### 4.5 Extractor & Destination Registration Table
 
 Composition roots register extractors using `pipeline.Register(sourceType, ext, fallbackDestination)`.
 
@@ -288,7 +352,7 @@ sequenceDiagram
 | **4A** | Spec & Guardrails | `TestDepguard_AppIsolation`, `TestDepguard_InfraNoApp`, `make check-quality` |
 | **4B** | S3 URI Provenance | `TestWritePlan_SourceURI_EmittedAsDottedPath`, `TestWritePlan_SourceURI_EmptyOmitted`, `TestWritePlan_SourceURI_NotInFilter`, `TestFileMetadata_ValidateIgnoresSourceURI` |
 | **4C** | Pipeline Orchestrator | `TestRegister_RejectsInvalid`, `TestRun_SuccessPersistsAndAudits`, `TestRun_CopiesSourceURIToBatch`, `TestRun_FailureAuditUsesDetachedContext`, `TestRun_FinalizeRunsBeforeSuccessAudit`, `TestRun_FinalizeFailureWritesSingleFailedLog`, `TestRun_SuccessAuditFailureIsNonFatal`, `TestRun_FailureAuditFailureIsJoined`, `TestRun_CancelledContextUnwrapped`, `TestRecordFailure_AuditsWithFallbackAndEmptyHash` |
-| **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize` |
+| **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestResolveSource_Unresolvable`, `TestResolveSource_PrecedenceChaseOverSynthetic`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize`, `TestFingerprint_ReaderErrorPropagates`, `TestFingerprint_NilReader`, `TestNewFileMetadata_Validates` |
 | **4E** | LocalFS Store | `TestLocalFS_List`, `TestLocalFS_DownloadStream`, `TestLocalFS_ArchiveProcessed` |
 | **4F** | Object Ingestion | `TestIngestor_IngestObject_Success`, `TestIngestor_TooLargeAuditsFailure`, `TestIngestor_DeterministicFailureRetainsObject` |
 | **4G** | CLI Entrypoint | `TestCLI_IngestCommand`, `TestCLI_GenerateSyntheticData`, `TestCLI_SlogProgress` |
