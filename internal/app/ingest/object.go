@@ -78,6 +78,9 @@ func NewIngestor(r runner, store port.ObjectStore, opts ...IngestorOption) *Inge
 
 // IngestObject ingests a single object from the object store and archives it if requested.
 func (i *Ingestor) IngestObject(ctx context.Context, req ObjectRequest) (*model.SyncLog, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !strings.EqualFold(path.Ext(req.Key), ".csv") {
 		return nil, ErrNotCSV
 	}
@@ -148,19 +151,27 @@ func (i *Ingestor) IngestAll(ctx context.Context, reqs []ObjectRequest) RunStats
 		Failures:   make(map[string]string),
 	}
 	for _, req := range reqs {
-		if _, err := i.IngestObject(ctx, req); err == nil || errors.Is(err, pipeline.ErrAuditWrite) {
-			stats.ProcessedFiles++
-		} else {
-			stats.FailedFiles++
-			stats.Failures[path.Base(req.Key)] = err.Error()
-		}
+		_, err := i.IngestObject(ctx, req)
+		stats.recordResult(req.Key, err)
 	}
 	return stats
+}
+
+func (s *RunStats) recordResult(key string, err error) {
+	if err == nil || errors.Is(err, pipeline.ErrAuditWrite) {
+		s.ProcessedFiles++
+		return
+	}
+	s.FailedFiles++
+	s.Failures[path.Base(key)] = err.Error()
 }
 
 // ArchiveKeyFor derives an archive key by replacing fromPrefix with toPrefix.
 // Returns ("", false) if key does not match fromPrefix.
 func ArchiveKeyFor(key, fromPrefix, toPrefix string) (string, bool) {
+	if key == "" || fromPrefix == "" {
+		return "", false
+	}
 	from := normalizePrefix(fromPrefix)
 	if !strings.HasPrefix(key, from) {
 		return "", false
@@ -181,18 +192,11 @@ func RegisterDefaults(p *pipeline.Pipeline, chase, fidelity, syntheticCSV port.E
 	if p == nil || chase == nil || fidelity == nil || syntheticCSV == nil {
 		return pipeline.ErrInvalidRegistration
 	}
-	for _, r := range []struct {
-		sourceType string
-		extractor  port.Extractor
-		fallback   model.Destination
-	}{
-		{SourceChase, chase, model.DestChaseChecking},
-		{SourceFidelity, fidelity, model.DestFidelityPosition},
-		{SourceSynthetic, syntheticCSV, model.DestSynthetic},
-	} {
-		if err := p.Register(r.sourceType, r.extractor, r.fallback); err != nil {
-			return err
-		}
+	if err := p.Register(SourceChase, chase, model.DestChaseChecking); err != nil {
+		return err
 	}
-	return nil
+	if err := p.Register(SourceFidelity, fidelity, model.DestFidelityPosition); err != nil {
+		return err
+	}
+	return p.Register(SourceSynthetic, syntheticCSV, model.DestSynthetic)
 }

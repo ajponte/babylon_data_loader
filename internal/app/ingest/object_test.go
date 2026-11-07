@@ -26,8 +26,8 @@ func (t *trackingReadCloser) Close() error {
 }
 
 type fakeRunner struct {
-	runFn           func(ctx context.Context, req pipeline.Request) (*model.SyncLog, error)
-	recordFailureFn func(ctx context.Context, sourceType string, meta model.FileMetadata, cause error) (*model.SyncLog, error)
+	runFn           func(context.Context, pipeline.Request) (*model.SyncLog, error)
+	recordFailureFn func(context.Context, string, model.FileMetadata, error) (*model.SyncLog, error)
 	runCalls        int
 	failureCalls    int
 	lastRequest     pipeline.Request
@@ -46,8 +46,7 @@ func (f *fakeRunner) Run(ctx context.Context, req pipeline.Request) (*model.Sync
 
 func (f *fakeRunner) RecordFailure(ctx context.Context, sourceType string, meta model.FileMetadata, cause error) (*model.SyncLog, error) {
 	f.failureCalls++
-	f.lastSourceType = sourceType
-	f.lastMeta = meta
+	f.lastSourceType, f.lastMeta = sourceType, meta
 	if f.recordFailureFn != nil {
 		return f.recordFailureFn(ctx, sourceType, meta, cause)
 	}
@@ -55,8 +54,8 @@ func (f *fakeRunner) RecordFailure(ctx context.Context, sourceType string, meta 
 }
 
 type fakeStore struct {
-	downloadFn   func(ctx context.Context, key string) (io.ReadCloser, error)
-	archiveFn    func(ctx context.Context, srcKey, destKey string) error
+	downloadFn   func(context.Context, string) (io.ReadCloser, error)
+	archiveFn    func(context.Context, string, string) error
 	downloadKeys []string
 	archivedSrc  string
 	archivedDest string
@@ -71,8 +70,7 @@ func (f *fakeStore) DownloadStream(ctx context.Context, key string) (io.ReadClos
 }
 
 func (f *fakeStore) ArchiveFile(ctx context.Context, srcKey, destKey string) error {
-	f.archivedSrc = srcKey
-	f.archivedDest = destKey
+	f.archivedSrc, f.archivedDest = srcKey, destKey
 	if f.archiveFn != nil {
 		return f.archiveFn(ctx, srcKey, destKey)
 	}
@@ -108,15 +106,24 @@ func TestIngestObject_ResolvesAndRuns(t *testing.T) {
 
 func TestIngestObject_OverrideSkipsResolution(t *testing.T) {
 	runner, _, ingestor := newTestIngestor()
-	req := ObjectRequest{
-		Key:      "unprocessed/custom_export.csv",
-		Override: &SourceRef{SourceType: SourceChase, AccountID: "8888"},
-	}
+	req := ObjectRequest{Key: "unprocessed/custom_export.csv", Override: &SourceRef{SourceType: SourceChase, AccountID: "8888"}}
 	if _, err := ingestor.IngestObject(context.Background(), req); err != nil {
 		t.Fatalf("unexpected error with override: %v", err)
 	}
 	if runner.lastRequest.SourceType != SourceChase || runner.lastRequest.Meta.AccountID != "8888" {
 		t.Errorf("override not applied: src=%s, acc=%s", runner.lastRequest.SourceType, runner.lastRequest.Meta.AccountID)
+	}
+}
+
+func TestIngestObject_CancelledContext(t *testing.T) {
+	runner, store, ingestor := newTestIngestor()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ingestor.IngestObject(ctx, ObjectRequest{Key: "unprocessed/chase1234.csv"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+	if len(store.downloadKeys) != 0 || runner.runCalls != 0 {
+		t.Error("cancelled context triggered download/run")
 	}
 }
 
@@ -134,8 +141,7 @@ func TestIngestObject_RejectsNonCSV(t *testing.T) {
 
 func TestIngestObject_Unresolvable(t *testing.T) {
 	runner, store, ingestor := newTestIngestor()
-	req := ObjectRequest{Key: "unprocessed/unknown_statement.csv"}
-	if _, err := ingestor.IngestObject(context.Background(), req); !errors.Is(err, ErrUnresolvableSource) {
+	if _, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/unknown_statement.csv"}); !errors.Is(err, ErrUnresolvableSource) {
 		t.Errorf("got %v, want ErrUnresolvableSource", err)
 	}
 	if len(store.downloadKeys) != 0 || runner.runCalls != 0 {
@@ -145,11 +151,8 @@ func TestIngestObject_Unresolvable(t *testing.T) {
 
 func TestIngestObject_DownloadNotFound(t *testing.T) {
 	runner, store, ingestor := newTestIngestor()
-	store.downloadFn = func(ctx context.Context, key string) (io.ReadCloser, error) {
-		return nil, port.ErrObjectNotFound
-	}
-	_, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"})
-	if !errors.Is(err, port.ErrObjectNotFound) {
+	store.downloadFn = func(context.Context, string) (io.ReadCloser, error) { return nil, port.ErrObjectNotFound }
+	if _, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"}); !errors.Is(err, port.ErrObjectNotFound) {
 		t.Errorf("got %v, want port.ErrObjectNotFound", err)
 	}
 	if runner.runCalls != 0 || runner.failureCalls != 0 {
@@ -158,33 +161,28 @@ func TestIngestObject_DownloadNotFound(t *testing.T) {
 }
 
 func TestIngestObject_TooLargeIsAudited(t *testing.T) {
+	tracker := &trackingReadCloser{Reader: strings.NewReader("12345678901234567890")}
 	runner, store, ingestor := newTestIngestor(WithMaxInputBytes(10))
-	store.downloadFn = func(ctx context.Context, key string) (io.ReadCloser, error) {
-		return &trackingReadCloser{Reader: strings.NewReader("12345678901234567890")}, nil
-	}
+	store.downloadFn = func(context.Context, string) (io.ReadCloser, error) { return tracker, nil }
 	req := ObjectRequest{Key: "unprocessed/chase1234.csv", SourceURI: "s3://bucket/key"}
 	failedLog, err := ingestor.IngestObject(context.Background(), req)
-	if !errors.Is(err, ErrInputTooLarge) || failedLog == nil {
-		t.Fatalf("expected ErrInputTooLarge with failedLog: err=%v, log=%v", err, failedLog)
+	if !errors.Is(err, ErrInputTooLarge) || failedLog == nil || !tracker.closed {
+		t.Fatalf("expected ErrInputTooLarge and closed tracker: err=%v, closed=%v", err, tracker.closed)
 	}
-	if runner.failureCalls != 1 || runner.runCalls != 0 {
-		t.Errorf("failure calls=%d, run calls=%d", runner.failureCalls, runner.runCalls)
-	}
-	if runner.lastSourceType != SourceChase || runner.lastMeta.FileHash != "" || runner.lastMeta.SourceURI != req.SourceURI {
-		t.Errorf("audit metadata mismatch: src=%s, meta=%+v", runner.lastSourceType, runner.lastMeta)
+	if runner.failureCalls != 1 || runner.runCalls != 0 || runner.lastSourceType != SourceChase || runner.lastMeta.FileHash != "" {
+		t.Errorf("failureCalls=%d, runCalls=%d, src=%s, hash=%q", runner.failureCalls, runner.runCalls, runner.lastSourceType, runner.lastMeta.FileHash)
 	}
 }
 
 func TestIngestObject_TooLargeAuditFailureJoined(t *testing.T) {
 	runner, store, ingestor := newTestIngestor(WithMaxInputBytes(10))
-	runner.recordFailureFn = func(ctx context.Context, sourceType string, meta model.FileMetadata, cause error) (*model.SyncLog, error) {
+	runner.recordFailureFn = func(context.Context, string, model.FileMetadata, error) (*model.SyncLog, error) {
 		return nil, pipeline.ErrAuditWrite
 	}
-	store.downloadFn = func(ctx context.Context, key string) (io.ReadCloser, error) {
+	store.downloadFn = func(context.Context, string) (io.ReadCloser, error) {
 		return &trackingReadCloser{Reader: strings.NewReader("12345678901234567890")}, nil
 	}
-	_, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"})
-	if !errors.Is(err, ErrInputTooLarge) || !errors.Is(err, pipeline.ErrAuditWrite) {
+	if _, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"}); !errors.Is(err, ErrInputTooLarge) || !errors.Is(err, pipeline.ErrAuditWrite) {
 		t.Fatalf("expected joined ErrInputTooLarge and ErrAuditWrite, got: %v", err)
 	}
 }
@@ -192,11 +190,10 @@ func TestIngestObject_TooLargeAuditFailureJoined(t *testing.T) {
 func TestIngestObject_FingerprintReadError(t *testing.T) {
 	ioErr := errors.New("underlying network failure")
 	runner, store, ingestor := newTestIngestor()
-	store.downloadFn = func(ctx context.Context, key string) (io.ReadCloser, error) {
+	store.downloadFn = func(context.Context, string) (io.ReadCloser, error) {
 		return &trackingReadCloser{Reader: &errReader{err: ioErr}}, nil
 	}
-	_, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"})
-	if !errors.Is(err, ioErr) {
+	if _, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"}); !errors.Is(err, ioErr) {
 		t.Fatalf("got %v, want %v", err, ioErr)
 	}
 	if runner.failureCalls != 0 || runner.runCalls != 0 {
@@ -207,32 +204,23 @@ func TestIngestObject_FingerprintReadError(t *testing.T) {
 func TestIngestObject_FinalizeArchives(t *testing.T) {
 	runner, store, ingestor := newTestIngestor()
 	req := ObjectRequest{Key: "unprocessed/chase1234.csv", ArchiveKey: "processed/chase1234.csv"}
-	if _, err := ingestor.IngestObject(context.Background(), req); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := ingestor.IngestObject(context.Background(), req); err != nil || runner.lastRequest.Finalize == nil {
+		t.Fatalf("unexpected error or nil Finalize: %v", err)
 	}
-	if runner.lastRequest.Finalize == nil {
-		t.Fatal("expected non-nil Finalize hook")
-	}
-	if err := runner.lastRequest.Finalize(context.Background()); err != nil {
-		t.Fatalf("Finalize failed: %v", err)
-	}
-	if store.archivedSrc != req.Key || store.archivedDest != req.ArchiveKey {
-		t.Errorf("archival keys mismatch: src=%s, dest=%s", store.archivedSrc, store.archivedDest)
+	if err := runner.lastRequest.Finalize(context.Background()); err != nil || store.archivedSrc != req.Key || store.archivedDest != req.ArchiveKey {
+		t.Fatalf("Finalize mismatch: err=%v, src=%s, dest=%s", err, store.archivedSrc, store.archivedDest)
 	}
 }
 
 func TestIngestObject_NoArchiveKeyNoFinalize(t *testing.T) {
 	runner, _, ingestor := newTestIngestor()
-	req := ObjectRequest{Key: "unprocessed/chase1234.csv", ArchiveKey: ""}
-	if _, err := ingestor.IngestObject(context.Background(), req); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if runner.lastRequest.Finalize != nil {
-		t.Error("expected nil Finalize hook, got non-nil")
+	if _, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"}); err != nil || runner.lastRequest.Finalize != nil {
+		t.Fatalf("err=%v, finalize is non-nil", err)
 	}
 }
 
 func TestIngestObject_ClosesStream(t *testing.T) {
+	errBoom := errors.New("boom")
 	for _, tc := range []struct {
 		name    string
 		stream  io.Reader
@@ -241,7 +229,7 @@ func TestIngestObject_ClosesStream(t *testing.T) {
 		wantErr error
 	}{
 		{"success", strings.NewReader("ok"), 0, nil, nil},
-		{"run error", strings.NewReader("ok"), 0, errors.New("boom"), errors.New("boom")},
+		{"run error", strings.NewReader("ok"), 0, errBoom, errBoom},
 		{"read error", &errReader{err: io.ErrUnexpectedEOF}, 0, nil, io.ErrUnexpectedEOF},
 		{"too large", strings.NewReader("too long content"), 5, nil, ErrInputTooLarge},
 	} {
@@ -250,16 +238,21 @@ func TestIngestObject_ClosesStream(t *testing.T) {
 			store := &fakeStore{downloadFn: func(context.Context, string) (io.ReadCloser, error) { return tracker, nil }}
 			runner := &fakeRunner{runFn: func(context.Context, pipeline.Request) (*model.SyncLog, error) { return nil, tc.runErr }}
 			ingestor := NewIngestor(runner, store, WithMaxInputBytes(tc.max))
-			_, _ = ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"})
+			_, err := ingestor.IngestObject(context.Background(), ObjectRequest{Key: "unprocessed/chase1234.csv"})
 			if !tracker.closed {
 				t.Errorf("%s: stream was not closed", tc.name)
+			}
+			if tc.wantErr == nil && err != nil {
+				t.Errorf("%s: unexpected error: %v", tc.name, err)
+			} else if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("%s: error = %v, want %v", tc.name, err, tc.wantErr)
 			}
 		})
 	}
 }
 
 func TestIngestAll_ContinuesAndCounts(t *testing.T) {
-	runner := &fakeRunner{runFn: func(ctx context.Context, req pipeline.Request) (*model.SyncLog, error) {
+	runner := &fakeRunner{runFn: func(_ context.Context, req pipeline.Request) (*model.SyncLog, error) {
 		if req.Meta.FileName == "audit_fail.csv" {
 			return nil, pipeline.ErrAuditWrite
 		}
@@ -269,7 +262,6 @@ func TestIngestAll_ContinuesAndCounts(t *testing.T) {
 		return model.NewSuccessSyncLog(req.Meta.FileName, req.Meta.FileHash, "dest", 1, 1, 0, time.Now(), 1), nil
 	}}
 	ingestor := NewIngestor(runner, &fakeStore{})
-
 	reqs := []ObjectRequest{
 		{Key: "unprocessed/chase1234.csv"},
 		{Key: "unprocessed/audit_fail.csv", Override: &SourceRef{SourceType: SourceChase, AccountID: "1111"}},
@@ -277,7 +269,6 @@ func TestIngestAll_ContinuesAndCounts(t *testing.T) {
 		{Key: "unprocessed/unknown.csv"},
 		{Key: "unprocessed/fatal.csv", Override: &SourceRef{SourceType: SourceChase, AccountID: "2222"}},
 	}
-
 	stats := ingestor.IngestAll(context.Background(), reqs)
 	if stats.TotalFiles != 5 || stats.ProcessedFiles != 2 || stats.FailedFiles != 3 || len(stats.Failures) != 3 {
 		t.Fatalf("stats mismatch: %+v", stats)
@@ -290,12 +281,7 @@ func TestIngestAll_ContinuesAndCounts(t *testing.T) {
 }
 
 func TestRunStats_JSONMatchesLegacy(t *testing.T) {
-	stats := RunStats{
-		TotalFiles:     2,
-		ProcessedFiles: 1,
-		FailedFiles:    1,
-		Failures:       map[string]string{"err.csv": "parse error"},
-	}
+	stats := RunStats{TotalFiles: 2, ProcessedFiles: 1, FailedFiles: 1, Failures: map[string]string{"err.csv": "parse error"}}
 	data, err := json.Marshal(stats)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
@@ -308,15 +294,16 @@ func TestRunStats_JSONMatchesLegacy(t *testing.T) {
 
 func TestArchiveKeyFor(t *testing.T) {
 	for _, tc := range []struct {
-		key, from, to string
-		wantKey       string
-		wantOK        bool
+		key, from, to, wantKey string
+		wantOK                 bool
 	}{
 		{"unprocessed/chase1234.csv", "unprocessed", "processed", "processed/chase1234.csv", true},
 		{"unprocessed/2026/01/report.csv", "unprocessed/", "processed", "processed/2026/01/report.csv", true},
 		{"unprocessed/nested/dir/f.csv", "unprocessed", "archive/", "archive/nested/dir/f.csv", true},
 		{"other/file.csv", "unprocessed", "processed", "", false},
 		{"unprocessed_file.csv", "unprocessed", "processed", "", false},
+		{"", "unprocessed", "processed", "", false},
+		{"unprocessed/f.csv", "", "processed", "", false},
 	} {
 		gotKey, gotOK := ArchiveKeyFor(tc.key, tc.from, tc.to)
 		if gotKey != tc.wantKey || gotOK != tc.wantOK {
@@ -326,59 +313,59 @@ func TestArchiveKeyFor(t *testing.T) {
 }
 
 type fakeExtractor struct {
-	called bool
+	called     bool
+	sourceType string
+	dest       model.Destination
 }
 
-func (f *fakeExtractor) SourceType() string { return SourceSynthetic }
+func (f *fakeExtractor) SourceType() string { return f.sourceType }
 
-func (f *fakeExtractor) Extract(ctx context.Context, r io.Reader, meta model.FileMetadata) (*model.IngestionBatch, error) {
+func (f *fakeExtractor) Extract(context.Context, io.Reader, model.FileMetadata) (*model.IngestionBatch, error) {
 	f.called = true
 	return &model.IngestionBatch{
-		Destination: model.DestSynthetic,
-		AccountID:   meta.AccountID,
-		SourceFile:  meta.FileName,
-		FileHash:    meta.FileHash,
-		IngestedAt:  meta.IngestedAt,
-		RecordCount: 1,
-		Payload:     []any{1},
+		Destination: f.dest, AccountID: "0000", SourceFile: "f.csv", IngestedAt: time.Now(), RecordCount: 1, Payload: []any{1},
 	}, nil
 }
 
 type dummyRepo struct{}
 
-func (d *dummyRepo) SaveBatch(ctx context.Context, batch *model.IngestionBatch) (*model.SyncLog, error) {
-	return model.NewSuccessSyncLog(batch.SourceFile, batch.FileHash, string(batch.Destination), 1, 1, 0, time.Now(), 1), nil
+func (d *dummyRepo) SaveBatch(context.Context, *model.IngestionBatch) (*model.SyncLog, error) {
+	return model.NewSuccessSyncLog("f", "h", "c", 1, 1, 0, time.Now(), 1), nil
 }
 
-func (d *dummyRepo) LogSync(ctx context.Context, log *model.SyncLog) error {
-	return nil
-}
+func (d *dummyRepo) LogSync(context.Context, *model.SyncLog) error { return nil }
 
 func TestRegisterDefaults_Routing(t *testing.T) {
-	chaseExt := &fakeExtractor{}
-	fidelityExt := &fakeExtractor{}
-	syntheticExt := &fakeExtractor{}
+	chaseExt := &fakeExtractor{sourceType: SourceChase, dest: model.DestChaseChecking}
+	fidelityExt := &fakeExtractor{sourceType: SourceFidelity, dest: model.DestFidelityPosition}
+	syntheticExt := &fakeExtractor{sourceType: SourceSynthetic, dest: model.DestSynthetic}
 	p := pipeline.New(&dummyRepo{}, nil)
 
 	if err := RegisterDefaults(p, chaseExt, fidelityExt, syntheticExt); err != nil {
 		t.Fatalf("RegisterDefaults failed: %v", err)
 	}
 
-	// Verify synthetic routes to syntheticExt
-	meta := NewFileMetadata("synthetic_test.csv", SourceRef{SourceType: SourceSynthetic, AccountID: "0000"}, "hash", "uri", time.Now())
-	_, err := p.Run(context.Background(), pipeline.Request{
-		Reader:     strings.NewReader("col\nval\n"),
-		Meta:       meta,
-		SourceType: SourceSynthetic,
-	})
-	if err != nil {
-		t.Fatalf("pipeline run failed: %v", err)
-	}
-	if !syntheticExt.called || chaseExt.called || fidelityExt.called {
-		t.Errorf("routing incorrect: syn=%v, chase=%v, fid=%v", syntheticExt.called, chaseExt.called, fidelityExt.called)
+	for _, tc := range []struct {
+		src  string
+		ext  *fakeExtractor
+		acc  string
+		file string
+	}{
+		{SourceChase, chaseExt, "1234", "chase1234.csv"},
+		{SourceFidelity, fidelityExt, "portfolio", "fidelity.csv"},
+		{SourceSynthetic, syntheticExt, "0000", "synthetic.csv"},
+	} {
+		meta := NewFileMetadata(tc.file, SourceRef{SourceType: tc.src, AccountID: tc.acc}, "hash", "uri", time.Now())
+		if _, err := p.Run(context.Background(), pipeline.Request{
+			Reader:     strings.NewReader("col\nval\n"),
+			Meta:       meta,
+			SourceType: tc.src,
+		}); err != nil || !tc.ext.called {
+			t.Fatalf("%s run failed (called=%v): %v", tc.src, tc.ext.called, err)
+		}
 	}
 
-	// Verify fallbacks match expected destinations
+	meta := NewFileMetadata("fallback.csv", SourceRef{SourceType: SourceChase, AccountID: "0000"}, "", "uri", time.Now())
 	for src, wantDest := range map[string]model.Destination{
 		SourceChase:     model.DestChaseChecking,
 		SourceFidelity:  model.DestFidelityPosition,
@@ -390,11 +377,18 @@ func TestRegisterDefaults_Routing(t *testing.T) {
 		}
 	}
 
-	// Verify nil extractor rejection
-	if nilPipeErr := RegisterDefaults(nil, chaseExt, fidelityExt, syntheticExt); !errors.Is(nilPipeErr, pipeline.ErrInvalidRegistration) {
-		t.Errorf("expected ErrInvalidRegistration for nil pipeline, got: %v", nilPipeErr)
-	}
-	if nilChaseErr := RegisterDefaults(p, nil, fidelityExt, syntheticExt); !errors.Is(nilChaseErr, pipeline.ErrInvalidRegistration) {
-		t.Errorf("expected ErrInvalidRegistration for nil chase, got: %v", nilChaseErr)
+	for _, tc := range []struct {
+		name        string
+		pipe        *pipeline.Pipeline
+		ch, fid, sy port.Extractor
+	}{
+		{"nil pipeline", nil, chaseExt, fidelityExt, syntheticExt},
+		{"nil chase", p, nil, fidelityExt, syntheticExt},
+		{"nil fidelity", p, chaseExt, nil, syntheticExt},
+		{"nil synthetic", p, chaseExt, fidelityExt, nil},
+	} {
+		if err := RegisterDefaults(tc.pipe, tc.ch, tc.fid, tc.sy); !errors.Is(err, pipeline.ErrInvalidRegistration) {
+			t.Errorf("%s: got %v, want ErrInvalidRegistration", tc.name, err)
+		}
 	}
 }
