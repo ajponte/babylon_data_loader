@@ -233,7 +233,7 @@ sequenceDiagram
     participant R as mongo.Repository
 
     S3->>H: S3 Object Created Event
-    H->>I: IngestObject(ctx, bucket, key)
+    H->>I: IngestObject(ctx, ObjectRequest{Key: key, ArchiveKey: destKey, ...})
     I->>S3C: DownloadStream(ctx, key)
     S3C-->>I: io.ReadCloser (stream)
     I->>I: Fingerprint (SHA-256 <= 32MB)
@@ -264,7 +264,7 @@ sequenceDiagram
     CLI->>LFS: List(ctx, "data/unprocessed")
     LFS-->>CLI: []fileKeys
     loop For each file
-        CLI->>I: IngestObject(ctx, "", key)
+        CLI->>I: IngestObject(ctx, ObjectRequest{Key: key, ...})
         I->>LFS: DownloadStream(ctx, key)
         LFS-->>I: io.ReadCloser
         I->>I: Fingerprint (SHA-256)
@@ -354,7 +354,7 @@ sequenceDiagram
 | **4C** | Pipeline Orchestrator | `TestRegister_RejectsInvalid`, `TestRun_SuccessPersistsAndAudits`, `TestRun_CopiesSourceURIToBatch`, `TestRun_FailureAuditUsesDetachedContext`, `TestRun_FinalizeRunsBeforeSuccessAudit`, `TestRun_FinalizeFailureWritesSingleFailedLog`, `TestRun_SuccessAuditFailureIsNonFatal`, `TestRun_FailureAuditFailureIsJoined`, `TestRun_CancelledContextUnwrapped`, `TestRecordFailure_AuditsWithFallbackAndEmptyHash` |
 | **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestResolveSource_Unresolvable`, `TestResolveSource_PrecedenceChaseOverSynthetic`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize`, `TestFingerprint_ReaderErrorPropagates`, `TestFingerprint_NilReader`, `TestNewFileMetadata_Validates` |
 | **4E** | LocalFS Store | `TestNew_RequiresExistingDirectory`, `TestDownloadStream_ReadsFile`, `TestDownloadStream_NotFound`, `TestKeys_RejectTraversal`, `TestArchiveFile_RenamesAndCreatesDir`, `TestArchiveFile_CopyFallback`, `TestList_FilesOnlySorted`, `TestErrors_DoNotLeakRoot` |
-| **4F** | Object Ingestion | `TestIngestor_IngestObject_Success`, `TestIngestor_TooLargeAuditsFailure`, `TestIngestor_DeterministicFailureRetainsObject` |
+| **4F** | Object Ingestion | `TestIngestObject_ResolvesAndRuns`, `TestIngestObject_OverrideSkipsResolution`, `TestIngestObject_CancelledContext`, `TestIngestObject_RejectsNonCSV`, `TestIngestObject_Unresolvable`, `TestIngestObject_DownloadNotFound`, `TestIngestObject_TooLargeIsAudited`, `TestIngestObject_TooLargeAuditFailureJoined`, `TestIngestObject_FingerprintReadError`, `TestIngestObject_FinalizeArchives`, `TestIngestObject_NoArchiveKeyNoFinalize`, `TestIngestObject_ClosesStream`, `TestIngestAll_ContinuesAndCounts`, `TestRunStats_JSONMatchesLegacy`, `TestArchiveKeyFor`, `TestRegisterDefaults_Routing` |
 | **4G** | CLI Entrypoint | `TestCLI_IngestCommand`, `TestCLI_GenerateSyntheticData`, `TestCLI_SlogProgress` |
 | **4L** | Local E2E Verification | `TestE2E_CLIIngest_RealMongo`, `TestE2E_CLIIngest_RerunIsIdempotent`, `TestSyntheticCSV_RoutesToSyntheticDestination` |
 | **4H** | Lambda Cutover | `TestHandler_S3Event_Success`, `TestHandler_DeterministicFailure_ReturnsNil`, `TestHandler_TransientFailure_ReturnsError` |
