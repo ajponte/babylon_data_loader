@@ -169,8 +169,8 @@ func TestIngestObject_TooLargeIsAudited(t *testing.T) {
 	if !errors.Is(err, ErrInputTooLarge) || failedLog == nil || !tracker.closed {
 		t.Fatalf("expected ErrInputTooLarge and closed tracker: err=%v, closed=%v", err, tracker.closed)
 	}
-	if runner.failureCalls != 1 || runner.runCalls != 0 || runner.lastSourceType != SourceChase || runner.lastMeta.FileHash != "" {
-		t.Errorf("failureCalls=%d, runCalls=%d, src=%s, hash=%q", runner.failureCalls, runner.runCalls, runner.lastSourceType, runner.lastMeta.FileHash)
+	if runner.failureCalls != 1 || runner.runCalls != 0 || runner.lastSourceType != SourceChase || runner.lastMeta.FileHash != "" || runner.lastMeta.SourceURI != req.SourceURI {
+		t.Errorf("failureCalls=%d, runCalls=%d, src=%s, hash=%q, uri=%q", runner.failureCalls, runner.runCalls, runner.lastSourceType, runner.lastMeta.FileHash, runner.lastMeta.SourceURI)
 	}
 }
 
@@ -229,6 +229,7 @@ func TestIngestObject_ClosesStream(t *testing.T) {
 		wantErr error
 	}{
 		{"success", strings.NewReader("ok"), 0, nil, nil},
+		{"empty stream", strings.NewReader(""), 0, nil, nil},
 		{"run error", strings.NewReader("ok"), 0, errBoom, errBoom},
 		{"read error", &errReader{err: io.ErrUnexpectedEOF}, 0, nil, io.ErrUnexpectedEOF},
 		{"too large", strings.NewReader("too long content"), 5, nil, ErrInputTooLarge},
@@ -264,10 +265,10 @@ func TestIngestAll_ContinuesAndCounts(t *testing.T) {
 	ingestor := NewIngestor(runner, &fakeStore{})
 	reqs := []ObjectRequest{
 		{Key: "unprocessed/chase1234.csv"},
+		{Key: "unprocessed/fatal.csv", Override: &SourceRef{SourceType: SourceChase, AccountID: "2222"}},
 		{Key: "unprocessed/audit_fail.csv", Override: &SourceRef{SourceType: SourceChase, AccountID: "1111"}},
 		{Key: "unprocessed/invalid.txt"},
 		{Key: "unprocessed/unknown.csv"},
-		{Key: "unprocessed/fatal.csv", Override: &SourceRef{SourceType: SourceChase, AccountID: "2222"}},
 	}
 	stats := ingestor.IngestAll(context.Background(), reqs)
 	if stats.TotalFiles != 5 || stats.ProcessedFiles != 2 || stats.FailedFiles != 3 || len(stats.Failures) != 3 {
@@ -298,6 +299,7 @@ func TestArchiveKeyFor(t *testing.T) {
 		wantOK                 bool
 	}{
 		{"unprocessed/chase1234.csv", "unprocessed", "processed", "processed/chase1234.csv", true},
+		{"unprocessed/chase1234.csv", "unprocessed", "", "chase1234.csv", true},
 		{"unprocessed/2026/01/report.csv", "unprocessed/", "processed", "processed/2026/01/report.csv", true},
 		{"unprocessed/nested/dir/f.csv", "unprocessed", "archive/", "archive/nested/dir/f.csv", true},
 		{"other/file.csv", "unprocessed", "processed", "", false},
@@ -346,14 +348,12 @@ func TestRegisterDefaults_Routing(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		src  string
-		ext  *fakeExtractor
-		acc  string
-		file string
+		src, acc, file string
+		ext            *fakeExtractor
 	}{
-		{SourceChase, chaseExt, "1234", "chase1234.csv"},
-		{SourceFidelity, fidelityExt, "portfolio", "fidelity.csv"},
-		{SourceSynthetic, syntheticExt, "0000", "synthetic.csv"},
+		{SourceChase, "1234", "chase1234.csv", chaseExt},
+		{SourceFidelity, "portfolio", "fidelity.csv", fidelityExt},
+		{SourceSynthetic, "0000", "synthetic.csv", syntheticExt},
 	} {
 		meta := NewFileMetadata(tc.file, SourceRef{SourceType: tc.src, AccountID: tc.acc}, "hash", "uri", time.Now())
 		if _, err := p.Run(context.Background(), pipeline.Request{

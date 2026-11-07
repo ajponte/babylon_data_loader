@@ -90,15 +90,15 @@ func (i *Ingestor) IngestObject(ctx context.Context, req ObjectRequest) (*model.
 		return nil, err
 	}
 
-	stream, dlErr := i.store.DownloadStream(ctx, req.Key)
-	if dlErr != nil {
-		return nil, dlErr
+	stream, err := i.store.DownloadStream(ctx, req.Key)
+	if err != nil {
+		return nil, err
 	}
 	defer stream.Close()
 
-	body, hash, fpErr := Fingerprint(stream, i.maxBytes)
-	if fpErr != nil {
-		return i.handleFingerprintError(ctx, req, ref, fpErr)
+	body, hash, err := Fingerprint(stream, i.maxBytes)
+	if err != nil {
+		return i.handleFingerprintError(ctx, req, ref, err)
 	}
 
 	meta := NewFileMetadata(req.Key, ref, hash, req.SourceURI, i.now())
@@ -119,28 +119,25 @@ func (i *Ingestor) resolveRequestSource(req ObjectRequest) (SourceRef, error) {
 }
 
 func (i *Ingestor) handleFingerprintError(
-	ctx context.Context,
-	req ObjectRequest,
-	ref SourceRef,
-	fpErr error,
+	ctx context.Context, req ObjectRequest, ref SourceRef, err error,
 ) (*model.SyncLog, error) {
-	if !errors.Is(fpErr, ErrInputTooLarge) {
-		return nil, fpErr
+	if !errors.Is(err, ErrInputTooLarge) {
+		return nil, err
 	}
 	meta := NewFileMetadata(req.Key, ref, "", req.SourceURI, i.now())
-	failedLog, auditErr := i.runner.RecordFailure(ctx, ref.SourceType, meta, fpErr)
+	failedLog, auditErr := i.runner.RecordFailure(ctx, ref.SourceType, meta, err)
 	if auditErr != nil {
-		return failedLog, errors.Join(fpErr, auditErr)
+		return failedLog, errors.Join(err, auditErr)
 	}
-	return failedLog, fpErr
+	return failedLog, err
 }
 
 func (i *Ingestor) makeFinalize(req ObjectRequest) func(context.Context) error {
 	if req.ArchiveKey == "" {
 		return nil
 	}
-	return func(fCtx context.Context) error {
-		return i.store.ArchiveFile(fCtx, req.Key, req.ArchiveKey)
+	return func(ctx context.Context) error {
+		return i.store.ArchiveFile(ctx, req.Key, req.ArchiveKey)
 	}
 }
 
@@ -163,6 +160,7 @@ func (s *RunStats) recordResult(key string, err error) {
 		return
 	}
 	s.FailedFiles++
+	// Keying by path.Base preserves parity with legacy JSON error summary reporting.
 	s.Failures[path.Base(key)] = err.Error()
 }
 
