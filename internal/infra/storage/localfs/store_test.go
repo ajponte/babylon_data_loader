@@ -44,25 +44,20 @@ func TestNew_RequiresExistingDirectory(t *testing.T) {
 	writeFile(t, filePath, []byte("data"))
 	missingDir := filepath.Join(tmp, "missing_subdir")
 
-	tests := []struct {
-		name        string
-		root        string
-		expectedErr error
+	for _, tc := range []struct {
+		name string
+		root string
+		want error
 	}{
-		{name: "empty root", root: "", expectedErr: ErrMissingRoot},
-		{name: "whitespace root", root: "   ", expectedErr: ErrMissingRoot},
-		{name: "missing directory", root: missingDir, expectedErr: fs.ErrNotExist},
-		{name: "file as root", root: filePath, expectedErr: fs.ErrInvalid},
-	}
-
-	for _, tc := range tests {
+		{"empty root", "", ErrMissingRoot},
+		{"whitespace root", "   ", ErrMissingRoot},
+		{"missing directory", missingDir, fs.ErrNotExist},
+		{"file as root", filePath, fs.ErrInvalid},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, err := New(tc.root)
-			if err == nil || !errors.Is(err, tc.expectedErr) {
-				t.Fatalf("expected error %v, got %v", tc.expectedErr, err)
-			}
-			if store != nil {
-				t.Errorf("expected nil store on error, got %v", store)
+			if err == nil || !errors.Is(err, tc.want) || store != nil {
+				t.Fatalf("New(%q) got store=%v, err=%v, want %v", tc.root, store, err, tc.want)
 			}
 			if tc.root == missingDir && strings.Contains(err.Error(), tmp) {
 				t.Errorf("New leaked root path: %s", err.Error())
@@ -106,12 +101,10 @@ func TestDownloadStream_Scenarios(t *testing.T) {
 
 func TestKeys_RejectTraversalAndInvalid(t *testing.T) {
 	_, store := newTestStore(t)
-	invalidKeys := []string{
-		"../secret.txt", "/etc/passwd", "a/../../x", "..", "", ".", "\\", "/", "folder/..", "folder/.", "file\x00name.csv",
-	}
-
 	ctx := context.Background()
-	for _, key := range invalidKeys {
+	for _, key := range []string{
+		"../secret.txt", "/etc/passwd", "a/../../x", "..", "", ".", "\\", "/", "folder/..", "folder/.", "file\x00name.csv",
+	} {
 		if _, dlErr := store.DownloadStream(ctx, key); !errors.Is(dlErr, ErrInvalidKey) {
 			t.Errorf("DownloadStream(%q) expected ErrInvalidKey, got: %v", key, dlErr)
 		}
@@ -175,9 +168,8 @@ func TestArchiveFile_SameResolvedPath(t *testing.T) {
 		}
 	}
 
-	srcBytes, readErr := os.ReadFile(srcPath)
-	if readErr != nil || string(srcBytes) != string(content) {
-		t.Fatalf("source file was truncated or corrupted: %v", readErr)
+	if srcBytes, err := os.ReadFile(srcPath); err != nil || string(srcBytes) != string(content) {
+		t.Fatalf("source file was truncated or corrupted: %v", err)
 	}
 }
 
@@ -311,7 +303,7 @@ func TestErrors_DoNotLeakRoot(t *testing.T) {
 	root, store := newTestStore(t)
 	ctx := context.Background()
 
-	cases := []struct {
+	for _, tc := range []struct {
 		name string
 		op   func() error
 		key  string
@@ -319,19 +311,13 @@ func TestErrors_DoNotLeakRoot(t *testing.T) {
 		{"download not found", func() error { _, err := store.DownloadStream(ctx, "not_found.csv"); return err }, "not_found.csv"},
 		{"archive source not found", func() error { return store.ArchiveFile(ctx, "missing.csv", "dest.csv") }, "missing.csv"},
 		{"list missing prefix", func() error { _, err := store.List(ctx, "missing_folder"); return err }, "missing_folder"},
-	}
-
-	for _, tc := range cases {
-		err := tc.op()
-		if err == nil {
-			t.Fatalf("%s: expected error", tc.name)
-		}
-		if strings.Contains(err.Error(), root) {
-			t.Errorf("%s: leaked root: %s", tc.name, err.Error())
-		}
-		if !strings.Contains(err.Error(), tc.key) {
-			t.Errorf("%s: should contain key %q: %s", tc.name, tc.key, err.Error())
-		}
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.op()
+			if err == nil || strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("%s failed validation: err=%v, root=%s, key=%s", tc.name, err, root, tc.key)
+			}
+		})
 	}
 
 	linkErr := &os.LinkError{Op: "rename", Old: "/confidential/old", New: "/confidential/new", Err: fs.ErrPermission}
