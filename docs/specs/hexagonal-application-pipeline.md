@@ -25,7 +25,7 @@ The application pipeline is organized into strict hexagonal layers enforced by `
 | :--- | :--- | :--- | :--- |
 | `internal/app/pipeline/` | Application Orchestration | `$gostd`, `internal/domain/**`, `internal/app/**` | Generic single-stream batch execution, extractor registry, failure-auditing policy, and progress telemetry. |
 | `internal/app/ingest/` | Application Use Cases | `$gostd`, `internal/domain/**`, `internal/app/**` | Filename resolution (`ResolveSource`), stream fingerprinting (`Fingerprint`), object download loop, archive dispatch, and `RunStats`. |
-| `internal/infra/storage/localfs/` | Secondary Driven Adapter | `$gostd`, `internal/domain/**`, `internal/infra/storage/localfs/**` | Implements `port.ObjectStore` over local filesystem directories (`List`, `DownloadStream`, `ArchiveProcessed`). |
+| `internal/infra/storage/localfs/` | Secondary Driven Adapter | `$gostd`, `internal/domain/**`, `internal/infra/storage/localfs/**` | Implements `port.ObjectStore` over local filesystem directories (`List`, `DownloadStream`, `ArchiveFile`). |
 | `cmd/cli/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | CLI composition root (`ingest`, `generate-synthetic-data`). Drives `ingest.Ingestor` with `localfs.Store` and CLI `slog` progress. |
 | `cmd/lambda/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | AWS Lambda composition root (`handler.go`). Consumes S3 events, resolves streams via `s3.Client`, and writes to `mongo.Repository`. |
 | `desktop/` | Primary Driving Adapter | `internal/**`, `desktop/**` (module `babylon/dataloader/desktop`) | Wails desktop application. Ingests local files in place via `ingest.Ingestor` and reports progress via `WailsProgressNotifier`. |
@@ -240,7 +240,7 @@ sequenceDiagram
     I->>P: Run(ctx, Request{Meta: {SourceURI: s3://bucket/key}})
     P->>R: SaveBatch(ctx, batch)
     R-->>P: SyncLog (records persisted)
-    P->>S3C: ArchiveProcessed(ctx, key)
+    P->>S3C: ArchiveFile(ctx, key, destKey)
     S3C-->>P: Object archived to processed/
     P->>R: LogSync(ctx, successSyncLog)
     R-->>P: nil
@@ -268,12 +268,12 @@ sequenceDiagram
         I->>LFS: DownloadStream(ctx, key)
         LFS-->>I: io.ReadCloser
         I->>I: Fingerprint (SHA-256)
-        I->>P: Run(ctx, Request{Finalize: ArchiveProcessed})
+        I->>P: Run(ctx, Request{Finalize: ArchiveFile})
         P->>Notifier: NotifyProgress(StageParsing)
         P->>R: SaveBatch(ctx, batch)
         R-->>P: SyncLog
         P->>Notifier: NotifyProgress(StageSaving)
-        P->>LFS: ArchiveProcessed(ctx, key)
+        P->>LFS: ArchiveFile(ctx, key, destKey)
         LFS-->>P: Moved to data/processed/
         P->>R: LogSync(ctx, SyncLog)
         R-->>P: nil
@@ -353,7 +353,7 @@ sequenceDiagram
 | **4B** | S3 URI Provenance | `TestWritePlan_SourceURI_EmittedAsDottedPath`, `TestWritePlan_SourceURI_EmptyOmitted`, `TestWritePlan_SourceURI_NotInFilter`, `TestFileMetadata_ValidateIgnoresSourceURI` |
 | **4C** | Pipeline Orchestrator | `TestRegister_RejectsInvalid`, `TestRun_SuccessPersistsAndAudits`, `TestRun_CopiesSourceURIToBatch`, `TestRun_FailureAuditUsesDetachedContext`, `TestRun_FinalizeRunsBeforeSuccessAudit`, `TestRun_FinalizeFailureWritesSingleFailedLog`, `TestRun_SuccessAuditFailureIsNonFatal`, `TestRun_FailureAuditFailureIsJoined`, `TestRun_CancelledContextUnwrapped`, `TestRecordFailure_AuditsWithFallbackAndEmptyHash` |
 | **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestResolveSource_Unresolvable`, `TestResolveSource_PrecedenceChaseOverSynthetic`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize`, `TestFingerprint_ReaderErrorPropagates`, `TestFingerprint_NilReader`, `TestNewFileMetadata_Validates` |
-| **4E** | LocalFS Store | `TestLocalFS_List`, `TestLocalFS_DownloadStream`, `TestLocalFS_ArchiveProcessed` |
+| **4E** | LocalFS Store | `TestNew_RequiresExistingDirectory`, `TestDownloadStream_ReadsFile`, `TestDownloadStream_NotFound`, `TestKeys_RejectTraversal`, `TestArchiveFile_RenamesAndCreatesDir`, `TestArchiveFile_CopyFallback`, `TestList_FilesOnlySorted`, `TestErrors_DoNotLeakRoot` |
 | **4F** | Object Ingestion | `TestIngestor_IngestObject_Success`, `TestIngestor_TooLargeAuditsFailure`, `TestIngestor_DeterministicFailureRetainsObject` |
 | **4G** | CLI Entrypoint | `TestCLI_IngestCommand`, `TestCLI_GenerateSyntheticData`, `TestCLI_SlogProgress` |
 | **4L** | Local E2E Verification | `TestE2E_CLIIngest_RealMongo`, `TestE2E_CLIIngest_RerunIsIdempotent`, `TestSyntheticCSV_RoutesToSyntheticDestination` |
