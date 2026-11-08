@@ -81,9 +81,9 @@ test-integration: ## storage integration tests against local Docker or CI Mongo 
 
 
 ## Build
-build: ## build the go application
+build: ## build the go application (cmd/cli)
 	mkdir -p out/
-	go build -o $(APP_EXECUTABLE)
+	go build -o $(APP_EXECUTABLE) ./cmd/cli
 	@echo "Build passed"
 
 ## Lambda Targets
