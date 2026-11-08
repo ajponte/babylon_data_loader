@@ -155,3 +155,34 @@ During the Round 3 QA and code review of the integrated Chase adapter on branch 
 3. **Nil context in one place**: Only `Extract` normalizes a nil context. `Classify` documents a non-nil `ctx` as a precondition and never returns a context.
 4. **No domain model changes**: Both dialects keep sharing `"transactions_chase"`. Dialect routing is verified through payload fields.
 5. **Trailing-minus negatives** (`4.50-`) are rejected with a row-attributed `model.ErrInvalidAmount`, not normalized.
+
+---
+
+## 9. Phase 4G CLI Entrypoint & Code Review Hardening Log
+
+During the implementation and iterative code reviews of the CLI composition root on branch `feat/phase-4g-cli-entrypoint` (PR #89, synthesized in [`agent-docs/reviews/feat/phase-4g-cli-entrypoint/REVIEW-FINDINGS.md`](../../agent-docs/reviews/feat/phase-4g-cli-entrypoint/REVIEW-FINDINGS.md) and [`CODE-REVIEW-FINDINGS.md`](../../agent-docs/reviews/feat/phase-4g-cli-entrypoint/CODE-REVIEW-FINDINGS.md)), 15 findings across QA and code review were remediated:
+
+| ID | Severity | Target File(s) | Architectural Impact Prior to Hardening | Implemented Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **QAF-01** | `Medium` | `cmd/cli/main_test.go` | Fidelity batch record presence checked count only, omitting deserialized payload and field validation. | Added `b.AsFidelityPositions()` assertion verifying `Symbol == "SPAXX**"`, `CurrentValue == 3250.00`, and non-zero `AsOfDate`. |
+| **QAF-02** | `Medium` | `cmd/cli/main_test.go` | Zero-file directory ingestion path unverified. | Added `TestRun_IngestEmptyDirectory` verifying 0 files exits 0 and logs `"totalFiles": 0`. |
+| **QAF-03** | `Medium` | `cmd/cli/main.go`<br>`cmd/cli/main_test.go` | Pre-canceled or timed-out context returned un-wrapped error string, breaking `errors.Is(err, context.Canceled)`. | Implemented `sanitizedError.Is(target)` method preserving standard sentinel unwrapping while masking credentials. |
+| **QAF-04** | `Low` | `cmd/cli/main_test.go` | URI sanitization unverified on percent-encoded characters and complex passwords. | Added table tests asserting URI credential redaction on percent-encoded characters and exact raw URI replacement. |
+| **QAF-05** | `Low` | `cmd/cli/main.go`<br>`cmd/cli/main_test.go` | Usage error was unexported string-matching sentinel. | Exported `ErrUsage = errors.New(...)` and asserted via `errors.Is(err, ErrUsage)`. |
+| **CRF-01** | `Medium` | `cmd/cli/main.go` | `runIngest` mingled repository connection, extractor registration, and storage traversal. | Decomposed pipeline registration into `newIngestionPipeline(repo, notifier, clock)`. |
+| **CRF-02** | `Medium` | `cmd/cli/main.go` | MongoDB connection and error sanitization logic duplicated between `runIngest` and `runPersistSyntheticData`. | Consolidated into reusable `connectRepository(ctx, deps, uri)` helper. |
+| **CRF-03** | `Medium` | `cmd/cli/main.go` | Flag declaration and parsing cluttered `runGenerateSyntheticData` control flow. | Extracted `parseSyntheticFlags(args, cfg)` and structured `syntheticOptions` struct with `io.Discard` for clean stderr. |
+| **CRF-04** | `Low` | `cmd/cli/main.go` | Synthetic `FileMetadata` construction cluttered persistence runner. | Decomposed into `newSyntheticRequest(now, notifier)` isolating `syntheticAccountID` (`"0000"`). |
+| **CRF-05** | `Low` | `cmd/cli/main.go` | Architectural boundaries lacked inline comprehension notes. | Added succinct comments for DI seams, timeout propagation, and custom error unwrapping. |
+| **CRF-06** | `Medium` | `cmd/cli/main.go` | `runPersistSyntheticData` lacked pipeline factory symmetry with `runIngest`. | Extracted `newSyntheticPipeline(repo, notifier, clock, rows)` mirroring `newIngestionPipeline`. |
+| **CRF-07** | `Medium` | `cmd/cli/main.go` | Store root calculation and key listing procedural boilerplate inside `runIngest`. | Extracted `initStoreAndDiscoverKeys(ctx, d, unprocessedDir)` isolating filesystem storage resolution. |
+| **CRF-08** | `Medium` | `cmd/cli/main.go` | Nested `if` conditionals inside `buildObjectRequests` loop. | Extracted `resolveArchiveKey(key, prefix, archivePrefix, moveProcessed)` achieving flat declarative loop. |
+| **CRF-09** | `Low` | `cmd/cli/main.go` | JSON formatting entangled with slog logging calls. | Extracted `formatStatsJSON(stats)` separating serialization from logger emission. |
+| **CRF-10** | `Low` | `cmd/cli/main.go` | Unexported internal interfaces lacked lifecycle docstrings. | Added succinct docstrings to `repository`, `objectStore`, and `slogNotifier`. |
+
+### Phase 4G Architectural Invariants
+1. **Detached Connection Cleanup**: `closeRepoWithTimeout` runs `repo.Close` with `context.WithoutCancel(ctx)` with a 5-second timeout, ensuring clean connection termination even when the main run context timed out or was canceled.
+2. **Credential Redaction with Sentinel Preservation**: `sanitizeError` returns a `*sanitizedError` struct implementing `Error() string` (redacted) and `Is(error) bool` (matching underlying errors such as `context.Canceled`), preventing credentials from leaking to logs while preserving caller error inspection.
+3. **High-Level Orchestration Symmetry**: Both `runIngest` and `runPersistSyntheticData` are structured into symmetrical 4-step orchestration flows under 25 lines each.
+4. **Statement Coverage**: Achieved 86.4% statement coverage on `cmd/cli` with 18 passing tests across all boundary scenarios.
+

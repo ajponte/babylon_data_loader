@@ -26,7 +26,7 @@ The application pipeline is organized into strict hexagonal layers enforced by `
 | `internal/app/pipeline/` | Application Orchestration | `$gostd`, `internal/domain/**`, `internal/app/**` | Generic single-stream batch execution, extractor registry, failure-auditing policy, and progress telemetry. |
 | `internal/app/ingest/` | Application Use Cases | `$gostd`, `internal/domain/**`, `internal/app/**` | Filename resolution (`ResolveSource`), stream fingerprinting (`Fingerprint`), object download loop, archive dispatch, and `RunStats`. |
 | `internal/infra/storage/localfs/` | Secondary Driven Adapter | `$gostd`, `internal/domain/**`, `internal/infra/storage/localfs/**` | Implements `port.ObjectStore` over local filesystem directories (`List`, `DownloadStream`, `ArchiveFile`). |
-| `cmd/cli/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | CLI composition root (`ingest`, `generate-synthetic-data`). Drives `ingest.Ingestor` with `localfs.Store` and CLI `slog` progress. |
+| `cmd/cli/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | CLI composition root (`ingest`, `generate-synthetic-data`). Drives `ingest.Ingestor` with `localfs.Store` and CLI `slog` progress; composed of single-responsibility helpers (`connectRepository`, `newIngestionPipeline`, `initStoreAndDiscoverKeys`, `resolveArchiveKey`, `newSyntheticPipeline`, `newSyntheticRequest`, `formatStatsJSON`). |
 | `cmd/lambda/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | AWS Lambda composition root (`handler.go`). Consumes S3 events, resolves streams via `s3.Client`, and writes to `mongo.Repository`. |
 | `desktop/` | Primary Driving Adapter | `internal/**`, `desktop/**` (module `babylon/dataloader/desktop`) | Wails desktop application. Ingests local files in place via `ingest.Ingestor` and reports progress via `WailsProgressNotifier`. |
 
@@ -254,17 +254,28 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant CLI as cmd/cli
+    participant CLI as cmd/cli (runIngest)
+    participant Helpers as Helper Functions
     participant LFS as localfs.Store
     participant I as ingest.Ingestor
     participant P as pipeline.Pipeline
     participant R as mongo.Repository
     participant Notifier as Terminal slog Notifier
 
-    CLI->>LFS: List(ctx, "data/unprocessed")
-    LFS-->>CLI: []fileKeys
+    CLI->>Helpers: connectRepository(ctx, deps, cfg.MongoURI)
+    Helpers->>R: NewRepository(ctx, cfg)
+    R-->>Helpers: repo
+    CLI->>Helpers: newIngestionPipeline(repo, notifier, clock)
+    Note over Helpers: Registers Chase, Fidelity, & Synthetic extractors
+    Helpers-->>CLI: pipeline
+    CLI->>Helpers: initStoreAndDiscoverKeys(ctx, deps, unprocessedDir)
+    Helpers->>LFS: List(ctx, "unprocessed")
+    LFS-->>Helpers: []fileKeys
+    Helpers-->>CLI: store, prefix, keys
+    CLI->>Helpers: buildObjectRequests(keys, prefix, archivePrefix, move, notifier)
+    Helpers-->>CLI: []ObjectRequests
+    CLI->>I: IngestAll(ctx, reqs)
     loop For each file
-        CLI->>I: IngestObject(ctx, ObjectRequest{Key: key, ...})
         I->>LFS: DownloadStream(ctx, key)
         LFS-->>I: io.ReadCloser
         I->>I: Fingerprint (SHA-256)
@@ -279,8 +290,11 @@ sequenceDiagram
         R-->>P: nil
         P->>Notifier: NotifyProgress(StageComplete)
         P-->>I: (SyncLog, nil)
-        I-->>CLI: File summary
     end
+    I-->>CLI: RunStats
+    CLI->>Helpers: formatStatsJSON(stats) & logStats(ctx, logger, stats)
+    CLI->>Helpers: closeRepoWithTimeout(ctx, repo, logger)
+    Note over Helpers: Detached context.WithoutCancel(ctx) with 5s timeout
 ```
 
 ### 5.3 Desktop Runtime Flow (`desktop`)
@@ -355,7 +369,7 @@ sequenceDiagram
 | **4D** | Resolution & Fingerprint | `TestResolveSource_LegacyParity`, `TestResolveSource_Unresolvable`, `TestResolveSource_PrecedenceChaseOverSynthetic`, `TestFingerprint_HashMatchesSHA256`, `TestFingerprint_RejectsOversize`, `TestFingerprint_ReaderErrorPropagates`, `TestFingerprint_NilReader`, `TestNewFileMetadata_Validates` |
 | **4E** | LocalFS Store | `TestNew_RequiresExistingDirectory`, `TestDownloadStream_ReadsFile`, `TestDownloadStream_NotFound`, `TestKeys_RejectTraversal`, `TestArchiveFile_RenamesAndCreatesDir`, `TestArchiveFile_CopyFallback`, `TestList_FilesOnlySorted`, `TestErrors_DoNotLeakRoot` |
 | **4F** | Object Ingestion | `TestIngestObject_ResolvesAndRuns`, `TestIngestObject_OverrideSkipsResolution`, `TestIngestObject_CancelledContext`, `TestIngestObject_RejectsNonCSV`, `TestIngestObject_Unresolvable`, `TestIngestObject_DownloadNotFound`, `TestIngestObject_TooLargeIsAudited`, `TestIngestObject_TooLargeAuditFailureJoined`, `TestIngestObject_FingerprintReadError`, `TestIngestObject_FinalizeArchives`, `TestIngestObject_NoArchiveKeyNoFinalize`, `TestIngestObject_ClosesStream`, `TestIngestAll_ContinuesAndCounts`, `TestRunStats_JSONMatchesLegacy`, `TestArchiveKeyFor`, `TestRegisterDefaults_Routing` |
-| **4G** | CLI Entrypoint | `TestCLI_IngestCommand`, `TestCLI_GenerateSyntheticData`, `TestCLI_SlogProgress` |
+| **4G** | CLI Entrypoint | `TestRun_UsageAndUnknownCommand`, `TestRun_IngestWiresPipeline`, `TestRun_IngestEmptyDirectory`, `TestRun_IngestContextCancelled`, `TestRun_IngestArchivesWhenConfigured`, `TestRun_IngestNoArchiveWhenDisabled`, `TestRun_IngestRespectsDirEnvOverrides`, `TestRun_IngestMissingDirFails`, `TestRun_ConnectFailureDoesNotLeakURI`, `TestRun_PersistSyntheticRoutesToSyntheticCollection`, `TestRun_GenerateSyntheticDataToDir`, `TestRun_GenerateSyntheticDataFlagError`, `TestRun_PartialFailureExitZero`, `TestSlogNotifier_LogsStages`, `TestDeps_WithDefaults`, `TestSanitizeError`, `TestRun_IngestStoreInitError`, `TestRun_IngestRepoCloseError`, `TestRun_PersistSyntheticErrors` (18/18 passing, 86.4% coverage) |
 | **4L** | Local E2E Verification | `TestE2E_CLIIngest_RealMongo`, `TestE2E_CLIIngest_RerunIsIdempotent`, `TestSyntheticCSV_RoutesToSyntheticDestination` |
 | **4H** | Lambda Cutover | `TestHandler_S3Event_Success`, `TestHandler_DeterministicFailure_ReturnsNil`, `TestHandler_TransientFailure_ReturnsError` |
 | **4I** | Desktop Notifier | `TestWailsProgressNotifier_MapsStages`, `TestWailsProgressNotifier_ThreadSafe` |
