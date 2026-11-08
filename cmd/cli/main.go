@@ -63,6 +63,7 @@ type deps struct {
 	logger      *slog.Logger
 }
 
+// withDefaults populates production adapters unless overridden for testing.
 func (d deps) withDefaults() deps {
 	if d.connectRepo == nil {
 		d.connectRepo = func(ctx context.Context, uri string) (repository, error) {
@@ -118,6 +119,7 @@ func main() {
 	}
 }
 
+// run loads configuration, bounds execution time with a timeout context, and routes subcommands.
 func run(ctx context.Context, args []string, d deps) error {
 	if len(args) < 1 {
 		return ErrUsage
@@ -143,6 +145,7 @@ func run(ctx context.Context, args []string, d deps) error {
 	}
 }
 
+// closeRepoWithTimeout disconnects from repository with a detached context and 5s timeout.
 func closeRepoWithTimeout(ctx context.Context, repo repository, logger *slog.Logger) {
 	if repo == nil {
 		return
@@ -158,24 +161,47 @@ func closeRepoWithTimeout(ctx context.Context, repo repository, logger *slog.Log
 	}
 }
 
-func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
-	repo, err := d.connectRepo(ctx, cfg.MongoURI)
+// connectRepository establishes a repository connection, redacting credentials on failure.
+func connectRepository(ctx context.Context, d deps, uri string) (repository, error) {
+	repo, err := d.connectRepo(ctx, uri)
 	if err != nil {
-		sanitizedErr := sanitizeError(err, cfg.MongoURI)
+		sanitizedErr := sanitizeError(err, uri)
 		d.logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", sanitizedErr)
-		return fmt.Errorf("connection to repository failed: %w", sanitizedErr)
+		return nil, fmt.Errorf("connection to repository failed: %w", sanitizedErr)
 	}
-	defer closeRepoWithTimeout(ctx, repo, d.logger)
+	return repo, nil
+}
 
-	notifier := &slogNotifier{logger: d.logger}
-	p := pipeline.New(repo, notifier, pipeline.WithClock(d.now))
-	if regErr := ingest.RegisterDefaults(
+// newIngestionPipeline instantiates an application pipeline wired with default extractors.
+func newIngestionPipeline(
+	repo port.Repository,
+	notifier port.ProgressNotifier,
+	clock func() time.Time,
+) (*pipeline.Pipeline, error) {
+	p := pipeline.New(repo, notifier, pipeline.WithClock(clock))
+	if err := ingest.RegisterDefaults(
 		p,
 		chase.NewExtractor(nil),
 		fidelity.NewExtractor(),
 		synthetic.NewCSVExtractor(),
-	); regErr != nil {
-		return fmt.Errorf("failed to register extractors: %w", regErr)
+	); err != nil {
+		return nil, fmt.Errorf("failed to register extractors: %w", err)
+	}
+	return p, nil
+}
+
+// runIngest orchestrates connecting to repository, loading files from object storage, and executing the ingestion pipeline.
+func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
+	repo, err := connectRepository(ctx, d, cfg.MongoURI)
+	if err != nil {
+		return err
+	}
+	defer closeRepoWithTimeout(ctx, repo, d.logger)
+
+	notifier := &slogNotifier{logger: d.logger}
+	p, err := newIngestionPipeline(repo, notifier, d.now)
+	if err != nil {
+		return err
 	}
 
 	// In the local filesystem object store abstraction, the parent directory of
@@ -225,34 +251,67 @@ func buildObjectRequests(
 	return reqs
 }
 
-func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Config, d deps) error {
+type syntheticOptions struct {
+	rows           int
+	dir            string
+	persistToMongo bool
+}
+
+// parseSyntheticFlags parses CLI arguments for the generate-synthetic-data command.
+func parseSyntheticFlags(args []string, cfg *config.Config) (syntheticOptions, error) {
 	fs := flag.NewFlagSet("generate-synthetic-data", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	rows := fs.Int("rows", cfg.SyntheticDataRows, "Number of rows to generate")
 	dir := fs.String("dir", cfg.SyntheticDataDir, "Directory to write synthetic data to")
 	persistToMongo := fs.Bool("persist-to-mongo", false, "Persist synthetic data to MongoDB")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("failed to parse flags: %w", err)
+		return syntheticOptions{}, fmt.Errorf("failed to parse flags: %w", err)
+	}
+	return syntheticOptions{
+		rows:           *rows,
+		dir:            *dir,
+		persistToMongo: *persistToMongo,
+	}, nil
+}
+
+// runGenerateSyntheticData handles synthetic record generation and optional database persistence.
+func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Config, d deps) error {
+	opts, err := parseSyntheticFlags(args, cfg)
+	if err != nil {
+		return err
 	}
 
-	if *persistToMongo {
-		return runPersistSyntheticData(ctx, *rows, cfg, d)
+	if opts.persistToMongo {
+		return runPersistSyntheticData(ctx, opts.rows, cfg, d)
 	}
 
 	d.logger.InfoContext(ctx, "Generating synthetic data")
-	if err := legacySynthetic.GenerateSyntheticData(*rows, *dir); err != nil {
-		return fmt.Errorf("failed to generate synthetic data: %w", err)
+	if genErr := legacySynthetic.GenerateSyntheticData(opts.rows, opts.dir); genErr != nil {
+		return fmt.Errorf("failed to generate synthetic data: %w", genErr)
 	}
 	d.logger.InfoContext(ctx, "Synthetic data generated successfully")
 	return nil
 }
 
+// newSyntheticRequest builds a synthetic pipeline execution request with D4 domain metadata.
+func newSyntheticRequest(now time.Time, notifier port.ProgressNotifier) pipeline.Request {
+	return pipeline.Request{
+		Reader: strings.NewReader(""),
+		Meta: model.FileMetadata{
+			FileName:   fmt.Sprintf(syntheticFilePattern, now.Unix()),
+			AccountID:  syntheticAccountID, // Fixed synthetic fixture identifier (D4 invariant).
+			IngestedAt: now,
+		},
+		SourceType: ingest.SourceSynthetic,
+		Notifier:   notifier,
+	}
+}
+
+// runPersistSyntheticData generates synthetic records and persists them to MongoDB via the pipeline.
 func runPersistSyntheticData(ctx context.Context, rows int, cfg *config.Config, d deps) error {
-	repo, err := d.connectRepo(ctx, cfg.MongoURI)
+	repo, err := connectRepository(ctx, d, cfg.MongoURI)
 	if err != nil {
-		sanitizedErr := sanitizeError(err, cfg.MongoURI)
-		d.logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", sanitizedErr)
-		return fmt.Errorf("connection to repository failed: %w", sanitizedErr)
+		return err
 	}
 	defer closeRepoWithTimeout(ctx, repo, d.logger)
 
@@ -263,21 +322,7 @@ func runPersistSyntheticData(ctx context.Context, rows int, cfg *config.Config, 
 		return fmt.Errorf("failed to register synthetic extractor: %w", regErr)
 	}
 
-	now := d.now()
-	// AccountID "0000" is the fixed synthetic fixture identifier specified in D4 domain invariants.
-	meta := model.FileMetadata{
-		FileName:   fmt.Sprintf(syntheticFilePattern, now.Unix()),
-		AccountID:  syntheticAccountID,
-		IngestedAt: now,
-	}
-
-	req := pipeline.Request{
-		Reader:     strings.NewReader(""),
-		Meta:       meta,
-		SourceType: ingest.SourceSynthetic,
-		Notifier:   notifier,
-	}
-
+	req := newSyntheticRequest(d.now(), notifier)
 	if _, runErr := p.Run(ctx, req); runErr != nil {
 		return fmt.Errorf("failed to generate and persist synthetic data: %w", runErr)
 	}
@@ -297,6 +342,7 @@ func logStats(ctx context.Context, logger *slog.Logger, stats ingest.RunStats) {
 	logger.InfoContext(ctx, statsFooterMarker)
 }
 
+// sanitizedError wraps an error while redacting credential details; preserves errors.Is.
 type sanitizedError struct {
 	msg  string
 	orig error
