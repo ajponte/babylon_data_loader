@@ -46,11 +46,13 @@ var (
 	uriCredentialMask = regexp.MustCompile(`://([^:@\s]+):([^@\s]+)@`)
 )
 
+// repository abstracts the datalake persistence port and graceful lifecycle cleanup.
 type repository interface {
 	port.Repository
 	Close(ctx context.Context) error
 }
 
+// objectStore abstracts object storage download, archival, and listing capabilities.
 type objectStore interface {
 	port.ObjectStore
 	List(ctx context.Context, prefix string) ([]string, error)
@@ -86,6 +88,7 @@ func (d deps) withDefaults() deps {
 	return d
 }
 
+// slogNotifier adapts slog to the domain port.ProgressNotifier interface without PII emission.
 type slogNotifier struct {
 	logger *slog.Logger
 }
@@ -190,6 +193,29 @@ func newIngestionPipeline(
 	return p, nil
 }
 
+// initStoreAndDiscoverKeys initializes the local filesystem object store and lists unprocessed object keys.
+func initStoreAndDiscoverKeys(
+	ctx context.Context,
+	d deps,
+	unprocessedDir string,
+) (objectStore, string, []string, error) {
+	// In the local filesystem object store abstraction, the parent directory of
+	// UnprocessedDir acts as the storage root, and the base directory name (e.g., "unprocessed")
+	// serves as the object key prefix to list and retrieve.
+	storeRoot := filepath.Dir(unprocessedDir)
+	store, err := d.newStore(storeRoot)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("failed to initialize object store: %w", err)
+	}
+
+	prefix := filepath.Base(unprocessedDir)
+	keys, err := store.List(ctx, prefix)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("failed to list unprocessed files: %w", err)
+	}
+	return store, prefix, keys, nil
+}
+
 // runIngest orchestrates connecting to repository, loading files from object storage, and executing the ingestion pipeline.
 func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
 	repo, err := connectRepository(ctx, d, cfg.MongoURI)
@@ -204,19 +230,9 @@ func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
 		return err
 	}
 
-	// In the local filesystem object store abstraction, the parent directory of
-	// UnprocessedDir acts as the storage root, and the base directory name (e.g., "unprocessed")
-	// serves as the object key prefix to list and retrieve.
-	storeRoot := filepath.Dir(cfg.UnprocessedDir)
-	store, err := d.newStore(storeRoot)
+	store, prefix, keys, err := initStoreAndDiscoverKeys(ctx, d, cfg.UnprocessedDir)
 	if err != nil {
-		return fmt.Errorf("failed to initialize object store: %w", err)
-	}
-
-	prefix := filepath.Base(cfg.UnprocessedDir)
-	keys, err := store.List(ctx, prefix)
-	if err != nil {
-		return fmt.Errorf("failed to list unprocessed files: %w", err)
+		return err
 	}
 
 	archivePrefix := filepath.Base(cfg.ProcessedDir)
@@ -228,6 +244,18 @@ func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
 	return nil
 }
 
+// resolveArchiveKey computes the archive destination key for a file if archival is enabled.
+func resolveArchiveKey(key, prefix, archivePrefix string, moveProcessed bool) string {
+	if !moveProcessed {
+		return ""
+	}
+	if ak, ok := ingest.ArchiveKeyFor(key, prefix, archivePrefix); ok {
+		return ak
+	}
+	return ""
+}
+
+// buildObjectRequests maps storage keys into pipeline ObjectRequests with optional archival keys.
 func buildObjectRequests(
 	keys []string,
 	prefix, archivePrefix string,
@@ -236,15 +264,9 @@ func buildObjectRequests(
 ) []ingest.ObjectRequest {
 	reqs := make([]ingest.ObjectRequest, 0, len(keys))
 	for _, key := range keys {
-		archiveKey := ""
-		if moveProcessed {
-			if ak, ok := ingest.ArchiveKeyFor(key, prefix, archivePrefix); ok {
-				archiveKey = ak
-			}
-		}
 		reqs = append(reqs, ingest.ObjectRequest{
 			Key:        key,
-			ArchiveKey: archiveKey,
+			ArchiveKey: resolveArchiveKey(key, prefix, archivePrefix, moveProcessed),
 			Notifier:   notifier,
 		})
 	}
@@ -293,6 +315,21 @@ func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Co
 	return nil
 }
 
+// newSyntheticPipeline instantiates a pipeline configured with the synthetic generator extractor.
+func newSyntheticPipeline(
+	repo port.Repository,
+	notifier port.ProgressNotifier,
+	clock func() time.Time,
+	rows int,
+) (*pipeline.Pipeline, error) {
+	p := pipeline.New(repo, notifier, pipeline.WithClock(clock))
+	synthExt := synthetic.NewExtractor(synthetic.GeneratorOptions{RowCount: rows})
+	if err := p.Register(ingest.SourceSynthetic, synthExt, model.DestSynthetic); err != nil {
+		return nil, fmt.Errorf("failed to register synthetic extractor: %w", err)
+	}
+	return p, nil
+}
+
 // newSyntheticRequest builds a synthetic pipeline execution request with D4 domain metadata.
 func newSyntheticRequest(now time.Time, notifier port.ProgressNotifier) pipeline.Request {
 	return pipeline.Request{
@@ -316,10 +353,9 @@ func runPersistSyntheticData(ctx context.Context, rows int, cfg *config.Config, 
 	defer closeRepoWithTimeout(ctx, repo, d.logger)
 
 	notifier := &slogNotifier{logger: d.logger}
-	p := pipeline.New(repo, notifier, pipeline.WithClock(d.now))
-	synthExt := synthetic.NewExtractor(synthetic.GeneratorOptions{RowCount: rows})
-	if regErr := p.Register(ingest.SourceSynthetic, synthExt, model.DestSynthetic); regErr != nil {
-		return fmt.Errorf("failed to register synthetic extractor: %w", regErr)
+	p, err := newSyntheticPipeline(repo, notifier, d.now, rows)
+	if err != nil {
+		return err
 	}
 
 	req := newSyntheticRequest(d.now(), notifier)
@@ -331,14 +367,16 @@ func runPersistSyntheticData(ctx context.Context, rows int, cfg *config.Config, 
 	return nil
 }
 
+// formatStatsJSON serializes execution statistics into formatted JSON.
+func formatStatsJSON(stats ingest.RunStats) string {
+	jsonData, _ := json.MarshalIndent(stats, "", "  ")
+	return string(jsonData)
+}
+
+// logStats formats and emits ingestion run statistics to the structured logger.
 func logStats(ctx context.Context, logger *slog.Logger, stats ingest.RunStats) {
-	jsonData, err := json.MarshalIndent(stats, "", "  ")
-	if err != nil {
-		logger.ErrorContext(ctx, "Failed to marshal stats to JSON", "error", err)
-		return
-	}
 	logger.InfoContext(ctx, statsHeaderMarker)
-	logger.InfoContext(ctx, string(jsonData))
+	logger.InfoContext(ctx, formatStatsJSON(stats))
 	logger.InfoContext(ctx, statsFooterMarker)
 }
 
