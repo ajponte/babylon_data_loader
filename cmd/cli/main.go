@@ -1,3 +1,6 @@
+// Package main provides the command-line interface entrypoint for the
+// babylon data-loader application, supporting batch file ingestion and
+// synthetic data generation/persistence.
 package main
 
 import (
@@ -6,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -33,10 +37,12 @@ const (
 	statsFooterMarker    = "------------------------------"
 	syntheticAccountID   = "0000"
 	syntheticFilePattern = "synthetic-%d.csv"
+	closeTimeout         = 5 * time.Second
 )
 
 var (
-	errUsage          = errors.New("usage: data-loader <command> [options]")
+	// ErrUsage indicates missing or invalid command-line invocation syntax.
+	ErrUsage          = errors.New("usage: data-loader <command> [options]")
 	uriCredentialMask = regexp.MustCompile(`://([^:@\s]+):([^@\s]+)@`)
 )
 
@@ -114,7 +120,7 @@ func main() {
 
 func run(ctx context.Context, args []string, d deps) error {
 	if len(args) < 1 {
-		return errUsage
+		return ErrUsage
 	}
 
 	d = d.withDefaults()
@@ -137,17 +143,29 @@ func run(ctx context.Context, args []string, d deps) error {
 	}
 }
 
+func closeRepoWithTimeout(ctx context.Context, repo repository, logger *slog.Logger) {
+	if repo == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+
+	if closeErr := repo.Close(closeCtx); closeErr != nil {
+		logger.ErrorContext(closeCtx, "Error disconnecting from repository", "error", closeErr)
+	}
+}
+
 func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
 	repo, err := d.connectRepo(ctx, cfg.MongoURI)
 	if err != nil {
-		d.logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", sanitizeError(err, cfg.MongoURI))
-		return fmt.Errorf("connection to repository failed: %w", sanitizeError(err, cfg.MongoURI))
+		sanitizedErr := sanitizeError(err, cfg.MongoURI)
+		d.logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", sanitizedErr)
+		return fmt.Errorf("connection to repository failed: %w", sanitizedErr)
 	}
-	defer func() {
-		if closeErr := repo.Close(ctx); closeErr != nil {
-			d.logger.ErrorContext(ctx, "Error disconnecting from repository", "error", closeErr)
-		}
-	}()
+	defer closeRepoWithTimeout(ctx, repo, d.logger)
 
 	notifier := &slogNotifier{logger: d.logger}
 	p := pipeline.New(repo, notifier, pipeline.WithClock(d.now))
@@ -160,6 +178,9 @@ func runIngest(ctx context.Context, cfg *config.Config, d deps) error {
 		return fmt.Errorf("failed to register extractors: %w", regErr)
 	}
 
+	// In the local filesystem object store abstraction, the parent directory of
+	// UnprocessedDir acts as the storage root, and the base directory name (e.g., "unprocessed")
+	// serves as the object key prefix to list and retrieve.
 	storeRoot := filepath.Dir(cfg.UnprocessedDir)
 	store, err := d.newStore(storeRoot)
 	if err != nil {
@@ -206,6 +227,7 @@ func buildObjectRequests(
 
 func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Config, d deps) error {
 	fs := flag.NewFlagSet("generate-synthetic-data", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	rows := fs.Int("rows", cfg.SyntheticDataRows, "Number of rows to generate")
 	dir := fs.String("dir", cfg.SyntheticDataDir, "Directory to write synthetic data to")
 	persistToMongo := fs.Bool("persist-to-mongo", false, "Persist synthetic data to MongoDB")
@@ -228,14 +250,11 @@ func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Co
 func runPersistSyntheticData(ctx context.Context, rows int, cfg *config.Config, d deps) error {
 	repo, err := d.connectRepo(ctx, cfg.MongoURI)
 	if err != nil {
-		d.logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", sanitizeError(err, cfg.MongoURI))
-		return fmt.Errorf("connection to repository failed: %w", sanitizeError(err, cfg.MongoURI))
+		sanitizedErr := sanitizeError(err, cfg.MongoURI)
+		d.logger.ErrorContext(ctx, "Failed to connect to MongoDB", "error", sanitizedErr)
+		return fmt.Errorf("connection to repository failed: %w", sanitizedErr)
 	}
-	defer func() {
-		if closeErr := repo.Close(ctx); closeErr != nil {
-			d.logger.ErrorContext(ctx, "Error disconnecting from repository", "error", closeErr)
-		}
-	}()
+	defer closeRepoWithTimeout(ctx, repo, d.logger)
 
 	notifier := &slogNotifier{logger: d.logger}
 	p := pipeline.New(repo, notifier, pipeline.WithClock(d.now))
@@ -245,6 +264,7 @@ func runPersistSyntheticData(ctx context.Context, rows int, cfg *config.Config, 
 	}
 
 	now := d.now()
+	// AccountID "0000" is the fixed synthetic fixture identifier specified in D4 domain invariants.
 	meta := model.FileMetadata{
 		FileName:   fmt.Sprintf(syntheticFilePattern, now.Unix()),
 		AccountID:  syntheticAccountID,
@@ -277,6 +297,19 @@ func logStats(ctx context.Context, logger *slog.Logger, stats ingest.RunStats) {
 	logger.InfoContext(ctx, statsFooterMarker)
 }
 
+type sanitizedError struct {
+	msg  string
+	orig error
+}
+
+func (e *sanitizedError) Error() string {
+	return e.msg
+}
+
+func (e *sanitizedError) Is(target error) bool {
+	return errors.Is(e.orig, target)
+}
+
 func sanitizeError(err error, rawURI string) error {
 	if err == nil {
 		return nil
@@ -286,5 +319,8 @@ func sanitizeError(err error, rawURI string) error {
 		msg = strings.ReplaceAll(msg, rawURI, "[REDACTED_URI]")
 	}
 	msg = uriCredentialMask.ReplaceAllString(msg, "://[REDACTED]:[REDACTED]@")
-	return errors.New(msg)
+	return &sanitizedError{
+		msg:  msg,
+		orig: err,
+	}
 }

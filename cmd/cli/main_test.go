@@ -148,14 +148,16 @@ func TestRun_UsageAndUnknownCommand(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name      string
+		args      []string
+		targetErr error
+		wantErr   string
 	}{
 		{
-			name:    "empty args returns usage",
-			args:    []string{},
-			wantErr: "usage: data-loader <command> [options]",
+			name:      "empty args returns usage",
+			args:      []string{},
+			targetErr: ErrUsage,
+			wantErr:   "usage: data-loader <command> [options]",
 		},
 		{
 			name:    "unknown command returns error",
@@ -173,6 +175,9 @@ func TestRun_UsageAndUnknownCommand(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+			}
+			if tt.targetErr != nil && !errors.Is(err, tt.targetErr) {
+				t.Fatalf("expected errors.Is(%v), got %v", tt.targetErr, err)
 			}
 			if connectCalled || storeCalled {
 				t.Errorf("factory called unexpectedly (connect=%v, store=%v)", connectCalled, storeCalled)
@@ -227,6 +232,12 @@ func TestRun_IngestWiresPipeline(t *testing.T) {
 		}
 	}
 
+	assertFidelityBatch(t, fidelityBatch)
+	assertSyntheticBatch(t, synthBatch)
+}
+
+func assertFidelityBatch(t *testing.T, fidelityBatch *model.IngestionBatch) {
+	t.Helper()
 	if fidelityBatch == nil {
 		t.Fatalf("expected batch for destination %s", model.DestFidelityPosition)
 	}
@@ -234,6 +245,29 @@ func TestRun_IngestWiresPipeline(t *testing.T) {
 		t.Errorf("expected fidelity batch to have records, got 0")
 	}
 
+	fidelityPositions, err := fidelityBatch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to deserialize fidelity positions: %v", err)
+	}
+	if len(fidelityPositions) == 0 {
+		t.Fatalf("expected non-empty fidelity positions list")
+	}
+	for _, pos := range fidelityPositions {
+		if pos.Symbol == "SPAXX**" {
+			if pos.CurrentValue != 3250.00 {
+				t.Errorf("expected SPAXX** CurrentValue 3250.00, got %v", pos.CurrentValue)
+			}
+			if pos.AsOfDate.IsZero() {
+				t.Errorf("expected non-zero AsOfDate for SPAXX** position")
+			}
+			return
+		}
+	}
+	t.Errorf("expected to find SPAXX** position in deserialized fidelity batch")
+}
+
+func assertSyntheticBatch(t *testing.T, synthBatch *model.IngestionBatch) {
+	t.Helper()
 	if synthBatch == nil {
 		t.Fatalf("expected batch for destination %s", model.DestSynthetic)
 	}
@@ -261,6 +295,70 @@ func TestRun_IngestWiresPipeline(t *testing.T) {
 	}
 	if tx0.Amount != -45.50 {
 		t.Errorf("expected amount -45.50, got %v", tx0.Amount)
+	}
+}
+
+func TestRun_IngestEmptyDirectory(t *testing.T) {
+	setupIngestDirs(t)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	repo := &fakeRepo{}
+	d := deps{
+		connectRepo: func(_ context.Context, _ string) (repository, error) {
+			return repo, nil
+		},
+		logger: logger,
+		now:    fixedClock,
+	}
+
+	if err := run(context.Background(), []string{"ingest"}, d); err != nil {
+		t.Fatalf("expected run ingest on empty dir to succeed, got: %v", err)
+	}
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	if !repo.closed {
+		t.Errorf("expected repository to be closed")
+	}
+	if len(repo.batches) != 0 {
+		t.Errorf("expected 0 batches saved, got %d", len(repo.batches))
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, `"totalFiles": 0`) && !strings.Contains(output, `\"totalFiles\": 0`) {
+		t.Errorf("expected log output to contain '\"totalFiles\": 0', got:\n%s", output)
+	}
+}
+
+func TestRun_IngestContextCancelled(t *testing.T) {
+	setupIngestDirs(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	repo := &fakeRepo{}
+	d := deps{
+		connectRepo: func(ctx context.Context, _ string) (repository, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return repo, nil
+		},
+		logger: testLogger(),
+		now:    fixedClock,
+	}
+
+	err := run(ctx, []string{"ingest"}, d)
+	if err == nil {
+		t.Fatalf("expected error on canceled context, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected errors.Is context.Canceled, got: %v", err)
 	}
 }
 
@@ -588,14 +686,73 @@ func TestDeps_WithDefaults(t *testing.T) {
 
 func TestSanitizeError(t *testing.T) {
 	t.Parallel()
+
 	if sanitizeError(nil, "some-uri") != nil {
 		t.Errorf("expected nil for nil error")
 	}
 
-	err := errors.New("failed with mongodb://user:pass123@localhost:27017/db")
-	sanitized := sanitizeError(err, "")
-	if strings.Contains(sanitized.Error(), "pass123") {
-		t.Errorf("sanitized error leaked password: %s", sanitized.Error())
+	baseErr := errors.New("underlying sentinel error")
+
+	tests := []struct {
+		name        string
+		inputErr    error
+		rawURI      string
+		leakCheck   string
+		expectMatch string
+		wantIsBase  bool
+	}{
+		{
+			name:        "standard uri credentials",
+			inputErr:    errors.New("failed with mongodb://user:pass123@localhost:27017/db"),
+			rawURI:      "",
+			leakCheck:   "pass123",
+			expectMatch: "mongodb://[REDACTED]:[REDACTED]@localhost:27017/db",
+		},
+		{
+			name:        "percent encoded special characters",
+			inputErr:    errors.New("connection err: mongodb://app%40domain.com:p%25ss%21w0rd@db.internal:27017/prod"),
+			rawURI:      "",
+			leakCheck:   "p%25ss%21w0rd",
+			expectMatch: "mongodb://[REDACTED]:[REDACTED]@db.internal:27017/prod",
+		},
+		{
+			name:        "exact rawURI replacement even with odd chars",
+			inputErr:    fmt.Errorf("dial error on mongodb://svc:unmasked_secret#123@10.0.0.1:27017: %w", baseErr),
+			rawURI:      "mongodb://svc:unmasked_secret#123@10.0.0.1:27017",
+			leakCheck:   "unmasked_secret#123",
+			expectMatch: "[REDACTED_URI]",
+			wantIsBase:  true,
+		},
+		{
+			name:        "context.Canceled unwrapping preserved",
+			inputErr:    context.Canceled,
+			rawURI:      "mongodb://admin:secret@localhost:27017",
+			leakCheck:   "secret",
+			expectMatch: "context canceled",
+			wantIsBase:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sanitized := sanitizeError(tt.inputErr, tt.rawURI)
+			if sanitized == nil {
+				t.Fatalf("expected non-nil error")
+			}
+			if strings.Contains(sanitized.Error(), tt.leakCheck) {
+				t.Errorf("sanitized error leaked secret %q: %s", tt.leakCheck, sanitized.Error())
+			}
+			if !strings.Contains(sanitized.Error(), tt.expectMatch) {
+				t.Errorf("expected sanitized error to contain %q, got: %s", tt.expectMatch, sanitized.Error())
+			}
+			if tt.wantIsBase && !errors.Is(sanitized, baseErr) {
+				t.Errorf("expected errors.Is(sanitized, baseErr) to be true")
+			}
+			if errors.Is(tt.inputErr, context.Canceled) && !errors.Is(sanitized, context.Canceled) {
+				t.Errorf("expected errors.Is(sanitized, context.Canceled) to be true")
+			}
+		})
 	}
 }
 
