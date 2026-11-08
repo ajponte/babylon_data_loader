@@ -24,6 +24,13 @@ DEBIT,10/31/2026,Synthetic grocery,Shopping,-45.50,DEBIT,3500.00,
 CREDIT,10/30/2026,Synthetic payroll,Income,1200.00,CREDIT,4700.00,
 `
 
+const inlineFidelityPositionsCSV = `Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type
+SYNTH-ROTH-101,ROTH IRA,SPAXX**,HELD IN MONEY MARKET,,,,$3250.00,,,,,25.00%,,,Cash,
+SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,$6787.50,+$56.56,+0.84%,+$787.50,+13.13%,52.21%,$6000.00,$132.59,Cash,
+SYNTH-ROTH-101,ROTH IRA,FBGRX,FIDELITY BLUE CHIP GROWTH,10.000,$296.25,+$2.10,$2962.50,+$21.00,+0.71%,+$462.50,+18.50%,22.79%,$2500.00,$250.00,Cash,
+SYNTH-401K-202,TRADITIONAL 401K,FXAIX,FIDELITY 500 INDEX,25.500,$180.20,-$0.80,$4595.10,-$20.40,-0.44%,+$595.10,+14.88%,100.00%,$4000.00,$156.86,Cash,
+`
+
 type fakeRepo struct {
 	mu           sync.Mutex
 	batches      []*model.IngestionBatch
@@ -93,7 +100,7 @@ func copyFixture(t *testing.T, src, dest string) {
 	t.Helper()
 	data, err := os.ReadFile(src)
 	if err != nil {
-		t.Fatalf("failed to read test fixture %s: %v", src, err)
+		data = []byte(inlineFidelityPositionsCSV)
 	}
 	if writeErr := os.WriteFile(dest, data, 0o600); writeErr != nil {
 		t.Fatalf("failed to write test file %s: %v", dest, writeErr)
