@@ -30,7 +30,11 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 )
 
-const defaultCloseTimeout = 5 * time.Second
+const (
+	defaultCloseTimeout = 5 * time.Second
+	unprocessedPrefix   = "unprocessed/"
+	processedPrefix     = "processed/"
+)
 
 var uriCredentialMask = regexp.MustCompile(`://([^:@\s]+):([^@\s]+)@`)
 
@@ -118,16 +122,9 @@ func NewS3EventHandler(
 	return h
 }
 
-// ensurePipeline lazily connects to MongoDB and registers default pipeline extractors under a mutex.
-// Resets state on failure to ensure subsequent Lambda invocations can retry.
-func (h *S3EventHandler) ensurePipeline(ctx context.Context) (*pipeline.Pipeline, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.pipeline != nil {
-		return h.pipeline, nil
-	}
-
+// connectRepository resolves the MongoDB connection URI from AWS Secrets Manager
+// and establishes a repository client, masking credentials on failure.
+func (h *S3EventHandler) connectRepository(ctx context.Context) (repository, error) {
 	mongoURI, err := config.GetMongoURI(ctx, h.secrets, h.secretID)
 	if err != nil {
 		sanitizedErr := sanitizeError(err, mongoURI)
@@ -142,15 +139,42 @@ func (h *S3EventHandler) ensurePipeline(ctx context.Context) (*pipeline.Pipeline
 		return nil, fmt.Errorf("connect to mongo: %w", sanitizedErr)
 	}
 
-	p := pipeline.New(repo, nil, pipeline.WithClock(h.clock))
-	if regErr := ingest.RegisterDefaults(
+	return repo, nil
+}
+
+// newIngestionPipeline instantiates an application pipeline wired with standard source extractors.
+func newIngestionPipeline(repo repository, clock func() time.Time) (*pipeline.Pipeline, error) {
+	p := pipeline.New(repo, nil, pipeline.WithClock(clock))
+	if err := ingest.RegisterDefaults(
 		p,
 		chase.NewExtractor(nil),
 		fidelity.NewExtractor(),
 		synthetic.NewCSVExtractor(),
-	); regErr != nil {
+	); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ensurePipeline lazily connects to MongoDB and registers default pipeline extractors under a mutex.
+// Resets state on failure to ensure subsequent Lambda invocations can retry (Decision P9).
+func (h *S3EventHandler) ensurePipeline(ctx context.Context) (*pipeline.Pipeline, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.pipeline != nil {
+		return h.pipeline, nil
+	}
+
+	repo, err := h.connectRepository(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	p, err := newIngestionPipeline(repo, h.clock)
+	if err != nil {
 		_ = repo.Close(ctx)
-		return nil, fmt.Errorf("register default extractors: %w", regErr)
+		return nil, fmt.Errorf("register default extractors: %w", err)
 	}
 
 	h.repo = repo
@@ -175,6 +199,7 @@ func (h *S3EventHandler) Close(ctx context.Context) error {
 	return nil
 }
 
+// resolveS3Key extracts the S3 object key, preferring URLDecodedKey with QueryUnescape fallback.
 func (h *S3EventHandler) resolveS3Key(ctx context.Context, record events.S3EventRecord) string {
 	key := record.S3.Object.URLDecodedKey
 	if key != "" {
@@ -194,8 +219,9 @@ func (h *S3EventHandler) resolveS3Key(ctx context.Context, record events.S3Event
 	return unescaped
 }
 
+// validateS3Key verifies the object resides under unprocessedPrefix and is a valid CSV file.
 func (h *S3EventHandler) validateS3Key(ctx context.Context, bucket, key string) (string, bool) {
-	if !strings.HasPrefix(key, "unprocessed/") {
+	if !strings.HasPrefix(key, unprocessedPrefix) {
 		h.logger.InfoContext(ctx, "Skipping object: not in unprocessed/ prefix", "bucket", bucket, "key", key)
 		return "", false
 	}
@@ -231,6 +257,16 @@ func (h *S3EventHandler) processRecord(ctx context.Context, record events.S3Even
 		return err
 	}
 
+	runErr := h.executeIngestion(ctx, p, bucket, key, filename)
+	return h.classifyRecordError(ctx, runErr, bucket, key)
+}
+
+// executeIngestion binds an S3 store to the bucket and streams the object through the ingestion coordinator (Decision P7).
+func (h *S3EventHandler) executeIngestion(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	bucket, key, filename string,
+) error {
 	store, err := h.newS3Store(h.api, bucket)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "Failed to initialize S3 store", "bucket", bucket, "error", err)
@@ -254,18 +290,22 @@ func (h *S3EventHandler) processRecord(ctx context.Context, record events.S3Even
 		ArchiveKey: archiveKey,
 		SourceURI:  sourceURI,
 	})
-
-	return h.classifyRecordError(ctx, runErr, bucket, key)
+	return runErr
 }
 
+// deriveArchiveKey calculates the destination key by replacing unprocessedPrefix with processedPrefix (Decision P7).
 func deriveArchiveKey(key string) string {
-	archiveKey, ok := ingest.ArchiveKeyFor(key, "unprocessed/", "processed/")
+	archiveKey, ok := ingest.ArchiveKeyFor(key, unprocessedPrefix, processedPrefix)
 	if !ok {
-		return "processed/" + strings.TrimPrefix(key, "unprocessed/")
+		return processedPrefix + strings.TrimPrefix(key, unprocessedPrefix)
 	}
 	return archiveKey
 }
 
+// classifyRecordError enforces Decision U6 tri-state error classification:
+// 1. Success or non-fatal audit log failure (Decision P5) -> returns nil.
+// 2. Transient error (mongo.ErrTransient, I/O timeouts, S3 errors) -> returns err for Lambda retry.
+// 3. Deterministic error (malformed CSV, duplicate key, unresolvable source) -> returns nil to leave object in unprocessed/.
 func (h *S3EventHandler) classifyRecordError(ctx context.Context, err error, bucket, key string) error {
 	if err == nil {
 		return nil
@@ -294,6 +334,7 @@ func (h *S3EventHandler) classifyRecordError(ctx context.Context, err error, buc
 	return nil
 }
 
+// isTransientError identifies recoverable errors (network, timeout, S3 temporary drops) that warrant a Lambda retry.
 func isTransientError(err error) bool {
 	if err == nil {
 		return false
