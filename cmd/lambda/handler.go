@@ -1,3 +1,5 @@
+// Package main provides the AWS Lambda worker entrypoint and S3 event processing handler
+// for streaming bank and investment statements directly into the MongoDB datalake.
 package main
 
 import (
@@ -27,6 +29,8 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 )
+
+const defaultCloseTimeout = 5 * time.Second
 
 var uriCredentialMask = regexp.MustCompile(`://([^:@\s]+):([^@\s]+)@`)
 
@@ -155,12 +159,15 @@ func (h *S3EventHandler) ensurePipeline(ctx context.Context) (*pipeline.Pipeline
 }
 
 // Close disconnects the repository if initialized and resets cached pipeline state.
+// Uses a detached context with a 5-second timeout to ensure clean TCP disconnect.
 func (h *S3EventHandler) Close(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.repo != nil {
-		err := h.repo.Close(ctx)
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCloseTimeout)
+		defer cancel()
+		err := h.repo.Close(closeCtx)
 		h.repo = nil
 		h.pipeline = nil
 		return err
@@ -207,6 +214,10 @@ func (h *S3EventHandler) validateS3Key(ctx context.Context, bucket, key string) 
 }
 
 func (h *S3EventHandler) processRecord(ctx context.Context, record events.S3EventRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	bucket := record.S3.Bucket.Name
 	key := h.resolveS3Key(ctx, record)
 
@@ -226,11 +237,7 @@ func (h *S3EventHandler) processRecord(ctx context.Context, record events.S3Even
 		return err
 	}
 
-	archiveKey, ok := ingest.ArchiveKeyFor(key, "unprocessed/", "processed/")
-	if !ok {
-		archiveKey = "processed/" + strings.TrimPrefix(key, "unprocessed/")
-	}
-
+	archiveKey := deriveArchiveKey(key)
 	sourceURI := fmt.Sprintf("s3://%s/%s", bucket, key)
 	ingestor := ingest.NewIngestor(p, store, ingest.WithClock(h.clock))
 
@@ -249,6 +256,14 @@ func (h *S3EventHandler) processRecord(ctx context.Context, record events.S3Even
 	})
 
 	return h.classifyRecordError(ctx, runErr, bucket, key)
+}
+
+func deriveArchiveKey(key string) string {
+	archiveKey, ok := ingest.ArchiveKeyFor(key, "unprocessed/", "processed/")
+	if !ok {
+		return "processed/" + strings.TrimPrefix(key, "unprocessed/")
+	}
+	return archiveKey
 }
 
 func (h *S3EventHandler) classifyRecordError(ctx context.Context, err error, bucket, key string) error {
@@ -303,13 +318,22 @@ func isTransientError(err error) bool {
 }
 
 func isDeterministicError(err error) bool {
-	if errors.Is(err, ingest.ErrNotCSV) ||
+	return isIngestOrPipelineError(err) ||
+		isSourceDialectError(err) ||
+		isModelOrCSVParseError(err)
+}
+
+func isIngestOrPipelineError(err error) bool {
+	return errors.Is(err, ingest.ErrNotCSV) ||
 		errors.Is(err, ingest.ErrUnresolvableSource) ||
 		errors.Is(err, ingest.ErrInputTooLarge) ||
 		errors.Is(err, pipeline.ErrUnknownSourceType) ||
 		errors.Is(err, pipeline.ErrInvalidRegistration) ||
-		errors.Is(err, mongo.ErrDuplicateKey) ||
-		errors.Is(err, chase.ErrUnknownDialect) ||
+		errors.Is(err, mongo.ErrDuplicateKey)
+}
+
+func isSourceDialectError(err error) bool {
+	return errors.Is(err, chase.ErrUnknownDialect) ||
 		errors.Is(err, chase.ErrMissingRequiredColumns) ||
 		errors.Is(err, chase.ErrMalformedHeader) ||
 		errors.Is(err, chase.ErrDuplicateColumn) ||
@@ -320,16 +344,21 @@ func isDeterministicError(err error) bool {
 		errors.Is(err, synthetic.ErrMalformedCSV) ||
 		errors.Is(err, synthetic.ErrInvalidRow) ||
 		errors.Is(err, fidelity.ErrMissingRequiredColumns) ||
-		errors.Is(err, fidelity.ErrInvalidDateDownloaded) {
-		return true
-	}
+		errors.Is(err, fidelity.ErrInvalidDateDownloaded)
+}
+
+func isModelOrCSVParseError(err error) bool {
 	if errors.Is(err, model.ErrNilBatch) ||
 		errors.Is(err, model.ErrInvalidDestination) ||
 		errors.Is(err, model.ErrNilPayload) ||
 		errors.Is(err, model.ErrMissingPostingDate) ||
 		errors.Is(err, model.ErrInvalidAmount) ||
 		errors.Is(err, model.ErrMissingSymbol) ||
-		errors.Is(err, model.ErrInvalidQuantity) {
+		errors.Is(err, model.ErrInvalidQuantity) ||
+		errors.Is(err, model.ErrInvalidCostBasis) ||
+		errors.Is(err, model.ErrInvalidLastPrice) ||
+		errors.Is(err, model.ErrMissingAsOfDate) ||
+		errors.Is(err, model.ErrInvalidPerformanceMetric) {
 		return true
 	}
 	var parseErr *csv.ParseError

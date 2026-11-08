@@ -32,6 +32,12 @@ const (
 
 	chaseCSVFixture = "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n" +
 		"DEBIT,01/01/2026,CHASE COFFEE SHOP,-4.50,DEBIT,1200.00,\n"
+
+	fidelityCSVFixture = "Account number,Account name,Symbol,Description,Quantity,Last price,Last price change,Current value,Today's gain/loss dollar,Today's gain/loss percent,Total gain/loss dollar,Total gain/loss percent,Percent of account,Cost basis total,Average cost basis,Type\n" +
+		"SYNTH-ROTH-101,ROTH IRA,SPAXX**,HELD IN MONEY MARKET,,,,$3250.00,,,,,25.00%,,,Cash,\n\n" +
+		"\"Date downloaded Sep-25-2026 9:50 p.m ET\"\n"
+
+	syntheticCSVFixture = "Posting Date,Description,Amount\n01/01/2026,Test Synthetic,-25.00\n"
 )
 
 type mockS3API struct {
@@ -722,4 +728,109 @@ func TestS3Handler_SanitizedErrorAndKeyValidation(t *testing.T) {
 			t.Errorf("expected invalid filename for unprocessed/.")
 		}
 	})
+
+	t.Run("sanitizes complex punctuation credentials", func(t *testing.T) {
+		const rawURI = "mongodb://app%40user:p%40%24%24w0rd%21@localhost:27017/datalake"
+		sanitized := sanitizeError(fmt.Errorf("connection to %s failed", rawURI), rawURI)
+		if strings.Contains(sanitized.Error(), "w0rd") {
+			t.Fatalf("credential leaked in sanitized error: %s", sanitized.Error())
+		}
+	})
+}
+
+func TestS3Handler_PreCanceledContext(t *testing.T) {
+	api := newMockS3API(map[string][]byte{"unprocessed/chase9876_statement.csv": []byte(chaseCSVFixture)})
+	repo := &fakeRepository{}
+	h := newTestHandler(api, repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{newS3Record("unprocessed/chase9876_statement.csv", "")},
+	}
+	err := h.HandleS3Event(ctx, event)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if len(repo.savedBatches) != 0 {
+		t.Errorf("expected zero saved batches on canceled context, got %d", len(repo.savedBatches))
+	}
+}
+
+func TestS3Handler_EmptyRecordsEvent(t *testing.T) {
+	api := newMockS3API(nil)
+	repo := &fakeRepository{}
+	h := newTestHandler(api, repo)
+
+	if err := h.HandleS3Event(context.Background(), events.S3Event{Records: nil}); err != nil {
+		t.Fatalf("expected nil error on empty records event, got %v", err)
+	}
+	if len(repo.savedBatches) != 0 {
+		t.Errorf("expected zero saved batches on empty records event")
+	}
+}
+
+func TestS3Handler_FidelitySuccess(t *testing.T) {
+	const key = "unprocessed/Portfolio_Positions_Sep-25-2026.csv"
+	expectedSourceURI := fmt.Sprintf("s3://%s/%s", testBucket, key)
+
+	api := newMockS3API(map[string][]byte{key: []byte(fidelityCSVFixture)})
+	repo := &fakeRepository{}
+	h := newTestHandler(api, repo)
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{newS3Record(key, "")},
+	}
+	if err := h.HandleS3Event(context.Background(), event); err != nil {
+		t.Fatalf("unexpected error on fidelity ingestion: %v", err)
+	}
+
+	if len(repo.savedBatches) != 1 {
+		t.Fatalf("expected 1 saved batch, got %d", len(repo.savedBatches))
+	}
+	batch := repo.savedBatches[0]
+	if batch.Destination != model.DestFidelityPosition {
+		t.Errorf("expected destination %q, got %q", model.DestFidelityPosition, batch.Destination)
+	}
+	if batch.SourceURI != expectedSourceURI {
+		t.Errorf("expected SourceURI %q, got %q", expectedSourceURI, batch.SourceURI)
+	}
+	positions, err := batch.AsFidelityPositions()
+	if err != nil {
+		t.Fatalf("failed to cast batch to fidelity positions: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(positions))
+	}
+	if positions[0].Symbol != "SPAXX**" || positions[0].CurrentValue != 3250.00 {
+		t.Errorf("unexpected position data: %+v", positions[0])
+	}
+}
+
+func TestS3Handler_SyntheticSuccess(t *testing.T) {
+	const key = "unprocessed/synthetic_file.csv"
+	expectedSourceURI := fmt.Sprintf("s3://%s/%s", testBucket, key)
+
+	api := newMockS3API(map[string][]byte{key: []byte(syntheticCSVFixture)})
+	repo := &fakeRepository{}
+	h := newTestHandler(api, repo)
+
+	event := events.S3Event{
+		Records: []events.S3EventRecord{newS3Record(key, "")},
+	}
+	if err := h.HandleS3Event(context.Background(), event); err != nil {
+		t.Fatalf("unexpected error on synthetic ingestion: %v", err)
+	}
+
+	if len(repo.savedBatches) != 1 {
+		t.Fatalf("expected 1 saved batch, got %d", len(repo.savedBatches))
+	}
+	batch := repo.savedBatches[0]
+	if batch.Destination != model.DestSynthetic {
+		t.Errorf("expected destination %q, got %q", model.DestSynthetic, batch.Destination)
+	}
+	if batch.SourceURI != expectedSourceURI {
+		t.Errorf("expected SourceURI %q, got %q", expectedSourceURI, batch.SourceURI)
+	}
 }
