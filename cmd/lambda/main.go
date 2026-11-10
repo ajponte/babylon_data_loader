@@ -31,6 +31,8 @@ const (
 )
 
 // S3StorageService defines the operations required for S3 handling.
+//
+// Deprecated: legacy storage interface, retained for backwards compatibility; removed in Phase 5.
 type S3StorageService interface {
 	Download(ctx context.Context, bucket, key, localPath string) error
 	Copy(ctx context.Context, srcBucket, srcKey, destBucket, destKey string) error
@@ -38,9 +40,13 @@ type S3StorageService interface {
 }
 
 // IngestRunner executes the ingestion process given a configuration.
+//
+// Deprecated: legacy runner signature, retained for backwards compatibility; removed in Phase 5.
 type IngestRunner func(ctx context.Context, cfg *config.Config) error
 
 // Handler coordinates S3 event consumption, downloading, ingestion, and archiving.
+//
+// Deprecated: legacy Lambda handler using /tmp disk staging, superseded by S3EventHandler; removed in Phase 5.
 type Handler struct {
 	s3Storage     S3StorageService
 	secretsClient config.SecretsClient
@@ -51,6 +57,8 @@ type Handler struct {
 }
 
 // NewHandler constructs a new Lambda Handler.
+//
+// Deprecated: legacy handler constructor, superseded by NewS3EventHandler; removed in Phase 5.
 func NewHandler(
 	s3Storage S3StorageService,
 	secretsClient config.SecretsClient,
@@ -79,6 +87,8 @@ func NewHandler(
 }
 
 // DefaultIngestRunner wires dependencies and executes Sink.Ingest.
+//
+// Deprecated: legacy runner wiring, superseded by pipeline.Pipeline and ingest.Ingestor; removed in Phase 5.
 func DefaultIngestRunner(ctx context.Context, cfg *config.Config) error {
 	logger := bcontext.LoggerFromContext(ctx)
 
@@ -290,15 +300,9 @@ func main() {
 	}
 
 	s3Client := s3.NewFromConfig(sdkConfig)
-	s3Storage := storage.NewS3Storage(s3Client)
 	smClient := secretsmanager.NewFromConfig(sdkConfig)
-
 	secretID := os.Getenv("MONGO_SECRET_ID")
-	tmpDir := os.Getenv("LAMBDA_TMP_DIR")
-	if tmpDir == "" {
-		tmpDir = "/tmp"
-	}
 
-	handler := NewHandler(s3Storage, smClient, secretID, tmpDir, DefaultIngestRunner, logger)
+	handler := NewS3EventHandler(s3Client, smClient, secretID, nil, logger)
 	lambda.Start(handler.HandleS3Event)
 }
