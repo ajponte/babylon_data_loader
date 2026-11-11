@@ -373,7 +373,7 @@ sequenceDiagram
 | **4L** | Local E2E Verification | `TestE2E_CLIIngest_RealMongo`, `TestE2E_CLIIngest_RerunIsIdempotent`, `TestSyntheticCSV_RoutesToSyntheticDestination` |
 | **4H** | Lambda Cutover | `TestS3Handler_SuccessArchivesAndSetsSourceURI`, `TestS3Handler_TransientFailureRetries`, `TestS3Handler_DeterministicFailureLeavesObject`, `TestS3Handler_LazyInitOnceAndRetryAfterFailure`, `TestS3Handler_SecretErrorDoesNotLeakURI`, `TestS3Handler_PreCanceledContext`, `TestS3Handler_FidelitySuccess`, `TestS3Handler_SyntheticSuccess`, `TestS3Handler_EmptyRecordsEvent`, `TestS3Handler_AuditWriteErrorIsSuccess` (15/15 passing, 85.2% coverage) |
 | **4I** | Desktop Notifier | `TestWailsProgressNotifier_MapsStages`, `TestWailsProgressNotifier_ThreadSafe`, `TestWailsProgressNotifier_ContextHandling`, `TestWailsProgressNotifier_CustomStageMapper`, `TestWailsProgressNotifier_DefaultEmitter`, `TestWailsProgressNotifier_ZeroValueSafe`, `TestWailsProgressNotifier_CancelledWailsCtx`, `TestWailsProgressNotifier_NegativeCountsClamped`, `TestWailsProgressNotifier_NilReceiverSafe` (100% pass rate) |
-| **4J** | History Read Port | `TestToHistoryEntries_LegacyJSONGolden`, `TestHistoryService_UsesDefaultLimit`, `TestHistoryService_PropagatesError` |
+| **4J** | History Read Port | `TestToHistoryEntries_LegacyJSONGolden`, `TestHistoryService_UsesDefaultLimit`, `TestHistoryService_PropagatesError` (100% pass rate, 90.8% desktop coverage) |
 | **4K** | Desktop Cutover | `TestApp_ProcessFile_Success`, `TestApp_GetHistory_Parity`, `TestApp_E2E_LocalMongo` |
 
 ---
@@ -395,7 +395,7 @@ sequenceDiagram
 <a id="synclogreader-consumer-port"></a>
 ## 9. `SyncLogReader` Consumer Port Specification
 
-Authoritative implementation reference: `internal/domain/port/sync_log_reader.go` (lands in Phase 4J).
+Authoritative implementation reference: `internal/domain/port/sync_log_reader.go` (implemented in Phase 4J).
 
 ### 9.1 Consumer Read Port Contract
 
@@ -419,10 +419,36 @@ type SyncLogReader interface {
 ```
 
 ### 9.2 Interface Segregation & Composition
-- **Interface Segregation**: Segregates query access (`ListSyncLogs`) from command persistence (`port.Repository` defining `SaveBatch` and `LogSync`).
+- **Interface Segregation (Decision P12)**: Segregates query access (`ListSyncLogs`) from command persistence (`port.Repository` defining `SaveBatch` and `LogSync`).
 - **Adapter Conformance**: Satisfied by `*mongo.Repository.ListSyncLogs` without modifying the core storage adapter.
 - **Composition Root Assertion**: Validated in `desktop/history.go` via:
   ```go
   var _ port.SyncLogReader = (*mongo.Repository)(nil)
   ```
-- **Desktop History DTO**: Desktop service maps `[]model.SyncLog` to `[]historyEntry`, preserving legacy JSON field compatibility for the frontend.
+- **Desktop History DTO (Divergence 10)**: Desktop service maps `[]model.SyncLog` to `[]historyEntry`, preserving legacy JSON field compatibility for the frontend.
+
+### 9.3 Desktop History Service & DTO Specification
+
+Implementation reference: `desktop/history.go`.
+
+- **DTO Model (`historyEntry`)**:
+  ```go
+  type historyEntry struct {
+  	FileName        string    `json:"fileName"`
+  	FileHash        string    `json:"fileHash,omitempty"`
+  	CollectionName  string    `json:"collectionName"`
+  	RecordCount     int64     `json:"recordCount"`
+  	UpsertedCount   int64     `json:"upsertedCount"`
+  	MatchedCount    int64     `json:"matchedCount"`
+  	Status          string    `json:"status"`
+  	ErrorMessage    string    `json:"errorMessage,omitempty"`
+  	SyncedAt        time.Time `json:"syncedAt"`
+  	DurationMs      int64     `json:"durationMs"`
+  	SyncTimestamp   time.Time `json:"syncTimestamp"`
+  	RecordsUploaded int64     `json:"recordsUploaded"`
+  }
+  ```
+- **Database ID Omission**: Database `id` / `_id` is excluded from the JSON payload per ADR Section 6.2 Divergence 10.
+- **Dual Field Parity**: `syncTimestamp` mirrors `syncedAt`, and `recordsUploaded` mirrors `upsertedCount`.
+- **Empty Slice Guarantee**: `toHistoryEntries(nil)` returns `[]historyEntry{}` ensuring serialization to `[]` instead of `null`.
+- **Default Limit Fallback**: `historyService.GetHistory` defaults non-positive limits (`limit <= 0`) to `DefaultHistoryLimit = 100`.
