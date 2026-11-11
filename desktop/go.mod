@@ -1,4 +1,4 @@
-module desktop
+module babylon/dataloader/desktop
 
 go 1.26
 

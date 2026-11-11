@@ -34,10 +34,20 @@ flowchart TD
 ### 1.1 Type Definitions
 To ensure strict type-safety, all events are modeled in [events.ts](../../../desktop/frontend/src/types/events.ts):
 
-* **`ProgressEvent`**:
+* **`ProgressEvent` & `ProgressPhase`**:
   ```typescript
+  export type ProgressPhase =
+    | 'validating'
+    | 'parsing'
+    | 'upserting'
+    | 'saving'
+    | 'done'
+    | 'complete'
+    | 'failed'
+    | (string & {});
+
   export interface ProgressEvent {
-    phase: string;
+    phase: ProgressPhase;
     message: string;
     fileName: string;
     currentRecord: number;
@@ -95,9 +105,10 @@ The upload form handles user selection, metadata entry, and connection warnings:
 
 ### 2.2 [ProgressPanel.tsx](../../../desktop/frontend/src/components/ProgressPanel.tsx)
 Displays real-time feedback during ingestion:
-- **Progress Bar**: Animates with an indeterminate glow in validating/parsing phases and displays a precise percentage during upserting and done phases.
+- **Progress Bar**: Animates with an indeterminate glow in validating/parsing phases and displays a precise percentage during active saving (`saving` or `upserting`) and completion (`complete` or `done`) phases.
 - **Metrics Grid**: Renders totals, upserted records, and skipped duplicate counts on completion.
 - **Live Logs Console**: Subscribes to `ingest:log` events, displaying color-coded slog severity tags inside a scrollable console.
+- **Dual-Stage Compatibility**: Additively supports both hexagonal coarse stages (`saving`, `complete`) and legacy stages (`upserting`, `done`).
 
 ### 2.3 [HistoryPanel.tsx](../../../desktop/frontend/src/components/HistoryPanel.tsx)
 Retrieves and displays historical synchronizations:
@@ -125,12 +136,13 @@ Frontend unit tests are set up inside `desktop/frontend/` using **Vitest** and *
   * Asserts character-blocking pattern on the Account ID field (disallows non-digits).
   * Mocks `window.runtime.OpenFileDialog` to test browse selection.
   * Validates database offline alerts and retry connection calls.
-- **[ProgressPanel.test.tsx](../../../desktop/frontend/src/components/ProgressPanel.test.tsx)** (4 tests):
+- **[ProgressPanel.test.tsx](../../../desktop/frontend/src/components/ProgressPanel.test.tsx)** (5 tests):
   * Verifies placeholder states when no active event is broadcasted.
   * Simulates progress events and asserts that labels and percentages update dynamically.
   * Validates color-coded log parsing inside the live console.
-  * Asserts the "Done" callback behaves properly on compilation.
-- **[HistoryPanel.test.tsx](../../../desktop/frontend/src/components/HistoryPanel.test.tsx)** (6 tests):
+  * Asserts the "Done" callback behaves properly on completion.
+  * Verifies handling of hexagonal coarse stages (`saving` and `complete`).
+- **[HistoryPanel.test.tsx](../../../desktop/frontend/src/components/HistoryPanel.test.tsx)** (7 tests):
   * Verifies spinner loading indicator.
   * Asserts empty historical run state when sync history is clean.
   * Asserts table headers render correctly (Status, File Name, Collection, Records / Upserted, Duplicates, Duration, Timestamp).
@@ -142,8 +154,8 @@ Frontend unit tests are set up inside `desktop/frontend/` using **Vitest** and *
 
 ## 4. Verification & Linting Status
 
-- **Go Backend Coverage**: **86.3%** of statements in `desktop/`.
-- **Frontend Test Suite**: **17 tests passed** successfully.
+- **Go Backend Coverage**: **>86%** of statements in `desktop/`.
+- **Frontend Test Suite**: **19 tests passed** successfully.
 - **Linter Status**: All linter rules check out with **0 issues**.
 
 ---

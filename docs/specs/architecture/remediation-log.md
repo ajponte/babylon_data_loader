@@ -186,3 +186,54 @@ During the implementation and iterative code reviews of the CLI composition root
 3. **High-Level Orchestration Symmetry**: Both `runIngest` and `runPersistSyntheticData` are structured into symmetrical 4-step orchestration flows under 25 lines each.
 4. **Statement Coverage**: Achieved 86.4% statement coverage on `cmd/cli` with 18 passing tests across all boundary scenarios.
 
+---
+
+## 10. Phase 4H AWS Lambda Worker Cutover & Hardening Log
+
+During the implementation and review passes of the serverless AWS Lambda worker on branch `feat/phase-4h-lambda-cutover` (PR #90, synthesized in [`agent-docs/reviews/feat/phase-4h-lambda-cutover/REVIEW-FINDINGS.md`](../../agent-docs/reviews/feat/phase-4h-lambda-cutover/REVIEW-FINDINGS.md) and [`CODE-REVIEW-FINDINGS.md`](../../agent-docs/reviews/feat/phase-4h-lambda-cutover/CODE-REVIEW-FINDINGS.md)), 15 findings across QA and code review were remediated:
+
+| ID | Severity | Target File(s) | Architectural Impact Prior to Hardening | Implemented Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **CRF-01** | `Medium` | `cmd/lambda/handler.go` | `ensurePipeline` coupled Secrets Manager resolution, client connection, and pipeline registration. | Extracted `connectRepository(ctx)` to isolate MongoDB secret retrieval and client connection logic. |
+| **CRF-02** | `Medium` | `cmd/lambda/handler.go` | Extractor registration lacked architectural symmetry with the CLI composition root. | Extracted `newIngestionPipeline(repo, clock)` matching the pattern used in `cmd/cli/main.go`. |
+| **CRF-03** | `Medium` | `cmd/lambda/handler.go` | `processRecord` mixed S3 store initialization, stream execution, and error classification. | Extracted `executeIngestion(ctx, p, bucket, key, filename)` separating storage binding from error triage. |
+| **CRF-04** | `Low` | `cmd/lambda/handler.go` | Magic string literals used for S3 prefixes. | Standardized on package constants `unprocessedPrefix = "unprocessed/"` and `processedPrefix = "processed/"`. |
+| **CRF-05** | `Medium` | `cmd/lambda/handler.go` | Cyclomatic complexity in `isDeterministicError` exceeded linter thresholds (33). | Decomposed into 3 category helpers (`isIngestOrPipelineError`, `isSourceDialectError`, `isModelOrCSVParseError`) dropping complexity to < 12. |
+| **QAF-01** | `Medium` | `cmd/lambda/handler.go`<br>`cmd/lambda/handler_test.go` | Pre-canceled context could initiate pipeline work before checking context state. | Added early `ctx.Err() != nil` guard in `processRecord` and added `TestS3Handler_PreCanceledContext`. |
+| **QAF-02** | `Medium` | `cmd/lambda/handler_test.go` | Fidelity statement ingestion unverified in Lambda environment. | Added `TestS3Handler_FidelitySuccess` validating destination routing to `positions_fidelity` and `SourceURI`. |
+| **QAF-03** | `Medium` | `cmd/lambda/handler_test.go` | Synthetic CSV stream ingestion unverified in Lambda environment. | Added `TestS3Handler_SyntheticSuccess` validating destination routing to `transactions_synthetic` and `SourceURI`. |
+| **QAF-04** | `Low` | `cmd/lambda/handler_test.go` | Zero-record S3 event unverified. | Added `TestS3Handler_EmptyRecordsEvent` asserting that 0 records returns `nil` with zero store/repo calls. |
+| **QAF-05** | `Low` | `cmd/lambda/handler_test.go` | Complex punctuation passwords unverified in URI credential redaction. | Expanded `TestS3Handler_SanitizedErrorAndKeyValidation` to verify regex masking on complex password strings. |
+
+### Phase 4H Architectural Invariants
+1. **Direct Stream Ingestion (Decision P7)**: Streams directly from S3 via `ingest.Ingestor` without `/tmp` disk staging.
+2. **Provenance Tracking (Decision P8)**: Sets `source.s3Uri` to canonical `s3://<bucket>/<key>` on all batches and sync logs.
+3. **Warm Container Reuse (Decision P9)**: Lazy initialization of repository and pipeline under `sync.Mutex` with safe state reset on failure.
+4. **Tri-State Error Taxonomy (Decision U6)**: Transient errors trigger Lambda retry; deterministic errors log and leave objects in `unprocessed/` for operator triage; audit write failures log warnings without aborting successful ingestion.
+
+---
+
+## 11. Phase 4I Desktop Telemetry & Module Path Hardening Log
+
+During the implementation and review passes of the desktop driving adapter on branch `feat/phase-4i-desktop-notifier-and-module-path` (PR #91, synthesized in [`agent-docs/reviews/feat/phase-4i-desktop-notifier-and-module-path/REVIEW-FINDINGS.md`](../../agent-docs/reviews/feat/phase-4i-desktop-notifier-and-module-path/REVIEW-FINDINGS.md)), 10 findings across QA and code review were remediated:
+
+| ID | Severity | Target File(s) | Architectural Impact Prior to Hardening | Implemented Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **CRF-01** | `High` | `desktop/notifier.go` | Calling methods on a nil `(*WailsProgressNotifier)(nil)` dereferenced `n.mu`, causing a panic. | Added `if n == nil { return }` nil-receiver guards to `NotifyProgress`, `SetWailsCtx`, and `SetFileName`. |
+| **CRF-02** | `Medium` | `desktop/notifier.go` | Zero-value struct instantiation without constructor resulted in nil function calls. | Added defensive fallbacks defaulting to `DefaultStageMapper` and `emitEvent` when uninitialized. |
+| **CRF-03** | `Medium` | `desktop/notifier.go` | Wails context cancellation during application shutdown was unchecked, potentially emitting ghost events. | Added `if targetCtx.Err() != nil { return }` guard prior to event emission. |
+| **CRF-04** | `Medium` | `desktop/notifier.go` | Negative `current` or `total` integer values passed through to JSON, causing negative UI percentages. | Clamped negative counts to zero (`if current < 0 { current = 0 }`, `if total < 0 { total = 0 }`). |
+| **CRF-05** | `Low` | `desktop/notifier.go` | Package lacked top-level architectural context and concurrency invariants. | Added comprehensive package docstring documenting Decision P11, telemetry port role, and thread safety. |
+| **QAF-01** | `Medium` | `desktop/notifier_test.go` | Zero-value struct literal safety was untested. | Added `TestWailsProgressNotifier_ZeroValueSafe` asserting safe no-op on uninitialized structs. |
+| **QAF-02** | `Medium` | `desktop/notifier_test.go` | Canceled Wails runtime context behavior was untested. | Added `TestWailsProgressNotifier_CancelledWailsCtx` verifying canceled `wailsCtx` skips event emission. |
+| **QAF-03** | `Medium` | `desktop/notifier_test.go` | Negative record count clamping was untested. | Added `TestWailsProgressNotifier_NegativeCountsClamped` validating normalization to 0. |
+| **QAF-04** | `Medium` | `desktop/notifier_test.go` | Nil receiver methods were untested. | Added `TestWailsProgressNotifier_NilReceiverSafe` verifying nil receiver safety. |
+| **QAF-05** | `Low` | `desktop/frontend/src/types/events.ts` | The `phase` property in `ProgressEvent` was an untyped string, lacking compile-time auto-completion. | Added `ProgressPhase` string union type while preserving open string compatibility. |
+
+### Phase 4I Architectural Invariants
+1. **Desktop Module Path Rename (Decision P11)**: Renamed `desktop/go.mod` to `module babylon/dataloader/desktop` to satisfy Go internal package import boundaries while preserving `replace babylon/dataloader => ../`.
+2. **Coarse Progress Telemetry (Decision P11 / ADR Divergence 4)**: Maps domain lifecycle stages (`StageParsing`, `StageSaving`, `StageComplete`) to coarse stages (`parsing`, `saving`, `complete`) over the Wails event bus (`ingest:progress`).
+3. **Dual Frontend Compatibility**: Additively updated `desktop/frontend/src/components/ProgressPanel.tsx` to handle both hexagonal stages (`saving`, `complete`) and legacy stages (`upserting`, `done`), ensuring 100% backward compatibility with zero test regressions.
+4. **Thread-Safe Telemetry Adapter**: `WailsProgressNotifier` guards all mutable context, filename, mapper, and emitter state with `sync.RWMutex`, validated under `go test -race` with 50 concurrent workers.
+
+
