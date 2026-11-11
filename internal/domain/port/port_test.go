@@ -262,6 +262,10 @@ func TestPortContracts_ObjectStore(t *testing.T) {
 }
 
 func TestPortContracts_SyncLogReader(t *testing.T) {
+	if port.DefaultSyncLogLimit != 100 {
+		t.Fatalf("expected port.DefaultSyncLogLimit = 100, got %d", port.DefaultSyncLogLimit)
+	}
+
 	ctx := context.Background()
 	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 	expectedLogs := []model.SyncLog{
@@ -292,6 +296,21 @@ func TestPortContracts_SyncLogReader(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].FileName != "test.csv" {
 		t.Errorf("unexpected logs returned: %+v", logs)
+	}
+
+	// Verify non-positive limits pass through to driver implementation
+	if _, zeroErr := reader.ListSyncLogs(ctx, 0); zeroErr != nil {
+		t.Fatalf("unexpected error with 0 limit: %v", zeroErr)
+	}
+	if mock.lastLimit != 0 {
+		t.Errorf("expected limit 0, got %d", mock.lastLimit)
+	}
+
+	if _, negErr := reader.ListSyncLogs(ctx, -10); negErr != nil {
+		t.Fatalf("unexpected error with -10 limit: %v", negErr)
+	}
+	if mock.lastLimit != -10 {
+		t.Errorf("expected limit -10, got %d", mock.lastLimit)
 	}
 
 	mockErr := &mockSyncLogReader{

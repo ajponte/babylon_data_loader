@@ -43,7 +43,7 @@ func assertNoDatabaseID(t *testing.T, jsonStr string) {
 }
 
 // assertDualFieldsEqual asserts that legacy dual aliases match canonical domain values.
-func assertDualFieldsEqual(t *testing.T, entries []historyEntry) {
+func assertDualFieldsEqual(t *testing.T, entries []HistoryEntry) {
 	t.Helper()
 	if len(entries) == 0 {
 		return
@@ -59,6 +59,8 @@ func assertDualFieldsEqual(t *testing.T, entries []historyEntry) {
 
 func TestToHistoryEntries_LegacyJSONGolden(t *testing.T) {
 	syncedTime := time.Date(2026, 11, 11, 15, 30, 0, 0, time.UTC)
+	estZone := time.FixedZone("EST", -5*3600)
+	syncedTimeEST := time.Date(2026, 11, 11, 10, 30, 0, 0, estZone)
 
 	tests := []struct {
 		name       string
@@ -88,6 +90,23 @@ func TestToHistoryEntries_LegacyJSONGolden(t *testing.T) {
 			dualFields: true,
 		},
 		{
+			name: "non-UTC timestamp normalized to UTC Zulu",
+			input: []model.SyncLog{
+				{
+					FileName:       "tz_test.csv",
+					CollectionName: "transactions_chase",
+					RecordCount:    1,
+					UpsertedCount:  1,
+					Status:         model.SyncStatusSuccess,
+					SyncedAt:       syncedTimeEST,
+					DurationMs:     50,
+				},
+			},
+			expected:   `[{"fileName":"tz_test.csv","collectionName":"transactions_chase","recordCount":1,"upsertedCount":1,"matchedCount":0,"status":"SUCCESS","syncedAt":"2026-11-11T15:30:00Z","durationMs":50,"syncTimestamp":"2026-11-11T15:30:00Z","recordsUploaded":1}]`,
+			checkNoID:  true,
+			dualFields: true,
+		},
+		{
 			name: "failed log omits empty fileHash and includes errorMessage",
 			input: []model.SyncLog{
 				{
@@ -104,6 +123,34 @@ func TestToHistoryEntries_LegacyJSONGolden(t *testing.T) {
 				},
 			},
 			expected:   `[{"fileName":"corrupt.csv","collectionName":"transactions_chase","recordCount":0,"upsertedCount":0,"matchedCount":0,"status":"FAILED","errorMessage":"parse error: unexpected EOF","syncedAt":"2026-11-11T15:30:00Z","durationMs":12,"syncTimestamp":"2026-11-11T15:30:00Z","recordsUploaded":0}]`,
+			checkNoID:  true,
+			dualFields: true,
+		},
+		{
+			name: "multi-entry ordering and mixed status preserved",
+			input: []model.SyncLog{
+				{
+					FileName:       "first.csv",
+					FileHash:       "hash1",
+					CollectionName: "transactions_chase",
+					RecordCount:    10,
+					UpsertedCount:  10,
+					Status:         model.SyncStatusSuccess,
+					SyncedAt:       syncedTime,
+					DurationMs:     100,
+				},
+				{
+					FileName:       "second.csv",
+					CollectionName: "positions_fidelity",
+					RecordCount:    0,
+					UpsertedCount:  0,
+					Status:         model.SyncStatusFailed,
+					ErrorMessage:   "empty file",
+					SyncedAt:       syncedTime,
+					DurationMs:     15,
+				},
+			},
+			expected:   `[{"fileName":"first.csv","fileHash":"hash1","collectionName":"transactions_chase","recordCount":10,"upsertedCount":10,"matchedCount":0,"status":"SUCCESS","syncedAt":"2026-11-11T15:30:00Z","durationMs":100,"syncTimestamp":"2026-11-11T15:30:00Z","recordsUploaded":10},{"fileName":"second.csv","collectionName":"positions_fidelity","recordCount":0,"upsertedCount":0,"matchedCount":0,"status":"FAILED","errorMessage":"empty file","syncedAt":"2026-11-11T15:30:00Z","durationMs":15,"syncTimestamp":"2026-11-11T15:30:00Z","recordsUploaded":0}]`,
 			checkNoID:  true,
 			dualFields: true,
 		},
@@ -142,7 +189,7 @@ func TestToHistoryEntries_LegacyJSONGolden(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			entries := toHistoryEntries(tc.input)
+			entries := ToHistoryEntries(tc.input)
 			rawJSON, err := json.Marshal(entries)
 			if err != nil {
 				t.Fatalf("unexpected json.Marshal error: %v", err)
@@ -164,9 +211,15 @@ func TestToHistoryEntries_LegacyJSONGolden(t *testing.T) {
 	}
 }
 
+func execGetHistory(ctx context.Context, svc *HistoryService, limits []int64) ([]HistoryEntry, error) {
+	if len(limits) == 0 {
+		return svc.GetHistory(ctx)
+	}
+	return svc.GetHistory(ctx, limits...)
+}
+
 func TestHistoryService_UsesDefaultLimit(t *testing.T) {
 	ctx := context.Background()
-	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 	sampleLogs := []model.SyncLog{
 		{
 			FileName:       "sample.csv",
@@ -174,7 +227,7 @@ func TestHistoryService_UsesDefaultLimit(t *testing.T) {
 			RecordCount:    10,
 			UpsertedCount:  10,
 			Status:         model.SyncStatusSuccess,
-			SyncedAt:       now,
+			SyncedAt:       time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC),
 			DurationMs:     100,
 		},
 	}
@@ -183,6 +236,7 @@ func TestHistoryService_UsesDefaultLimit(t *testing.T) {
 		name          string
 		callWithLimit []int64
 		expectedLimit int64
+		structLiteral bool
 	}{
 		{
 			name:          "no limit argument uses DefaultHistoryLimit (100)",
@@ -209,23 +263,23 @@ func TestHistoryService_UsesDefaultLimit(t *testing.T) {
 			callWithLimit: []int64{25},
 			expectedLimit: 25,
 		},
+		{
+			name:          "struct literal with zero defaultLimit falls back to DefaultHistoryLimit",
+			callWithLimit: nil,
+			expectedLimit: DefaultHistoryLimit,
+			structLiteral: true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reader := &mockHistoryReader{logs: sampleLogs}
-			svc := newHistoryService(reader)
-
-			var (
-				entries []historyEntry
-				err     error
-			)
-			if tc.callWithLimit == nil {
-				entries, err = svc.GetHistory(ctx)
-			} else {
-				entries, err = svc.GetHistory(ctx, tc.callWithLimit...)
+			svc := NewHistoryService(reader)
+			if tc.structLiteral {
+				svc = &HistoryService{reader: reader}
 			}
 
+			entries, err := execGetHistory(ctx, svc, tc.callWithLimit)
 			if err != nil {
 				t.Fatalf("unexpected GetHistory error: %v", err)
 			}
@@ -248,7 +302,7 @@ func TestHistoryService_PropagatesError(t *testing.T) {
 
 	t.Run("reader error is propagated", func(t *testing.T) {
 		reader := &mockHistoryReader{err: sentinelErr}
-		svc := newHistoryService(reader)
+		svc := NewHistoryService(reader)
 
 		entries, err := svc.GetHistory(ctx)
 		if !errors.Is(err, sentinelErr) {
@@ -263,17 +317,31 @@ func TestHistoryService_PropagatesError(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		reader := &mockHistoryReader{}
-		svc := newHistoryService(reader)
-
+		svc := NewHistoryService(&mockHistoryReader{})
 		_, err := svc.GetHistory(canceledCtx)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context.Canceled, got: %v", err)
 		}
 	})
+}
+
+func TestHistoryService_NilGuards(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil context returns error safely without panic", func(t *testing.T) {
+		svc := NewHistoryService(&mockHistoryReader{})
+		var nilCtx context.Context
+		entries, err := svc.GetHistory(nilCtx)
+		if err == nil || !strings.Contains(err.Error(), "nil context") {
+			t.Fatalf("expected nil context error, got: %v", err)
+		}
+		if entries != nil {
+			t.Errorf("expected nil entries, got: %+v", entries)
+		}
+	})
 
 	t.Run("nil receiver returns error safely without panic", func(t *testing.T) {
-		var svc *historyService
+		var svc *HistoryService
 		entries, err := svc.GetHistory(ctx)
 		if err == nil || !strings.Contains(err.Error(), "uninitialized or nil") {
 			t.Fatalf("expected uninitialized error, got: %v", err)
@@ -284,7 +352,7 @@ func TestHistoryService_PropagatesError(t *testing.T) {
 	})
 
 	t.Run("nil reader in service returns error safely without panic", func(t *testing.T) {
-		svc := newHistoryService(nil)
+		svc := NewHistoryService(nil)
 		entries, err := svc.GetHistory(ctx)
 		if err == nil || !strings.Contains(err.Error(), "uninitialized or nil") {
 			t.Fatalf("expected nil sync log reader error, got: %v", err)
