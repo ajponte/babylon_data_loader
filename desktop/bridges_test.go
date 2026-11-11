@@ -1,12 +1,13 @@
 package main
 
 import (
-	"babylon/dataloader/datalake"
 	"context"
 	"fmt"
 	"log/slog"
 	"testing"
 	"time"
+
+	"babylon/dataloader/datalake"
 )
 
 func TestWailsLogHandler_Enabled(t *testing.T) {

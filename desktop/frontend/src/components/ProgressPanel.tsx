@@ -56,16 +56,18 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({ onFinished }) => {
     duplicateCount = 0,
   } = progress;
 
-  // Calculate percentage for upserting
+  // Calculate percentage for upserting / saving
   let percent = 0;
   let isIndeterminate = true;
+  const isSaving = phase === 'saving' || phase === 'upserting';
+  const isDone = phase === 'complete' || phase === 'done';
 
-  if (phase === 'upserting') {
+  if (isSaving) {
     if (totalRecords > 0) {
       percent = Math.min(Math.round((Number(currentRecord) / Number(totalRecords)) * 100), 100);
       isIndeterminate = false;
     }
-  } else if (phase === 'done') {
+  } else if (isDone) {
     percent = 100;
     isIndeterminate = false;
   }
@@ -73,6 +75,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({ onFinished }) => {
   const getPhaseBadgeClass = () => {
     switch (phase) {
       case 'done':
+      case 'complete':
         return 'badge-done';
       case 'failed':
         return 'badge-failed';
@@ -117,7 +120,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({ onFinished }) => {
       )}
 
       {/* Stats display */}
-      {(phase === 'done' || Number(upsertedCount) > 0 || Number(duplicateCount) > 0) && (
+      {(isDone || Number(upsertedCount) > 0 || Number(duplicateCount) > 0) && (
         <div className="stats-grid">
           <div className="stat-card">
             <div className="stat-num text-success">{String(upsertedCount)}</div>
@@ -152,7 +155,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({ onFinished }) => {
         </div>
       </div>
 
-      {(phase === 'done' || phase === 'failed') && (
+      {(isDone || phase === 'failed') && (
         <button className="btn btn-primary btn-close-progress" type="button" onClick={onFinished}>
           Done
         </button>

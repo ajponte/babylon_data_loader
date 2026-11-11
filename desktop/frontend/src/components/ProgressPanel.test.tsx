@@ -100,4 +100,48 @@ describe('ProgressPanel Component', () => {
     fireEvent.click(doneBtn);
     expect(mockOnFinished).toHaveBeenCalled();
   });
+
+  it('handles hexagonal coarse stages (saving and complete)', () => {
+    render(<ProgressPanel onFinished={mockOnFinished} />);
+
+    // Stage 1: saving
+    act(() => {
+      callbacks['ingest:progress']({
+        phase: 'saving',
+        message: 'Saving records to repository...',
+        fileName: 'Fidelity2026.csv',
+        currentRecord: 50,
+        totalRecords: 100,
+        upsertedCount: 50,
+        duplicateCount: 0,
+      });
+    });
+
+    expect(screen.getByText('SAVING')).toBeInTheDocument();
+    expect(screen.getByText('Saving records to repository...')).toBeInTheDocument();
+    expect(screen.getByText(/50% \(50 \/ 100 records\)/i)).toBeInTheDocument();
+
+    // Stage 2: complete
+    act(() => {
+      callbacks['ingest:progress']({
+        phase: 'complete',
+        message: 'Ingestion completed successfully',
+        fileName: 'Fidelity2026.csv',
+        currentRecord: 100,
+        totalRecords: 100,
+        upsertedCount: 90,
+        duplicateCount: 10,
+      });
+    });
+
+    expect(screen.getByText('COMPLETE')).toBeInTheDocument();
+    expect(screen.getByText('90')).toBeInTheDocument();
+    expect(screen.getByText('10')).toBeInTheDocument();
+
+    const doneBtn = screen.getByRole('button', { name: /Done/i });
+    expect(doneBtn).toBeInTheDocument();
+
+    fireEvent.click(doneBtn);
+    expect(mockOnFinished).toHaveBeenCalled();
+  });
 });

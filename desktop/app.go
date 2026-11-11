@@ -1,16 +1,17 @@
 package main
 
 import (
-	"babylon/dataloader/config"
-	"babylon/dataloader/datalake"
-	"babylon/dataloader/datalake/model"
-	"babylon/dataloader/datalake/repository"
-	"babylon/dataloader/storage"
 	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"sync"
+
+	"babylon/dataloader/config"
+	"babylon/dataloader/datalake"
+	"babylon/dataloader/datalake/model"
+	"babylon/dataloader/datalake/repository"
+	"babylon/dataloader/storage"
 
 	bcontext "babylon/dataloader/appcontext"
 
