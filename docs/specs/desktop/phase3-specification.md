@@ -150,11 +150,19 @@ Frontend unit tests are set up inside `desktop/frontend/` using **Vitest** and *
   * Verifies canonical success and failed log records with badges (`badge-success`, `badge-failed`) and accurate stats (`upsertedCount`, `matchedCount`, `durationMs`).
   * Asserts error alert display when fetching history fails.
 
+### 3.2 Desktop History Service & DTO (Phase 4J)
+- **`desktop/history.go`**: Bridges `port.SyncLogReader` to the frontend via `historyService` and `historyEntry` DTO:
+  * Omits database `id` / `_id` per ADR Divergence 10.
+  * Provides dual legacy aliases (`syncTimestamp` mirroring `syncedAt`, `recordsUploaded` mirroring `upsertedCount`).
+  * Defaults non-positive query limits to `DefaultHistoryLimit = 100`.
+  * Guarantees `toHistoryEntries(nil)` returns `[]historyEntry{}` (serializes as `[]` rather than `null`).
+  * Compile-time assertion: `var _ port.SyncLogReader = (*mongo.Repository)(nil)`.
+
 ---
 
 ## 4. Verification & Linting Status
 
-- **Go Backend Coverage**: **>86%** of statements in `desktop/`.
+- **Go Backend Coverage**: **90.8%** of statements in `desktop/`.
 - **Frontend Test Suite**: **19 tests passed** successfully.
 - **Linter Status**: All linter rules check out with **0 issues**.
 

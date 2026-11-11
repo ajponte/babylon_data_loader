@@ -236,4 +236,25 @@ During the implementation and review passes of the desktop driving adapter on br
 3. **Dual Frontend Compatibility**: Additively updated `desktop/frontend/src/components/ProgressPanel.tsx` to handle both hexagonal stages (`saving`, `complete`) and legacy stages (`upserting`, `done`), ensuring 100% backward compatibility with zero test regressions.
 4. **Thread-Safe Telemetry Adapter**: `WailsProgressNotifier` guards all mutable context, filename, mapper, and emitter state with `sync.RWMutex`, validated under `go test -race` with 50 concurrent workers.
 
+---
+
+## 12. Phase 4J `port.SyncLogReader` & Desktop History DTO Implementation Log
+
+Phase 4J introduces the driven consumer read port `port.SyncLogReader` (Decision P12) and the desktop history service with legacy JSON DTO mapping in `desktop/history.go` (PR #92, Issue #81).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `internal/domain/port/sync_log_reader.go` | Consumer Read Port | Segregates query access (`ListSyncLogs`) from command persistence (`port.Repository`). Adheres to interface segregation principles. | `TestPortContracts_SyncLogReader` |
+| `desktop/history.go` (`var _ port.SyncLogReader = (*mongo.Repository)(nil)`) | Compile Assertion | Statically verifies that storage adapter satisfies the consumer read port at compile time. | Compile gate & `go test` |
+| `desktop/history.go` (`historyEntry`) | Legacy DTO Mapping | Omits database `id` / `_id` (Divergence 10), provides dual legacy aliases (`syncTimestamp`, `recordsUploaded`), and formats UTC timestamps. | `TestToHistoryEntries_LegacyJSONGolden` |
+| `desktop/history.go` (`historyService`) | Application Service | Wraps `port.SyncLogReader`, enforces default limit (`DefaultHistoryLimit = 100`) for non-positive values, and guards against nil receivers/readers. | `TestHistoryService_UsesDefaultLimit`, `TestHistoryService_PropagatesError` |
+
+### Phase 4J Architectural Invariants
+1. **Interface Segregation (Decision P12)**: Query operations (`ListSyncLogs`) are decoupled from mutation persistence (`SaveBatch`, `LogSync`).
+2. **Compile-Time Conformance**: `*mongo.Repository` satisfies `port.SyncLogReader` without circular package dependencies or runtime casting.
+3. **Legacy DTO Parity (Divergence 10)**: Omits database `id` / `_id` and populates dual legacy aliases (`syncTimestamp` mirroring `syncedAt`, `recordsUploaded` mirroring `upsertedCount`).
+4. **Empty Array Guarantee**: Empty or nil input slices serialize to `[]` (not `null`) to maintain contract consistency with the React frontend.
+5. **Quality & Coverage**: Desktop statement coverage reached **90.8%** with 100% test pass rate across `internal/domain/port/...`, `desktop/...`, and `desktop/frontend`.
+
+
 

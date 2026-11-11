@@ -2,6 +2,7 @@ package port_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -100,6 +101,24 @@ func (m *mockObjectStore) ArchiveFile(
 	m.lastSrc = srcKey
 	m.lastDest = destKey
 	return m.archiveErr
+}
+
+// mockSyncLogReader implements port.SyncLogReader for testing contract compliance.
+type mockSyncLogReader struct {
+	logs      []model.SyncLog
+	err       error
+	lastLimit int64
+}
+
+func (m *mockSyncLogReader) ListSyncLogs(
+	_ context.Context,
+	limit int64,
+) ([]model.SyncLog, error) {
+	m.lastLimit = limit
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.logs, nil
 }
 
 func TestPortContracts_Extractor(t *testing.T) {
@@ -239,5 +258,66 @@ func TestPortContracts_ObjectStore(t *testing.T) {
 
 	if port.ErrObjectNotFound == nil || port.ErrObjectNotFound.Error() != "object not found" {
 		t.Errorf("expected port.ErrObjectNotFound to have message 'object not found'")
+	}
+}
+
+func TestPortContracts_SyncLogReader(t *testing.T) {
+	if port.DefaultSyncLogLimit != 100 {
+		t.Fatalf("expected port.DefaultSyncLogLimit = 100, got %d", port.DefaultSyncLogLimit)
+	}
+
+	ctx := context.Background()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	expectedLogs := []model.SyncLog{
+		{
+			FileName:       "test.csv",
+			FileHash:       "hash123",
+			CollectionName: "transactions_chase",
+			RecordCount:    10,
+			UpsertedCount:  10,
+			MatchedCount:   0,
+			Status:         model.SyncStatusSuccess,
+			SyncedAt:       now,
+			DurationMs:     150,
+		},
+	}
+
+	mock := &mockSyncLogReader{
+		logs: expectedLogs,
+	}
+	var reader port.SyncLogReader = mock
+
+	logs, err := reader.ListSyncLogs(ctx, 50)
+	if err != nil {
+		t.Fatalf("unexpected ListSyncLogs error: %v", err)
+	}
+	if mock.lastLimit != 50 {
+		t.Errorf("expected limit 50, got %d", mock.lastLimit)
+	}
+	if len(logs) != 1 || logs[0].FileName != "test.csv" {
+		t.Errorf("unexpected logs returned: %+v", logs)
+	}
+
+	// Verify non-positive limits pass through to driver implementation
+	if _, zeroErr := reader.ListSyncLogs(ctx, 0); zeroErr != nil {
+		t.Fatalf("unexpected error with 0 limit: %v", zeroErr)
+	}
+	if mock.lastLimit != 0 {
+		t.Errorf("expected limit 0, got %d", mock.lastLimit)
+	}
+
+	if _, negErr := reader.ListSyncLogs(ctx, -10); negErr != nil {
+		t.Fatalf("unexpected error with -10 limit: %v", negErr)
+	}
+	if mock.lastLimit != -10 {
+		t.Errorf("expected limit -10, got %d", mock.lastLimit)
+	}
+
+	mockErr := &mockSyncLogReader{
+		err: context.Canceled,
+	}
+	var readerErr port.SyncLogReader = mockErr
+	if _, cancelErr := readerErr.ListSyncLogs(ctx, 10); !errors.Is(cancelErr, context.Canceled) {
+		t.Errorf("expected context.Canceled error, got %v", cancelErr)
 	}
 }
