@@ -1,3 +1,9 @@
+// Package main provides the Wails desktop driving adapter for the Babylon data loader.
+//
+// WailsProgressNotifier adapts the domain port.ProgressNotifier interface to the Wails
+// runtime event bus ("ingest:progress"). It translates domain execution stages
+// (StageParsing, StageSaving, StageComplete) to coarse frontend phases (Decision P11,
+// ADR Section 6.2 Divergence 4) in a thread-safe manner.
 package main
 
 import (
@@ -93,6 +99,9 @@ func NewWailsProgressNotifier(wailsCtx context.Context, opts ...NotifierOption) 
 
 // SetWailsCtx updates the Wails runtime context under a mutex.
 func (n *WailsProgressNotifier) SetWailsCtx(ctx context.Context) {
+	if n == nil {
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.wailsCtx = ctx
@@ -100,6 +109,9 @@ func (n *WailsProgressNotifier) SetWailsCtx(ctx context.Context) {
 
 // SetFileName updates the target filename for telemetry events under a mutex.
 func (n *WailsProgressNotifier) SetFileName(fileName string) {
+	if n == nil {
+		return
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.fileName = fileName
@@ -107,6 +119,9 @@ func (n *WailsProgressNotifier) SetFileName(fileName string) {
 
 // NotifyProgress translates domain stage events and broadcasts them over the Wails event bus.
 func (n *WailsProgressNotifier) NotifyProgress(ctx context.Context, stage port.ProgressStage, current int, total int) {
+	if n == nil {
+		return
+	}
 	if ctx != nil && ctx.Err() != nil {
 		return
 	}
@@ -118,11 +133,28 @@ func (n *WailsProgressNotifier) NotifyProgress(ctx context.Context, stage port.P
 	emitter := n.emit
 	n.mu.RUnlock()
 
+	if mapper == nil {
+		mapper = DefaultStageMapper
+	}
+	if emitter == nil {
+		emitter = emitEvent
+	}
+
 	if targetCtx == nil {
 		if ctx == nil {
 			return
 		}
 		targetCtx = ctx
+	}
+	if targetCtx.Err() != nil {
+		return
+	}
+
+	if current < 0 {
+		current = 0
+	}
+	if total < 0 {
+		total = 0
 	}
 
 	phase, message := mapper(stage, current, total)

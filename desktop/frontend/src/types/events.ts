@@ -1,5 +1,15 @@
+export type ProgressPhase =
+  | 'validating'
+  | 'parsing'
+  | 'upserting'
+  | 'saving'
+  | 'done'
+  | 'complete'
+  | 'failed'
+  | (string & {});
+
 export interface ProgressEvent {
-  phase: string;
+  phase: ProgressPhase;
   message: string;
   fileName: string;
   currentRecord: number;

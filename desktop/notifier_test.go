@@ -252,3 +252,58 @@ func TestWailsProgressNotifier_DefaultEmitter(t *testing.T) {
 		t.Fatal("expected default emit function to be non-nil")
 	}
 }
+
+func TestWailsProgressNotifier_ZeroValueSafe(t *testing.T) {
+	// Assert zero-value struct with nil emitter and mapper does not panic
+	var notifier WailsProgressNotifier
+	// With nil contexts, should safely return without panic
+	notifier.NotifyProgress(nil, port.StageParsing, 0, 0)
+
+	// With context, should fallback to defaults without panic
+	ctx := context.Background()
+	notifier.NotifyProgress(ctx, port.StageParsing, 0, 0)
+}
+
+func TestWailsProgressNotifier_CancelledWailsCtx(t *testing.T) {
+	var emitted bool
+	emitter := func(ctx context.Context, name string, optionalData ...any) {
+		emitted = true
+	}
+
+	wailsCtx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled Wails runtime context
+
+	notifier := NewWailsProgressNotifier(wailsCtx, WithEmitter(emitter))
+	notifier.NotifyProgress(context.Background(), port.StageParsing, 0, 0)
+
+	if emitted {
+		t.Fatal("expected no emission when wailsCtx is canceled")
+	}
+}
+
+func TestWailsProgressNotifier_NegativeCountsClamped(t *testing.T) {
+	var emittedProgress ProgressEvent
+	emitter := func(ctx context.Context, name string, optionalData ...any) {
+		if len(optionalData) > 0 {
+			emittedProgress, _ = optionalData[0].(ProgressEvent)
+		}
+	}
+
+	notifier := NewWailsProgressNotifier(context.Background(), WithEmitter(emitter))
+	notifier.NotifyProgress(context.Background(), port.StageParsing, -10, -50)
+
+	if emittedProgress.CurrentRecord != 0 {
+		t.Errorf("expected currentRecord clamped to 0, got %d", emittedProgress.CurrentRecord)
+	}
+	if emittedProgress.TotalRecords != 0 {
+		t.Errorf("expected totalRecords clamped to 0, got %d", emittedProgress.TotalRecords)
+	}
+}
+
+func TestWailsProgressNotifier_NilReceiverSafe(t *testing.T) {
+	var notifier *WailsProgressNotifier
+	// None of these should panic on a nil receiver
+	notifier.NotifyProgress(context.Background(), port.StageParsing, 0, 0)
+	notifier.SetWailsCtx(context.Background())
+	notifier.SetFileName("test.csv")
+}
