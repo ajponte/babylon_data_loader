@@ -502,7 +502,7 @@ Phase 3H implements the integration verification suite for the MongoDB persisten
 - **Build Tag Isolation (`//go:build integration`)**: All integration tests are tagged with `//go:build integration` at the file header of [`internal/infra/storage/mongo/integration_test.go`](../../internal/infra/storage/mongo/integration_test.go). This ensures that standard CI and local verification workflows (`make test-ci`, `go test ./...`) completely exclude integration tests, maintaining fast, hermetic, and network-free CI passes (Decision D6).
 - **Target `make test-integration`**: Dedicated target in [`makefile`](../../makefile) executes:
   ```bash
-  go test -tags=integration -race -timeout 5m -count=1 -v ./internal/infra/storage/...
+  go test -tags=integration -race -timeout 5m -count=1 -v ./internal/infra/storage/... ./cmd/cli/...
   ```
   The 5-minute timeout prevents deadlocks or hanging connections from stalling developer or local verification environments.
 - **Environment Configuration Gating (`MONGO_IT_URI`)**: The integration harness requires the environment variable `MONGO_IT_URI`. Both the `makefile` target and the test setup function (`setupIntegration`) enforce this variable:

@@ -370,7 +370,7 @@ sequenceDiagram
 | **4E** | LocalFS Store | `TestNew_RequiresExistingDirectory`, `TestDownloadStream_ReadsFile`, `TestDownloadStream_NotFound`, `TestKeys_RejectTraversal`, `TestArchiveFile_RenamesAndCreatesDir`, `TestArchiveFile_CopyFallback`, `TestList_FilesOnlySorted`, `TestErrors_DoNotLeakRoot` |
 | **4F** | Object Ingestion | `TestIngestObject_ResolvesAndRuns`, `TestIngestObject_OverrideSkipsResolution`, `TestIngestObject_CancelledContext`, `TestIngestObject_RejectsNonCSV`, `TestIngestObject_Unresolvable`, `TestIngestObject_DownloadNotFound`, `TestIngestObject_TooLargeIsAudited`, `TestIngestObject_TooLargeAuditFailureJoined`, `TestIngestObject_FingerprintReadError`, `TestIngestObject_FinalizeArchives`, `TestIngestObject_NoArchiveKeyNoFinalize`, `TestIngestObject_ClosesStream`, `TestIngestAll_ContinuesAndCounts`, `TestRunStats_JSONMatchesLegacy`, `TestArchiveKeyFor`, `TestRegisterDefaults_Routing` |
 | **4G** | CLI Entrypoint | `TestRun_UsageAndUnknownCommand`, `TestRun_IngestWiresPipeline`, `TestRun_IngestEmptyDirectory`, `TestRun_IngestContextCancelled`, `TestRun_IngestArchivesWhenConfigured`, `TestRun_IngestNoArchiveWhenDisabled`, `TestRun_IngestRespectsDirEnvOverrides`, `TestRun_IngestMissingDirFails`, `TestRun_ConnectFailureDoesNotLeakURI`, `TestRun_PersistSyntheticRoutesToSyntheticCollection`, `TestRun_GenerateSyntheticDataToDir`, `TestRun_GenerateSyntheticDataFlagError`, `TestRun_PartialFailureExitZero`, `TestSlogNotifier_LogsStages`, `TestDeps_WithDefaults`, `TestSanitizeError`, `TestRun_IngestStoreInitError`, `TestRun_IngestRepoCloseError`, `TestRun_PersistSyntheticErrors` (18/18 passing, 86.4% coverage) |
-| **4L** | Local E2E Verification | `TestE2E_CLIIngest_RealMongo`, `TestE2E_CLIIngest_RerunIsIdempotent`, `TestSyntheticCSV_RoutesToSyntheticDestination` |
+| **4L** | Local E2E Verification | `TestE2E_CLIIngest_RealMongo`, `TestE2E_CLIIngest_RerunIsIdempotent`, `TestSyntheticCSV_RoutesToSyntheticDestination`, `TestValidateIntegrationTarget` (100% pass rate, 4/4 passing, `make test-integration`) |
 | **4H** | Lambda Cutover | `TestS3Handler_SuccessArchivesAndSetsSourceURI`, `TestS3Handler_TransientFailureRetries`, `TestS3Handler_DeterministicFailureLeavesObject`, `TestS3Handler_LazyInitOnceAndRetryAfterFailure`, `TestS3Handler_SecretErrorDoesNotLeakURI`, `TestS3Handler_PreCanceledContext`, `TestS3Handler_FidelitySuccess`, `TestS3Handler_SyntheticSuccess`, `TestS3Handler_EmptyRecordsEvent`, `TestS3Handler_AuditWriteErrorIsSuccess` (15/15 passing, 85.2% coverage) |
 | **4I** | Desktop Notifier | `TestWailsProgressNotifier_MapsStages`, `TestWailsProgressNotifier_ThreadSafe`, `TestWailsProgressNotifier_ContextHandling`, `TestWailsProgressNotifier_CustomStageMapper`, `TestWailsProgressNotifier_DefaultEmitter`, `TestWailsProgressNotifier_ZeroValueSafe`, `TestWailsProgressNotifier_CancelledWailsCtx`, `TestWailsProgressNotifier_NegativeCountsClamped`, `TestWailsProgressNotifier_NilReceiverSafe` (100% pass rate) |
 | **4J** | History Read Port | `TestToHistoryEntries_LegacyJSONGolden`, `TestHistoryService_UsesDefaultLimit`, `TestHistoryService_PropagatesError` (100% pass rate, 90.8% desktop coverage) |
@@ -483,3 +483,31 @@ Desktop statements selected via the UI file picker are read directly in place wi
 - **Dependency Factory Injection**: `App` struct exposes `connectRepo` and `newStore` factory hooks, defaulting to `defaultConnectRepo` (`mongo.NewRepository`) and `defaultNewStore` (`localfs.New`). This permits hermetic unit tests with mock repositories and mock stores without network calls.
 - **Reconnection Resilience (`RetryConnectDB`)**: Defensively closes existing degraded repositories before establishing new connections and re-initializing the ingestion pipeline.
 - **JSON Compatibility**: `IngestFile` returns `ingest.RunStats` matching the legacy JSON contract (`totalFiles`, `processedFiles`, `failedFiles`, `failures`). Wails generates `export namespace ingest { export class RunStats }` in `desktop/frontend/wailsjs/go/models.ts`.
+
+---
+
+<a id="e2e-integration-spec"></a>
+## 11. End-to-End Ingestion Integration Verification Specification (`cmd/cli/integration_test.go`)
+
+Authoritative implementation reference: `cmd/cli/integration_test.go` (implemented in Phase 4L).
+
+### 11.1 End-to-End CLI Pipeline Verification
+The integration test suite in `cmd/cli/integration_test.go` exercises the complete hexagonal architecture from the CLI driving adapter (`run(ctx, []string{"ingest"}, d)`) through the application pipeline orchestrator, real source extractors (`chase`, `fidelity`, `synthetic`), real filesystem object storage (`localfs.Store`), and a live containerized MongoDB instance (`mongo.Repository`).
+
+### 11.2 Safety Guards & Multi-Tier Isolation
+1. **Compiler Build Tag (`//go:build integration`)**: Guarantees that hermetic CI and developer workflows (`make test-ci`, `go test ./...`) completely exclude integration tests, remaining 100% network- and container-free.
+2. **Environment Skip Guard (`MONGO_IT_URI`)**: If `MONGO_IT_URI` is unset, tests invoke `t.Skip` gracefully rather than failing catastrophically when invoked without a live Mongo instance.
+3. **Target Validation (`validateIntegrationTarget`)**: Reject connection strings containing `mongodb+srv://` (preventing accidental targeting of Atlas production clusters) and database names equal to `"datalake"` (case-insensitive protection for the production database). Verified independently via `TestValidateIntegrationTarget`.
+4. **Ephemeral Database Lifecycle**: Dynamically provisions a unique timestamped database per test (`babylon_it_cli_<unixnano>`) and registers a `t.Cleanup` hook that drops the database and disconnects the client.
+5. **Hermetic Environment Isolation**: Injects `APP_ENVIRONMENT=local`, `CSV_DIR`, `UNPROCESSED_DIR`, `PROCESSED_DIR`, and `MOVE_PROCESSED_FILES=true` using `t.Setenv`, isolating config loading from ambient host configurations.
+
+### 11.3 Key Architectural Invariants Verified
+1. **Multi-Statement Ingestion (`TestE2E_CLIIngest_RealMongo`)**: Ingests Chase checking, Fidelity positions, and Synthetic transaction CSV files in a single batch. Verifies document writes to `transactions_chase`, `positions_fidelity`, `transactions_synthetic`, and `dataSync` (3 SUCCESS audit logs with valid attributes), and confirms file archival from `unprocessed/` to `processed/`.
+2. **Upsert Idempotency & Lineage Preservation (`TestE2E_CLIIngest_RerunIsIdempotent`)**:
+   - Re-running the pipeline on identical statement files yields 0 new document inserts in MongoDB collections.
+   - Verifies audit logs record `upsertedCount: 0` and `matchedCount: 2`.
+   - Confirms that dot-notation lineage updates (Decision E6) preserve pre-existing `source.s3Uri` values without being overwritten by empty strings.
+3. **Routing Isolation & Schema Fidelity (`TestSyntheticCSV_RoutesToSyntheticDestination`)**:
+   - Synthetic statements route exclusively to `transactions_synthetic` while leaving `transactions_chase` and `positions_fidelity` empty.
+   - Preserves synthetic schema fields: `details`, `category`, `balance`, `checkOrSlipNum`, `dataSource`, and `accountId`.
+

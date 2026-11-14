@@ -278,6 +278,29 @@ Phase 4K executes the driving adapter cutover for the Wails desktop application 
 4. **Defensive Reconnection (`RetryConnectDB`)**: Closes any existing degraded repository handle prior to reconnecting and constructing a fresh ingestion pipeline.
 5. **Quality & Coverage**: Desktop statement coverage achieved **87.4%** under `go test -race`, with 100% pass rate across the desktop Go test suite and all 19 frontend Vitest tests.
 
+---
+
+## 14. Phase 4L End-to-End Ingestion Integration Verification (`cmd/cli/integration_test.go`) Implementation Log
+
+Phase 4L delivers the end-to-end integration test suite exercising the complete hexagonal architecture through the CLI entrypoint ([Issue #83](https://github.com/ajponte/babylon_data_loader/issues/83), Parent Issue #49). It executes real statement extractors (`chase`, `fidelity`, `synthetic`), real filesystem object storage (`internal/infra/storage/localfs`), and live containerized MongoDB persistence (`internal/infra/storage/mongo`).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `cmd/cli/integration_test.go` (`validateIntegrationTarget`) | Safety Guard | Rejects `mongodb+srv://` connection strings (preventing Atlas pollution) and `datalake` database names (protecting production datalake). | `TestValidateIntegrationTarget` (9 table-driven test cases) |
+| `cmd/cli/integration_test.go` (`setupCLIIntegration`) | Test Harness | Enforces `MONGO_IT_URI` skip guard, provisions ephemeral databases (`babylon_it_cli_<nano>`) with guaranteed `t.Cleanup` drops, and isolates env (`APP_ENVIRONMENT=local`). | `setupCLIIntegration` |
+| `cmd/cli/integration_test.go` (`TestE2E_CLIIngest_RealMongo`) | E2E Integration | Ingests Chase, Fidelity, and Synthetic statements via CLI `run(ctx, []string{"ingest"}, d)`. Verifies collection writes, audit logs, and directory archival. | `TestE2E_CLIIngest_RealMongo` |
+| `cmd/cli/integration_test.go` (`TestE2E_CLIIngest_RerunIsIdempotent`) | Idempotency & Lineage | Verifies duplicate runs yield 0 new records (`upsertedCount: 0`, `matchedCount: 2`) and preserves pre-existing `source.s3Uri` via dot-notation lineage updates (Decision E6). | `TestE2E_CLIIngest_RerunIsIdempotent` |
+| `cmd/cli/integration_test.go` (`TestSyntheticCSV_RoutesToSyntheticDestination`) | Routing Isolation | Verifies synthetic statements route exclusively to `transactions_synthetic` while leaving Chase/Fidelity collections empty, preserving schema fields. | `TestSyntheticCSV_RoutesToSyntheticDestination` |
+| `makefile` (`test-integration`) | Automation Seam | Expanded `test-integration` target to execute `./internal/infra/storage/...` and `./cmd/cli/...` under `//go:build integration`. | `make test-integration` |
+
+### Phase 4L Architectural Invariants
+1. **Hermetic CI Isolation**: All integration tests use `//go:build integration`. Standard CI and local checks (`make test-ci`, `go test ./...`) remain 100% network- and container-free.
+2. **Ephemeral Database Isolation**: Tests never target persistent or shared database instances; each run dynamically provisions and drops `babylon_it_cli_<unixnano>`.
+3. **Lineage Preservation (Decision E6)**: Dot-notation update models ensure pre-existing S3 URI lineage (`source.s3Uri`) is never overwritten by local filesystem ingestion.
+4. **Target Isolation Protection**: Refuses execution if connection strings contain `mongodb+srv://` or if target database matches `datalake`.
+5. **Quality & Pass Rate**: 100% pass rate across all 4 integration tests (4/4 passing, `0.557s`), 100% pass rate in GitHub Actions CI workflow `integration-test` job (`1m25s`), and 0 linter issues under `make check-quality`.
+
+
 
 
 
