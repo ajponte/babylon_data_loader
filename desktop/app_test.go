@@ -3,182 +3,177 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"babylon/dataloader/config"
-	"babylon/dataloader/datalake"
-	"babylon/dataloader/datalake/datasource"
-	"babylon/dataloader/datalake/model"
-	"babylon/dataloader/datalake/repository"
-	"babylon/dataloader/storage"
-
-	csvparser "babylon/dataloader/csv"
-
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"babylon/dataloader/internal/app/ingest"
+	domainmodel "babylon/dataloader/internal/domain/model"
 )
 
-// mockMongoClient wrapping a client that won't panic on Database/Collection calls
-type mockMongoClient struct {
-	client *mongo.Client
-}
-
-func newMockMongoClient() *mockMongoClient {
-	// Construct a client without connecting it
-	cli, _ := mongo.NewClient(options.Client().ApplyURI("mongodb://localhost:27017"))
-	return &mockMongoClient{client: cli}
-}
-
-func (m *mockMongoClient) Disconnect(ctx context.Context) error {
-	return nil
-}
-
-func (m *mockMongoClient) Database(name string, opts ...*options.DatabaseOptions) *mongo.Database {
-	return m.client.Database(name, opts...)
-}
-
-// mockRepo implements repository.Repository
 type mockRepo struct {
-	syncLogs []model.SyncLog
-	err      error
+	syncLogs []domainmodel.SyncLog
+	retLog   *domainmodel.SyncLog
+	saveErr  error
+	listErr  error
+	logErr   error
+	closeErr error
+	closed   bool
 }
 
-func (m *mockRepo) BulkUpsertTransactions(ctx context.Context, transactions []model.Transaction) (repository.UpsertStats, error) {
-	return repository.UpsertStats{}, m.err
+var _ repository = (*mockRepo)(nil)
+
+func (m *mockRepo) SaveBatch(ctx context.Context, batch *domainmodel.IngestionBatch) (*domainmodel.SyncLog, error) {
+	if m.saveErr != nil {
+		return nil, m.saveErr
+	}
+	if m.retLog != nil {
+		return m.retLog, nil
+	}
+	count := int64(0)
+	collection := ""
+	if batch != nil {
+		count = int64(batch.RecordCount)
+		collection = string(batch.Destination)
+	}
+	return &domainmodel.SyncLog{
+		CollectionName: collection,
+		RecordCount:    count,
+		UpsertedCount:  count,
+		Status:         domainmodel.SyncStatusSuccess,
+	}, nil
 }
 
-func (m *mockRepo) BulkUpsertChaseTransactions(ctx context.Context, transactions []model.ChaseTransaction) (repository.UpsertStats, error) {
-	return repository.UpsertStats{}, m.err
+func (m *mockRepo) LogSync(ctx context.Context, log *domainmodel.SyncLog) error {
+	if log != nil {
+		m.syncLogs = append(m.syncLogs, *log)
+	}
+	return m.logErr
 }
 
-func (m *mockRepo) BulkUpsertFidelityPositions(ctx context.Context, positions []model.FidelityPosition) (repository.UpsertStats, error) {
-	return repository.UpsertStats{}, m.err
+func (m *mockRepo) ListSyncLogs(ctx context.Context, limit int64) ([]domainmodel.SyncLog, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.syncLogs, nil
 }
 
-func (m *mockRepo) RecordSyncLog(ctx context.Context, log model.SyncLog) error {
-	return m.err
+func (m *mockRepo) Close(ctx context.Context) error {
+	m.closed = true
+	return m.closeErr
 }
 
-func (m *mockRepo) GetSyncLogs(ctx context.Context) ([]model.SyncLog, error) {
-	return m.syncLogs, m.err
+func newTestApp(repo repository) *App {
+	app := NewApp()
+	app.ctx = context.Background()
+	app.cfg = &config.Config{MongoURI: "mongodb://localhost:27017"}
+	if repo != nil {
+		app.repo = repo
+		app.historyService = NewHistoryService(repo)
+		notifier := NewWailsProgressNotifier(app.ctx)
+		app.notifier = notifier
+		pipe, _ := newDesktopPipeline(repo, notifier)
+		app.pipeline = pipe
+		app.dbConn = true
+	}
+	return app
 }
 
-// mockDatalakeClient implements datalake.Client
-type mockDatalakeClient struct {
-	ingestCalled bool
-	retStats     *datalake.Stats
-	retErr       error
+func createTempCSV(t *testing.T, filename string, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, filename)
+	if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to create temp CSV: %v", err)
+	}
+	return filePath
 }
 
-func (m *mockDatalakeClient) IngestCSVFiles(
-	ctx context.Context,
-	repo repository.Repository,
-	extractor datasource.InfoExtractor,
-	parser csvparser.Parser,
-	unprocessedDir string,
-	processedDir string,
-	moveProcessedFiles bool,
-) (*datalake.Stats, error) {
-	return nil, nil
-}
-
-func (m *mockDatalakeClient) IngestCSVFile(
-	ctx context.Context,
-	repo repository.Repository,
-	parser csvparser.Parser,
-	filePath string,
-	dataSource string,
-	accountID string,
-	opts datalake.IngestFileOptions,
-) (*datalake.Stats, error) {
-	m.ingestCalled = true
-	return m.retStats, m.retErr
-}
+const validSyntheticCSV = "Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #\n" +
+	"DEBIT,10/31/2026,Coffee Shop,Food & Drink,-4.50,Debit Card,1000.00,\n"
 
 func TestApp_OnStartup_Success(t *testing.T) {
-	origConnect := storage.ConnectToMongoDBFunc
-	storage.ConnectToMongoDBFunc = func(ctx context.Context, uri string) (storage.MongoClient, error) {
-		return newMockMongoClient(), nil
-	}
-	defer func() {
-		storage.ConnectToMongoDBFunc = origConnect
-	}()
-
 	app := NewApp()
+	mock := &mockRepo{}
+	app.connectRepo = func(ctx context.Context, uri string) (repository, error) {
+		return mock, nil
+	}
+
 	ctx := context.Background()
 	app.OnStartup(ctx)
 
 	if !app.dbConn {
-		t.Error("Expected dbConn to be true on successful connection")
-	}
-	if app.mongo == nil {
-		t.Error("Expected mongo client to be initialized")
+		t.Error("expected dbConn to be true on successful startup connection")
 	}
 	if app.repo == nil {
-		t.Error("Expected repo to be initialized")
+		t.Error("expected repo to be initialized")
+	}
+	if app.pipeline == nil {
+		t.Error("expected pipeline to be initialized")
+	}
+	if app.historyService == nil {
+		t.Error("expected historyService to be initialized")
+	}
+	if app.notifier == nil {
+		t.Error("expected notifier to be initialized")
 	}
 }
 
 func TestApp_OnStartup_Failure(t *testing.T) {
-	origConnect := storage.ConnectToMongoDBFunc
-	storage.ConnectToMongoDBFunc = func(ctx context.Context, uri string) (storage.MongoClient, error) {
+	app := NewApp()
+	app.connectRepo = func(ctx context.Context, uri string) (repository, error) {
 		return nil, errors.New("connection timeout")
 	}
-	defer func() {
-		storage.ConnectToMongoDBFunc = origConnect
-	}()
 
-	app := NewApp()
 	ctx := context.Background()
 	app.OnStartup(ctx)
 
 	if app.dbConn {
-		t.Error("Expected dbConn to be false on connection failure")
-	}
-	if app.mongo != nil {
-		t.Error("Expected mongo client to be nil on failure")
+		t.Error("expected dbConn to be false on startup failure")
 	}
 	if app.repo != nil {
-		t.Error("Expected repo to be nil on failure")
+		t.Error("expected repo to be nil on failure")
+	}
+	if app.pipeline != nil {
+		t.Error("expected pipeline to be nil on failure")
 	}
 }
 
 func TestApp_RetryConnectDB(t *testing.T) {
-	origConnect := storage.ConnectToMongoDBFunc
-	defer func() {
-		storage.ConnectToMongoDBFunc = origConnect
-	}()
-
 	t.Run("success after failure", func(t *testing.T) {
-		storage.ConnectToMongoDBFunc = func(ctx context.Context, uri string) (storage.MongoClient, error) {
-			return nil, errors.New("error")
-		}
 		app := NewApp()
+		app.connectRepo = func(ctx context.Context, uri string) (repository, error) {
+			return nil, errors.New("initial connection error")
+		}
 		ctx := context.Background()
 		app.OnStartup(ctx)
 
 		if app.dbConn {
-			t.Fatal("expected connection failed")
+			t.Fatal("expected connection to fail initially")
 		}
 
-		storage.ConnectToMongoDBFunc = func(ctx context.Context, uri string) (storage.MongoClient, error) {
-			return newMockMongoClient(), nil
+		mock := &mockRepo{}
+		app.connectRepo = func(ctx context.Context, uri string) (repository, error) {
+			return mock, nil
 		}
 
 		success := app.RetryConnectDB()
 		if !success {
-			t.Error("expected RetryConnectDB to return true")
+			t.Error("expected RetryConnectDB to return true on success")
 		}
 		if !app.dbConn {
-			t.Error("expected dbConn to be true after retry success")
+			t.Error("expected dbConn to be true after successful retry")
 		}
 	})
 
 	t.Run("re-failure", func(t *testing.T) {
-		storage.ConnectToMongoDBFunc = func(ctx context.Context, uri string) (storage.MongoClient, error) {
+		app := NewApp()
+		app.connectRepo = func(ctx context.Context, uri string) (repository, error) {
 			return nil, errors.New("error")
 		}
-		app := NewApp()
 		ctx := context.Background()
 		app.OnStartup(ctx)
 
@@ -190,67 +185,160 @@ func TestApp_RetryConnectDB(t *testing.T) {
 			t.Error("expected dbConn to remain false")
 		}
 	})
+
+	t.Run("already connected", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		success := app.RetryConnectDB()
+		if !success {
+			t.Error("expected RetryConnectDB to return true when already connected")
+		}
+	})
+
+	t.Run("called before startup", func(t *testing.T) {
+		app := NewApp()
+		success := app.RetryConnectDB()
+		if success {
+			t.Error("expected RetryConnectDB to return false when ctx is nil")
+		}
+	})
 }
 
-func TestApp_IngestFile_NotConnected(t *testing.T) {
-	app := NewApp()
-	app.ctx = context.Background()
-	app.cfg = &config.Config{}
-	app.dbConn = false // degraded state
+func TestApp_IngestFile_Guards(t *testing.T) {
+	t.Run("not initialized", func(t *testing.T) {
+		app := NewApp()
+		_, err := app.IngestFile("file.csv", "synthetic", "0000")
+		if err == nil {
+			t.Error("expected error when app is not initialized")
+		}
+	})
 
-	_, err := app.IngestFile("file.csv", "chase", "1234")
-	if err == nil {
-		t.Error("Expected IngestFile to return error when not connected to database")
-	}
+	t.Run("not connected", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		app.dbConn = false
+
+		_, err := app.IngestFile("file.csv", "synthetic", "0000")
+		if err == nil {
+			t.Error("expected error when database is not connected")
+		}
+	})
+
+	t.Run("empty file path", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+
+		_, err := app.IngestFile("", "synthetic", "0000")
+		if err == nil {
+			t.Error("expected error on empty file path")
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		app.ctx = ctx
+
+		_, err := app.IngestFile("file.csv", "synthetic", "0000")
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("non-csv extension", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+
+		_, err := app.IngestFile("file.txt", "synthetic", "0000")
+		if err == nil || !errors.Is(err, ingest.ErrNotCSV) {
+			t.Errorf("expected ErrNotCSV, got %v", err)
+		}
+	})
 }
 
-func TestApp_IngestFile_Success(t *testing.T) {
-	app := NewApp()
-	app.ctx = context.Background()
-	app.cfg = &config.Config{}
-	app.dbConn = true
-	app.repo = &mockRepo{}
+func TestApp_ProcessFile_Success(t *testing.T) {
+	mock := &mockRepo{}
+	app := newTestApp(mock)
 
-	mockStats := datalake.NewStats()
-	mockStats.TotalFiles = 1
-	mockStats.IncrementProcessed()
+	csvPath := createTempCSV(t, "synthetic-0000.csv", validSyntheticCSV)
 
-	dlMock := &mockDatalakeClient{
-		retStats: mockStats,
-		retErr:   nil,
-	}
-	app.datalake = dlMock
-
-	stats, err := app.IngestFile("path/to/file.csv", "synthetic", "9999")
+	stats, err := app.IngestFile(csvPath, "synthetic", "0000")
 	if err != nil {
-		t.Fatalf("IngestFile returned unexpected error: %v", err)
+		t.Fatalf("IngestFile failed: %v", err)
 	}
 
-	if !dlMock.ingestCalled {
-		t.Error("Expected IngestCSVFile to be called on datalake client")
+	if stats.TotalFiles != 1 {
+		t.Errorf("expected TotalFiles 1, got %d", stats.TotalFiles)
 	}
-
 	if stats.ProcessedFiles != 1 {
-		t.Errorf("Expected 1 processed file, got %d", stats.ProcessedFiles)
+		t.Errorf("expected ProcessedFiles 1, got %d", stats.ProcessedFiles)
+	}
+	if stats.FailedFiles != 0 {
+		t.Errorf("expected FailedFiles 0, got %d", stats.FailedFiles)
+	}
+	if len(stats.Failures) != 0 {
+		t.Errorf("expected 0 failures, got %v", stats.Failures)
+	}
+
+	// Decision U3: verify the file is read in-place and still exists at original path.
+	if _, statErr := os.Stat(csvPath); os.IsNotExist(statErr) {
+		t.Errorf("expected original file to remain on disk (Decision U3), but was deleted")
 	}
 }
 
-func TestApp_GetHistory_Success(t *testing.T) {
-	app := NewApp()
-	app.ctx = context.Background()
-	app.dbConn = true
+func TestApp_IngestFile_Error(t *testing.T) {
+	t.Run("non-existent file", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
 
-	expectedLogs := []model.SyncLog{
-		{
-			CollectionName:        "transactions_synthetic",
-			RecordCount:           5,
-			UpsertedCount:         5,
-			LegacyRecordsUploaded: 5,
+		stats, err := app.IngestFile("/tmp/does-not-exist-synthetic.csv", "synthetic", "0000")
+		if err == nil {
+			t.Fatal("expected error for non-existent file")
+		}
+		if stats.FailedFiles != 1 {
+			t.Errorf("expected FailedFiles 1, got %d", stats.FailedFiles)
+		}
+		if stats.ProcessedFiles != 0 {
+			t.Errorf("expected ProcessedFiles 0, got %d", stats.ProcessedFiles)
+		}
+	})
+
+	t.Run("pipeline save failure", func(t *testing.T) {
+		mock := &mockRepo{
+			saveErr: errors.New("mongo disk full"),
+		}
+		app := newTestApp(mock)
+
+		csvPath := createTempCSV(t, "synthetic-0000.csv", validSyntheticCSV)
+		stats, err := app.IngestFile(csvPath, "synthetic", "0000")
+		if err == nil {
+			t.Fatal("expected error on save failure")
+		}
+		if stats.FailedFiles != 1 {
+			t.Errorf("expected FailedFiles 1, got %d", stats.FailedFiles)
+		}
+	})
+}
+
+func TestApp_GetHistory_Parity(t *testing.T) {
+	mock := &mockRepo{
+		syncLogs: []domainmodel.SyncLog{
+			{
+				FileName:       "synthetic-0000.csv",
+				FileHash:       "abc123hash",
+				CollectionName: "transactions_synthetic",
+				RecordCount:    10,
+				UpsertedCount:  8,
+				MatchedCount:   2,
+				Status:         domainmodel.SyncStatusSuccess,
+				SyncedAt:       time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC),
+				DurationMs:     42,
+			},
 		},
 	}
-	app.repo = &mockRepo{
-		syncLogs: expectedLogs,
-	}
+	app := newTestApp(mock)
 
 	history, err := app.GetHistory()
 	if err != nil {
@@ -258,18 +346,46 @@ func TestApp_GetHistory_Success(t *testing.T) {
 	}
 
 	if len(history) != 1 {
-		t.Errorf("Expected 1 log, got %d", len(history))
+		t.Fatalf("expected 1 history entry, got %d", len(history))
 	}
-	if history[0].CollectionName != "transactions_synthetic" {
-		t.Errorf("Expected CollectionName transactions_synthetic, got %s", history[0].CollectionName)
+
+	entry := history[0]
+	if entry.FileName != "synthetic-0000.csv" {
+		t.Errorf("expected FileName 'synthetic-0000.csv', got '%s'", entry.FileName)
+	}
+	if entry.FileHash != "abc123hash" {
+		t.Errorf("expected FileHash 'abc123hash', got '%s'", entry.FileHash)
+	}
+	if entry.CollectionName != "transactions_synthetic" {
+		t.Errorf("expected CollectionName 'transactions_synthetic', got '%s'", entry.CollectionName)
+	}
+	if entry.RecordCount != 10 {
+		t.Errorf("expected RecordCount 10, got %d", entry.RecordCount)
+	}
+	if entry.UpsertedCount != 8 {
+		t.Errorf("expected UpsertedCount 8, got %d", entry.UpsertedCount)
+	}
+	if entry.MatchedCount != 2 {
+		t.Errorf("expected MatchedCount 2, got %d", entry.MatchedCount)
+	}
+	if entry.Status != "SUCCESS" {
+		t.Errorf("expected Status 'SUCCESS', got '%s'", entry.Status)
+	}
+	if entry.DurationMs != 42 {
+		t.Errorf("expected DurationMs 42, got %d", entry.DurationMs)
+	}
+	// Verify legacy dual-aliased fields (Divergence 10)
+	if entry.RecordsUploaded != 8 {
+		t.Errorf("expected RecordsUploaded 8, got %d", entry.RecordsUploaded)
+	}
+	if !entry.SyncTimestamp.Equal(entry.SyncedAt) {
+		t.Errorf("expected SyncTimestamp to match SyncedAt, got %v vs %v", entry.SyncTimestamp, entry.SyncedAt)
 	}
 }
 
 func TestApp_GetHistory_Failure(t *testing.T) {
-	app := NewApp()
-
 	t.Run("not initialized", func(t *testing.T) {
-		app.ctx = nil
+		app := NewApp()
 		_, err := app.GetHistory()
 		if err == nil {
 			t.Error("expected error when context is nil")
@@ -277,8 +393,10 @@ func TestApp_GetHistory_Failure(t *testing.T) {
 	})
 
 	t.Run("not connected", func(t *testing.T) {
-		app.ctx = context.Background()
+		mock := &mockRepo{}
+		app := newTestApp(mock)
 		app.dbConn = false
+
 		_, err := app.GetHistory()
 		if err == nil {
 			t.Error("expected error when database is not connected")
@@ -286,16 +404,121 @@ func TestApp_GetHistory_Failure(t *testing.T) {
 	})
 
 	t.Run("repo error", func(t *testing.T) {
-		app.ctx = context.Background()
-		app.dbConn = true
-		expectedErr := errors.New("repo error")
-		app.repo = &mockRepo{
-			err: expectedErr,
+		expectedErr := errors.New("read error from mongo")
+		mock := &mockRepo{
+			listErr: expectedErr,
 		}
+		app := newTestApp(mock)
 
 		_, err := app.GetHistory()
-		if err == nil || err.Error() != expectedErr.Error() {
-			t.Errorf("expected repo error, got: %v", err)
+		if err == nil || !errors.Is(err, expectedErr) {
+			t.Errorf("expected repo error %v, got %v", expectedErr, err)
 		}
 	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		app.ctx = ctx
+
+		_, err := app.GetHistory()
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var nilApp *App
+		_, err := nilApp.GetHistory()
+		if err == nil {
+			t.Error("expected error on nil receiver")
+		}
+	})
+}
+
+func TestApp_OnShutdown(t *testing.T) {
+	t.Run("closes initialized repository", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		if !app.dbConn {
+			t.Fatal("expected app to be connected initially")
+		}
+
+		app.OnShutdown(context.Background())
+
+		if !mock.closed {
+			t.Error("expected repository to be closed on shutdown")
+		}
+		if app.dbConn {
+			t.Error("expected dbConn to be false after shutdown")
+		}
+		if app.repo != nil {
+			t.Error("expected repo pointer to be cleared after shutdown")
+		}
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var nilApp *App
+		nilApp.OnShutdown(context.Background())
+	})
+
+	t.Run("idempotent when called repeatedly", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		app.OnShutdown(context.Background())
+		app.OnShutdown(context.Background())
+		if !mock.closed {
+			t.Error("expected mock repo to remain closed")
+		}
+	})
+}
+
+const validChaseCheckingCSV = "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n" +
+	"DEBIT,10/31/2026,Coffee Shop,-4.50,Debit Card,1000.00,\n"
+
+func TestApp_IngestFile_AutomaticSourceResolution(t *testing.T) {
+	mock := &mockRepo{}
+	app := newTestApp(mock)
+
+	csvPath := createTempCSV(t, "Chase1234_Activity_20261112.csv", validChaseCheckingCSV)
+
+	// Pass empty dataSource and accountID to exercise automatic ingest.ResolveSource fallback
+	stats, err := app.IngestFile(csvPath, "", "")
+	if err != nil {
+		t.Fatalf("IngestFile with auto source resolution failed: %v", err)
+	}
+
+	if stats.TotalFiles != 1 {
+		t.Errorf("expected TotalFiles 1, got %d", stats.TotalFiles)
+	}
+	if stats.ProcessedFiles != 1 {
+		t.Errorf("expected ProcessedFiles 1, got %d", stats.ProcessedFiles)
+	}
+	if stats.FailedFiles != 0 {
+		t.Errorf("expected FailedFiles 0, got %d", stats.FailedFiles)
+	}
+}
+
+func TestApp_ConcurrentAccess(t *testing.T) {
+	mock := &mockRepo{}
+	app := newTestApp(mock)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_ = app.RetryConnectDB()
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = app.GetHistory()
+		}()
+	}
+
+	wg.Wait()
 }

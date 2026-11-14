@@ -150,21 +150,29 @@ Frontend unit tests are set up inside `desktop/frontend/` using **Vitest** and *
   * Verifies canonical success and failed log records with badges (`badge-success`, `badge-failed`) and accurate stats (`upsertedCount`, `matchedCount`, `durationMs`).
   * Asserts error alert display when fetching history fails.
 
-### 3.2 Desktop History Service & DTO (Phase 4J)
-- **`desktop/history.go`**: Bridges `port.SyncLogReader` to the frontend via `historyService` and `historyEntry` DTO:
+### 3.2 Desktop History Service & DTO (Phase 4J & 4K)
+- **`desktop/model/sync_log.go` & `desktop/history.go`**: Bridges `port.SyncLogReader` to the frontend via `HistoryService` and `model.SyncLog` (aliased as `HistoryEntry`):
+  * Defined inside package `model` (`desktop/model/sync_log.go`), ensuring Wails generates `export namespace model { export class SyncLog }` for exact TypeScript contract continuity.
   * Omits database `id` / `_id` per ADR Divergence 10.
   * Provides dual legacy aliases (`syncTimestamp` mirroring `syncedAt`, `recordsUploaded` mirroring `upsertedCount`).
   * Defaults non-positive query limits to `DefaultHistoryLimit = 100`.
-  * Guarantees `toHistoryEntries(nil)` returns `[]historyEntry{}` (serializes as `[]` rather than `null`).
+  * Guarantees `ToHistoryEntries(nil)` returns `[]HistoryEntry{}` (serializes as `[]` rather than `null`).
   * Compile-time assertion: `var _ port.SyncLogReader = (*mongo.Repository)(nil)`.
+
+### 3.3 Desktop Hexagonal Driving Adapter Cutover (Phase 4K)
+- **`desktop/app.go`**: Fully decoupled from legacy packages (`datalake`, `datalake/model`, `storage`, `csv`):
+  * Rewired to hexagonal `internal/infra/storage/mongo.Repository`, `internal/app/pipeline.Pipeline`, `internal/app/ingest.Ingestor`, `HistoryService`, and `WailsProgressNotifier`.
+  * **In-Place File Processing (Decision U3)**: Uses `localfs.New(filepath.Dir(filePath))` and leaves `ArchiveKey` blank, ensuring user local files are processed directly without copying, renaming, or deleting them on disk.
+  * **Zero Frontend Alterations**: Regenerated Wails bindings via `wails generate module` without modifying any handwritten React frontend code.
+  * **Hermetic Unit Testability**: Injected `connectRepo` and `newStore` factory hooks allow unit tests in `desktop/app_test.go` to run with 100% mock isolation.
 
 ---
 
 ## 4. Verification & Linting Status
 
-- **Go Backend Coverage**: **90.8%** of statements in `desktop/`.
-- **Frontend Test Suite**: **19 tests passed** successfully.
-- **Linter Status**: All linter rules check out with **0 issues**.
+- **Go Backend Coverage**: **87.4%** of statements in `desktop/` (100% pass rate under `go test -race`).
+- **Frontend Test Suite**: **19 tests passed** successfully across `UploadForm`, `ProgressPanel`, and `HistoryPanel`.
+- **Linter Status**: All linter rules check out with **0 issues** via `make check-quality`.
 
 ---
 

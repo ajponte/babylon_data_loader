@@ -7,8 +7,8 @@ package main
 import (
 	"context"
 	"errors"
-	"time"
 
+	desktopmodel "babylon/dataloader/desktop/model"
 	"babylon/dataloader/internal/domain/model"
 	"babylon/dataloader/internal/domain/port"
 	"babylon/dataloader/internal/infra/storage/mongo"
@@ -20,23 +20,11 @@ var _ port.SyncLogReader = (*mongo.Repository)(nil)
 // DefaultHistoryLimit defines the default maximum number of historical sync entries returned.
 const DefaultHistoryLimit int64 = port.DefaultSyncLogLimit
 
-// HistoryEntry defines the legacy-compatible JSON Data Transfer Object for desktop UI history rendering.
+// HistoryEntry is a type alias for desktopmodel.SyncLog, defining the legacy-compatible
+// JSON Data Transfer Object for desktop UI history rendering.
 // It matches the contract expected by desktop/frontend/src/components/HistoryPanel.tsx,
 // omitting database IDs while populating both canonical and legacy dual-aliased fields (Divergence 10).
-type HistoryEntry struct {
-	FileName        string    `json:"fileName"`
-	FileHash        string    `json:"fileHash,omitempty"`
-	CollectionName  string    `json:"collectionName"`
-	RecordCount     int64     `json:"recordCount"`
-	UpsertedCount   int64     `json:"upsertedCount"`
-	MatchedCount    int64     `json:"matchedCount"`
-	Status          string    `json:"status"`
-	ErrorMessage    string    `json:"errorMessage,omitempty"`
-	SyncedAt        time.Time `json:"syncedAt"`
-	DurationMs      int64     `json:"durationMs"`
-	SyncTimestamp   time.Time `json:"syncTimestamp"`
-	RecordsUploaded int64     `json:"recordsUploaded"`
-}
+type HistoryEntry = desktopmodel.SyncLog
 
 // ToHistoryEntry maps a domain model.SyncLog to a legacy-compatible desktop HistoryEntry DTO.
 // Timestamps are strictly normalized to UTC.
