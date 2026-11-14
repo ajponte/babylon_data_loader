@@ -27,6 +27,10 @@ const (
 	collDataSync              = "dataSync"
 )
 
+// csvFirstDataLine represents the 1-based line number of the first data record
+// in a statement CSV with a 1-line header row.
+const csvFirstDataLine = int64(2)
+
 const itChaseCheckingCSV = `Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #
 DEBIT,10/15/2026,"GROCERY STORE",-85.50,DEBIT,2414.50,
 CREDIT,10/16/2026,"PAYROLL DIRECT DEP",1500.00,ACH,3914.50,
@@ -40,7 +44,7 @@ SYNTH-ROTH-101,ROTH IRA,FSKAX,FIDELITY TOTAL MARKET INDEX,45.250,$150.00,+$1.25,
 `
 
 const itSyntheticCSV = `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
-DEBIT,10/31/2026,Synthetic grocery,Shopping,-45.50,DEBIT,3500.00,
+DEBIT,10/31/2026,Synthetic grocery,Shopping,-45.50,DEBIT,3500.00,1001
 CREDIT,10/30/2026,Synthetic payroll,Income,1200.00,CREDIT,4700.00,
 `
 
@@ -55,6 +59,82 @@ func validateIntegrationTarget(rawURI, dbName string) error {
 		return errors.New("invalid or forbidden test database name")
 	}
 	return nil
+}
+
+// TestValidateIntegrationTarget verifies isolation target guards rejecting production/invalid targets.
+func TestValidateIntegrationTarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		uri     string
+		dbName  string
+		wantErr bool
+	}{
+		{
+			name:    "valid standalone URI and ephemeral DB",
+			uri:     "mongodb://localhost:27017",
+			dbName:  "babylon_it_test",
+			wantErr: false,
+		},
+		{
+			name:    "valid authenticated URI and ephemeral DB",
+			uri:     "mongodb://user:pass@localhost:27017",
+			dbName:  "test_db_123",
+			wantErr: false,
+		},
+		{
+			name:    "empty URI rejected",
+			uri:     "",
+			dbName:  "test_db",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace URI rejected",
+			uri:     "   ",
+			dbName:  "test_db",
+			wantErr: true,
+		},
+		{
+			name:    "mongodb+srv scheme rejected",
+			uri:     "mongodb+srv://cluster.example.com",
+			dbName:  "test_db",
+			wantErr: true,
+		},
+		{
+			name:    "empty DB name rejected",
+			uri:     "mongodb://localhost:27017",
+			dbName:  "",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace DB name rejected",
+			uri:     "mongodb://localhost:27017",
+			dbName:  "   ",
+			wantErr: true,
+		},
+		{
+			name:    "production datalake DB name rejected",
+			uri:     "mongodb://localhost:27017",
+			dbName:  "datalake",
+			wantErr: true,
+		},
+		{
+			name:    "case insensitive datalake DB name rejected",
+			uri:     "mongodb://localhost:27017",
+			dbName:  "DataLake",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateIntegrationTarget(tt.uri, tt.dbName)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateIntegrationTarget(%q, %q) error = %v, wantErr %v", tt.uri, tt.dbName, err, tt.wantErr)
+			}
+		})
+	}
 }
 
 type cliTestEnv struct {
@@ -114,6 +194,7 @@ func setupCLIIntegration(t *testing.T) cliTestEnv {
 	t.Setenv("PROCESSED_DIR", "processed")
 	t.Setenv("MOVE_PROCESSED_FILES", "true")
 	t.Setenv("MONGO_URI", uri)
+	t.Setenv("APP_ENVIRONMENT", "local")
 
 	d := deps{
 		connectRepo: func(ctx context.Context, u string) (repository, error) {
@@ -152,6 +233,21 @@ func assertCollectionCount(t *testing.T, ctx context.Context, coll *mongodrv.Col
 	}
 }
 
+func fetchLatestSyncLog(t *testing.T, ctx context.Context, coll *mongodrv.Collection) bson.M {
+	t.Helper()
+	cursor, err := coll.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "syncedAt", Value: -1}}).SetLimit(1))
+	if err != nil {
+		t.Fatalf("failed querying latest sync log: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	var logs []bson.M
+	if decodeErr := cursor.All(ctx, &logs); decodeErr != nil || len(logs) != 1 {
+		t.Fatalf("expected 1 latest sync log, got %d, err: %v", len(logs), decodeErr)
+	}
+	return logs[0]
+}
+
 // TestE2E_CLIIngest_RealMongo verifies end-to-end multi-statement ingestion via CLI run()
 // writing to live MongoDB collections (Chase, Fidelity, Synthetic) and audit logs.
 func TestE2E_CLIIngest_RealMongo(t *testing.T) {
@@ -172,14 +268,51 @@ func TestE2E_CLIIngest_RealMongo(t *testing.T) {
 	assertCollectionCount(t, ctx, env.rawDB.Collection(collTransactionsSynthetic), 2, collTransactionsSynthetic)
 	assertCollectionCount(t, ctx, env.rawDB.Collection(collDataSync), 3, collDataSync)
 
-	// Verify all dataSync audit logs are recorded with SUCCESS status
-	syncColl := env.rawDB.Collection(collDataSync)
-	successCount, err := syncColl.CountDocuments(ctx, bson.M{"status": "SUCCESS"})
-	if err != nil {
-		t.Fatalf("failed counting success sync logs: %v", err)
+	// Verify sample Fidelity position fields (REV-02)
+	var fDoc bson.M
+	fFilter := bson.D{{Key: "symbol", Value: "FSKAX"}}
+	if err := env.rawDB.Collection(collPositionsFidelity).FindOne(ctx, fFilter).Decode(&fDoc); err != nil {
+		t.Fatalf("failed querying fidelity document: %v", err)
 	}
-	if successCount != 3 {
-		t.Errorf("expected 3 SUCCESS sync logs, got %d", successCount)
+	if fDoc["accountNumber"] != "SYNTH-ROTH-101" {
+		t.Errorf("expected accountNumber SYNTH-ROTH-101, got %v", fDoc["accountNumber"])
+	}
+	if fDoc["dataSource"] != "fidelity" {
+		t.Errorf("expected dataSource fidelity, got %v", fDoc["dataSource"])
+	}
+	if fDoc["currentValue"] != 6787.50 {
+		t.Errorf("expected currentValue 6787.50, got %v", fDoc["currentValue"])
+	}
+
+	// Verify all dataSync audit logs and their attributes (REV-03)
+	syncColl := env.rawDB.Collection(collDataSync)
+	cursor, err := syncColl.Find(ctx, bson.M{})
+	if err != nil {
+		t.Fatalf("failed querying sync logs: %v", err)
+	}
+	defer cursor.Close(ctx)
+
+	var allSyncLogs []bson.M
+	if decodeErr := cursor.All(ctx, &allSyncLogs); decodeErr != nil {
+		t.Fatalf("failed decoding sync logs: %v", decodeErr)
+	}
+	if len(allSyncLogs) != 3 {
+		t.Fatalf("expected 3 sync logs, got %d", len(allSyncLogs))
+	}
+	for _, log := range allSyncLogs {
+		if log["status"] != "SUCCESS" {
+			t.Errorf("expected sync log status SUCCESS, got %v", log["status"])
+		}
+		hash, ok := log["fileHash"].(string)
+		if !ok || hash == "" {
+			t.Errorf("expected non-empty fileHash in sync log, got %v", log["fileHash"])
+		}
+		if count, ok := log["recordCount"].(int64); !ok || count != 2 {
+			t.Errorf("expected recordCount 2, got %v", log["recordCount"])
+		}
+		if dur, ok := log["durationMs"].(int64); !ok || dur < 0 {
+			t.Errorf("expected non-negative durationMs, got %v", log["durationMs"])
+		}
 	}
 
 	// Verify archival: unprocessed directory should have 0 CSV files; processed should have 3
@@ -220,7 +353,7 @@ func TestE2E_CLIIngest_RerunIsIdempotent(t *testing.T) {
 		"dataSource":      "chase",
 		"source": bson.M{
 			"fileName":   "legacy_chase.csv",
-			"rowNumber":  int64(2),
+			"rowNumber":  csvFirstDataLine,
 			"ingestedAt": postingDate,
 			"s3Uri":      legacyS3URI,
 		},
@@ -268,22 +401,11 @@ func TestE2E_CLIIngest_RerunIsIdempotent(t *testing.T) {
 	// Verify record count is strictly unchanged (idempotency)
 	assertCollectionCount(t, ctx, chaseColl, 2, collTransactionsChase)
 
-	// Verify dataSync records 2 sync logs, with the 2nd run recording 0 new upserts and 2 matched
+	// Verify dataSync records 2 sync logs, with the 2nd run recording 0 new upserts and 2 matched (REV-07)
 	syncColl := env.rawDB.Collection(collDataSync)
 	assertCollectionCount(t, ctx, syncColl, 2, collDataSync)
 
-	cursor, err := syncColl.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "syncedAt", Value: -1}}).SetLimit(1))
-	if err != nil {
-		t.Fatalf("failed querying latest sync log: %v", err)
-	}
-	defer cursor.Close(ctx)
-
-	var latestLogs []bson.M
-	if err := cursor.All(ctx, &latestLogs); err != nil || len(latestLogs) != 1 {
-		t.Fatalf("expected 1 latest sync log, got %d, err: %v", len(latestLogs), err)
-	}
-
-	latestLog := latestLogs[0]
+	latestLog := fetchLatestSyncLog(t, ctx, syncColl)
 	if latestLog["status"] != "SUCCESS" {
 		t.Errorf("expected latest sync log status SUCCESS, got %v", latestLog["status"])
 	}
@@ -296,7 +418,7 @@ func TestE2E_CLIIngest_RerunIsIdempotent(t *testing.T) {
 }
 
 // TestSyntheticCSV_RoutesToSyntheticDestination verifies synthetic statements route exclusively
-// to transactions_synthetic while preserving schema fields (category, details, balance).
+// to transactions_synthetic while preserving schema fields (category, details, balance, checkOrSlipNum).
 func TestSyntheticCSV_RoutesToSyntheticDestination(t *testing.T) {
 	env := setupCLIIntegration(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -316,7 +438,7 @@ func TestSyntheticCSV_RoutesToSyntheticDestination(t *testing.T) {
 	assertCollectionCount(t, ctx, chaseColl, 0, collTransactionsChase)
 	assertCollectionCount(t, ctx, fidelityColl, 0, collPositionsFidelity)
 
-	// Verify schema field preservation on an ingested synthetic document
+	// Verify schema field preservation on an ingested synthetic document (REV-05)
 	var doc bson.M
 	filter := bson.D{{Key: "description", Value: "Synthetic grocery"}}
 	if err := synthColl.FindOne(ctx, filter).Decode(&doc); err != nil {
@@ -331,6 +453,9 @@ func TestSyntheticCSV_RoutesToSyntheticDestination(t *testing.T) {
 	}
 	if balance, ok := doc["balance"].(float64); !ok || balance != 3500.00 {
 		t.Errorf("expected balance 3500.00, got %v", doc["balance"])
+	}
+	if doc["checkOrSlipNum"] != "1001" {
+		t.Errorf("expected checkOrSlipNum '1001', got %v", doc["checkOrSlipNum"])
 	}
 	if doc["dataSource"] != "synthetic" {
 		t.Errorf("expected dataSource 'synthetic', got %v", doc["dataSource"])
