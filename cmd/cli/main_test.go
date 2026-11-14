@@ -615,6 +615,26 @@ func TestRun_GenerateSyntheticData_InvalidRows(t *testing.T) {
 	}
 }
 
+func TestRun_GenerateSyntheticData_EmptyDirDefaultsToDot(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	d := deps{
+		logger: testLogger(),
+		now:    fixedClock,
+	}
+
+	args := []string{"generate-synthetic-data", "--rows", "2", "--dir", "  "}
+	if err := run(context.Background(), args, d); err != nil {
+		t.Fatalf("expected successful run with whitespace dir flag, got: %v", err)
+	}
+
+	expectedFile := filepath.Join(tempDir, defaultSyntheticFileName)
+	if _, err := os.Stat(expectedFile); err != nil {
+		t.Fatalf("expected generated file in working directory (%s), got: %v", expectedFile, err)
+	}
+}
+
 func TestRun_PartialFailureExitZero(t *testing.T) {
 	unprocessed, _ := setupIngestDirs(t)
 

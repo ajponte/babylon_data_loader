@@ -31,12 +31,13 @@ import (
 )
 
 const (
-	minArgs              = 2
-	statsHeaderMarker    = "--- Ingestion Stats (JSON) ---"
-	statsFooterMarker    = "------------------------------"
-	syntheticAccountID   = "0000"
-	syntheticFilePattern = "synthetic-%d.csv"
-	closeTimeout         = 5 * time.Second
+	minArgs                  = 2
+	statsHeaderMarker        = "--- Ingestion Stats (JSON) ---"
+	statsFooterMarker        = "------------------------------"
+	syntheticAccountID       = "0000"
+	syntheticFilePattern     = "synthetic-%d.csv"
+	defaultSyntheticFileName = "test-synthetic-data.csv"
+	closeTimeout             = 5 * time.Second
 )
 
 var (
@@ -295,9 +296,13 @@ func parseSyntheticFlags(args []string, cfg *config.Config) (syntheticOptions, e
 			synthetic.MaxSyntheticRowCount,
 		)
 	}
+	resolvedDir := strings.TrimSpace(*dir)
+	if resolvedDir == "" {
+		resolvedDir = "."
+	}
 	return syntheticOptions{
 		rows:           *rows,
-		dir:            *dir,
+		dir:            resolvedDir,
 		persistToMongo: *persistToMongo,
 	}, nil
 }
@@ -314,32 +319,38 @@ func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Co
 	}
 
 	d.logger.InfoContext(ctx, "Generating synthetic data")
-	if dirErr := os.MkdirAll(opts.dir, 0o750); dirErr != nil {
-		return fmt.Errorf("failed to create directory '%s': %w", opts.dir, dirErr)
+	if writeErr := writeSyntheticCSVFile(opts.dir, opts.rows); writeErr != nil {
+		return writeErr
 	}
-	filePath := filepath.Join(opts.dir, "test-synthetic-data.csv")
+	d.logger.InfoContext(ctx, "Synthetic data generated successfully")
+	return nil
+}
+
+// writeSyntheticCSVFile creates the target directory, opens the CSV file, streams synthetic rows,
+// and guarantees partial files are purged if an error occurs.
+func writeSyntheticCSVFile(dir string, rowCount int) (err error) {
+	if dirErr := os.MkdirAll(dir, 0o750); dirErr != nil {
+		return fmt.Errorf("failed to create directory '%s': %w", dir, dirErr)
+	}
+
+	filePath := filepath.Join(dir, defaultSyntheticFileName)
 	file, fileErr := os.Create(filePath)
 	if fileErr != nil {
 		return fmt.Errorf("failed to create file '%s': %w", filePath, fileErr)
 	}
 
-	success := false
 	defer func() {
-		_ = file.Close()
-		if !success {
+		if closeErr := file.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to close file '%s': %w", filePath, closeErr)
+		}
+		if err != nil {
 			_ = os.Remove(filePath)
 		}
 	}()
 
-	if genErr := synthetic.WriteCSV(file, synthetic.GeneratorOptions{RowCount: opts.rows}); genErr != nil {
+	if genErr := synthetic.WriteCSV(file, synthetic.GeneratorOptions{RowCount: rowCount}); genErr != nil {
 		return fmt.Errorf("failed to generate synthetic data: %w", genErr)
 	}
-	if closeErr := file.Close(); closeErr != nil {
-		return fmt.Errorf("failed to close file '%s': %w", filePath, closeErr)
-	}
-	success = true
-
-	d.logger.InfoContext(ctx, "Synthetic data generated successfully")
 	return nil
 }
 

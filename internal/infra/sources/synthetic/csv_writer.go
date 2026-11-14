@@ -32,20 +32,22 @@ func legacyCSVHeader() []string {
 	}
 }
 
-// formatSyntheticRecord formats a single synthetic transaction row into the provided reusable record buffer.
+// formatSyntheticRecord formats a single synthetic transaction row into the provided reusable record buffer,
+// returning the updated running balance.
 func formatSyntheticRecord(
 	rng *rand.Rand,
 	baseDate time.Time,
 	index int,
-	currentBalance *float64,
+	balance float64,
 	record []string,
-) {
+) float64 {
 	amt := math.Round((rng.Float64()*maxAmount-maxAmount/2.0)*centsFactor) / centsFactor
+	// Zero amount violates domain invariant model.ErrInvalidAmount; default to $10.00 debit.
 	if amt == 0 {
 		amt = 10.00
 	}
-	*currentBalance += amt
-	balanceCopy := math.Round(*currentBalance*centsFactor) / centsFactor
+	balance += amt
+	balanceCopy := math.Round(balance*centsFactor) / centsFactor
 
 	txType := typeDebit
 	details := typeDebit
@@ -66,6 +68,8 @@ func formatSyntheticRecord(
 	record[5] = txType
 	record[6] = fmt.Sprintf("%.2f", balanceCopy)
 	record[7] = checkOrSlipNum
+
+	return balance
 }
 
 // WriteCSV generates deterministic synthetic transaction rows and streams them as CSV.
@@ -102,12 +106,13 @@ func WriteCSV(w io.Writer, opts GeneratorOptions) error {
 		return fmt.Errorf("failed to write CSV header: %w", err)
 	}
 
+	// Fixed anchor date guarantees byte-for-byte deterministic posting dates across test runs.
 	baseDate := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)
 	currentBalance := baseBalance
 	record := make([]string, csvColumnCount)
 
 	for i := range opts.RowCount {
-		formatSyntheticRecord(rng, baseDate, i, &currentBalance, record)
+		currentBalance = formatSyntheticRecord(rng, baseDate, i, currentBalance, record)
 		if err := csvWriter.Write(record); err != nil {
 			return fmt.Errorf("failed to write CSV record %d: %w", i+1, err)
 		}
