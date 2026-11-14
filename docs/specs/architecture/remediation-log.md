@@ -376,6 +376,42 @@ Phase 5C removes the legacy `/tmp`-staging fallback handler and obsolete structu
 4. **Statement Coverage Gate**: `cmd/lambda/handler.go` achieves **94.5%** statement coverage under `go test -coverprofile=coverage.out ./cmd/lambda`, exceeding the >= 85% project definition of done.
 5. **Quality & Formatting**: Zero linter or formatting issues under `make check-quality`, and 100% pass rate across the full test suite (`make test-ci`, `go test -race ./...`, `make test-lambda`).
 
+---
+
+## 18. Phase 5D Synthetic CSV Writer Relocation & Legacy Synthetic Package Retirement Implementation Log
+
+Phase 5D relocates the standalone synthetic CSV generator from the legacy root package `synthetic/` into `internal/infra/sources/synthetic/csv_writer.go`, decommissions legacy `synthetic/data.go` and `synthetic/generate.go`, retargets the CLI entrypoint (`cmd/cli`), and remediates all findings from the multi-agent review ([Issue #98](https://github.com/ajponte/babylon_data_loader/issues/98), [PR #108](https://github.com/ajponte/babylon_data_loader/pull/108)).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `internal/infra/sources/synthetic/csv_writer.go` | Secondary Ingestion Source | Implements streaming `WriteCSV(w io.Writer, opts GeneratorOptions) error`, `ErrNilWriter`, `ErrExcessiveRowCount`, decomposed `formatSyntheticRecord` helper, and single reusable `recordBuf` slice allocation. | `TestWriteCSV_ValidationAndErrors`, `TestWriteCSV_DeterministicWithSeed`, `TestWriteCSV_MaxRowCountBoundary` |
+| `internal/infra/sources/synthetic/csv_writer_test.go` | Unit & Round-Trip Tests | Comprehensive test suite verifying 8-column header, deterministic PCG seed behavior, boundary limits (`MaxSyntheticRowCount = 100_000`), flush error handling, and end-to-end round-trip parsing with `CSVExtractor`. | `go test -v -race ./internal/infra/sources/synthetic/...` |
+| `cmd/cli/main.go` | Driving CLI Adapter | Switched `runGenerateSyntheticData` to call `synthetic.WriteCSV` for local file generation and `synthetic.NewExtractor` for direct MongoDB ingestion, eliminating `legacySynthetic` import. Added pre-validation and deferred partial file cleanup. | `TestRunGenerate_SyntheticCSV`, `TestRunGenerate_ValidationAndCleanup` |
+| `cmd/cli/main_test.go` | CLI Test Suite | Added unit tests verifying CLI pre-validation (rejecting invalid row counts without creating files) and deferred disk cleanup (deleting orphaned partial files on generation failure). | `go test -v ./cmd/cli/...` |
+| `synthetic/data.go` (Deleted) | Legacy Synthetic | Safely deleted legacy data models and PRNG functions (-139 lines). | `go list ./...` |
+| `synthetic/generate.go` (Deleted) | Legacy Synthetic | Safely deleted legacy file generation and MongoDB direct persistence logic (-71 lines). Legacy root package `synthetic/` completely eliminated. | `test ! -d synthetic` |
+
+### Multi-Agent Review Remediations (FIND-5D-01 Through FIND-5D-08)
+During the review pass synthesized in `agent-docs/reviews/feat/phase-5d-synthetic-csv-writer/REVIEW-FINDINGS.md`, 8 prioritized findings were remediated:
+
+| ID | Severity | Category | Target File(s) | Architectural Impact & Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **FIND-5D-01** | `Medium` | Resource Management | `cmd/cli/main.go` | Unchecked file closure error in `defer` left orphaned/truncated files on disk upon write failures. Added error tracking on `file.Close()` and deferred cleanup hook invoking `_ = os.Remove(filePath)` if generation fails. |
+| **FIND-5D-02** | `Medium` | Test Fault Injection | `internal/infra/sources/synthetic/csv_writer_test.go` | `failAfterN: 0` failed immediately on header buffering without exercising row generation loop error handling. Configured `failAfterN: 1` with `RowCount: 200` to verify error propagation midway through row writing. |
+| **FIND-5D-03** | `Low` | CLI Usability / Fail-Fast | `cmd/cli/main.go` | Invalid row counts (`< 0` or `> MaxSyntheticRowCount`) created directories and files before failing. Added pre-validation in `runGenerateSyntheticData` failing fast before disk operations. |
+| **FIND-5D-04** | `Low` | API Design | `internal/infra/sources/synthetic/csv_writer.go` | Excessive row count error lacked an exported sentinel error. Exported `ErrExcessiveRowCount` and wrapped it via `%w`, enabling callers to assert via `errors.Is`. |
+| **FIND-5D-05** | `Low` | Cognitive Complexity | `internal/infra/sources/synthetic/csv_writer.go` | 38-line inner generation loop mixed PRNG arithmetic, rounding, date formatting, and slice mutation. Decomposed record construction into private helper `formatSyntheticRecord`. |
+| **FIND-5D-06** | `Low` | Performance / Allocation | `internal/infra/sources/synthetic/csv_writer.go` | Inside the loop, `record := []string{...}` allocated up to 100,000 heap slices. Replaced with single reusable `record := make([]string, csvColumnCount)` pre-allocated outside the loop and mutated in-place. |
+| **FIND-5D-07** | `Low` | Test Depth | `internal/infra/sources/synthetic/csv_writer_test.go` | Upper boundary `RowCount == MaxSyntheticRowCount` was unverified, and round-trip tests used static parameters. Added test verifying exact boundary (100,000 rows) and parameterized round-trip tests across multiple seeds and row counts. |
+| **FIND-5D-08** | `Low` | Documentation / API Polish | `internal/infra/sources/synthetic/csv_writer.go` | Added inline comments explaining `csv.Writer` 4KB internal buffer semantics on header write error branches. |
+
+### Phase 5D Architectural Invariants & Verification Proofs
+1. **AC-5D-1 (Zero Legacy Synthetic References)**: Verified that `grep -rlE --include='*.go' '"babylon/dataloader/synthetic"' . desktop` returns zero references across the entire repository. Legacy `synthetic/` directory is completely removed.
+2. **AC-5D-2 (Sources Isolation Rules)**: Verified that `internal/infra/sources/synthetic/csv_writer.go` imports strictly from standard library packages (`encoding/csv`, `errors`, `fmt`, `io`, `math`, `math/rand/v2`, `strconv`, `time`), adhering to `sources-isolation` depguard rules.
+3. **AC-5D-3 (Statement Coverage & Race Safety)**: `internal/infra/sources/synthetic/` achieves **92.7%** statement coverage across all source files (`csv_extractor.go`, `csv_writer.go`, `extractor.go`) with clean race detection under `go test -v -race ./internal/infra/sources/synthetic/...`.
+4. **AC-5D-4 (Disk Hygiene & CLI Safety)**: `cmd/cli` pre-validates bounds before touching the filesystem and guarantees partial file cleanup via deferred removal on any write or flush error.
+5. **Quality & Pass Rate**: 100% pass rate across the full test suite (`make test-ci`, `go test -race ./...`), 0 linter issues under `make check-quality`, and cross-compilation verified via `make build-cross`.
+
 
 
 

@@ -59,7 +59,7 @@ func NewCSVExtractor() *CSVExtractor {
 
 // SourceType returns the unique source identifier for synthetic statements.
 func (e *CSVExtractor) SourceType() string {
-	return "synthetic"
+	return sourceSynthetic
 }
 
 // Extract parses raw CSV synthetic transaction data from r and returns an IngestionBatch.
