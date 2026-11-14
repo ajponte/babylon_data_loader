@@ -1,6 +1,10 @@
 # Wails Integration Plan
 
 > [!NOTE]
+> **Architecture Update (Phase 5E)**:
+> In **Phase 5E** ([Issue #99](https://github.com/ajponte/babylon_data_loader/issues/99), [PR #109](https://github.com/ajponte/babylon_data_loader/pull/109)), legacy progress reporting components (`WailsProgressReporter` and `desktop/progress.go`) were permanently decommissioned in favor of the hexagonal `WailsProgressNotifier` (`desktop/notifier.go`). In addition, application lifecycle management is hardened via `OnShutdown: app.OnShutdown` wired in `desktop/main.go`. For canonical desktop architecture, refer to [`docs/specs/hexagonal-application-pipeline.md`](hexagonal-application-pipeline.md).
+
+> [!NOTE]
 > **The Lead**: This integration plan defines the implementation details for wrapping the `babylon/dataloader` Go ingest pipeline inside a Wails v2 desktop application located in the `desktop/` directory. The application enables users to select files through native file dialogs and explicitly define their metadata (data source and account ID), bypassing automatic filename parsing. The integration is structured into five sequential, test-verified phases, covering: core Go pipeline refactoring (unprocessed directory copying, streaming row-level progress, and deduplication stats), desktop app scaffold with persistent Mongo connection, React+TS frontend upload UI with progress metrics, ingest history panel with Vitest testing, and CI/CD/macOS build packaging.
 
 - **Status**: Approved (v1.0)

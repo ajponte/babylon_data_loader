@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"testing"
 	"time"
-
-	"babylon/dataloader/datalake"
 )
 
 func TestWailsLogHandler_Enabled(t *testing.T) {
@@ -233,73 +231,4 @@ func TestWailsLogHandler_WithAttrs_And_WithGroup(t *testing.T) {
 	if len(h3.groups) != 1 || h3.groups[0] != "testgroup" {
 		t.Errorf("expected groups to contain 'testgroup', got %v", h3.groups)
 	}
-}
-
-func TestWailsProgressReporter_Report(t *testing.T) {
-	origEmitEvent := emitEvent
-	defer func() { emitEvent = origEmitEvent }()
-
-	var emittedEventName string
-	var emittedPayload interface{}
-
-	emitEvent = func(ctx context.Context, name string, optionalData ...interface{}) {
-		emittedEventName = name
-		if len(optionalData) > 0 {
-			emittedPayload = optionalData[0]
-		}
-	}
-
-	// Test with nil context
-	t.Run("nil context should not emit", func(t *testing.T) {
-		reporter := NewWailsProgressReporter(nil)
-		emittedEventName = ""
-		emittedPayload = nil
-
-		event := datalake.ProgressEvent{
-			Phase:         "parsing",
-			CurrentRecord: 10,
-			TotalRecords:  100,
-		}
-
-		reporter.Report(event)
-
-		if emittedEventName != "" {
-			t.Errorf("expected no event emission for nil context, got %s", emittedEventName)
-		}
-	})
-
-	// Test with non-nil context
-	t.Run("valid context should emit ingest:progress event", func(t *testing.T) {
-		ctx := context.Background()
-		reporter := NewWailsProgressReporter(ctx)
-		emittedEventName = ""
-		emittedPayload = nil
-
-		event := datalake.ProgressEvent{
-			Phase:         "importing",
-			CurrentRecord: 42,
-			TotalRecords:  100,
-		}
-
-		reporter.Report(event)
-
-		if emittedEventName != "ingest:progress" {
-			t.Errorf("expected event name 'ingest:progress', got %q", emittedEventName)
-		}
-
-		gotEvent, ok := emittedPayload.(datalake.ProgressEvent)
-		if !ok {
-			t.Fatalf("expected datalake.ProgressEvent payload, got %T", emittedPayload)
-		}
-
-		if gotEvent.Phase != "importing" {
-			t.Errorf("expected Phase 'importing', got %q", gotEvent.Phase)
-		}
-		if gotEvent.CurrentRecord != 42 {
-			t.Errorf("expected CurrentRecord 42, got %d", gotEvent.CurrentRecord)
-		}
-		if gotEvent.TotalRecords != 100 {
-			t.Errorf("expected TotalRecords 100, got %d", gotEvent.TotalRecords)
-		}
-	})
 }

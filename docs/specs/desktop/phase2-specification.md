@@ -1,7 +1,13 @@
 # Phase 2 Specification: Wails Desktop App Setup & Bindings
 
-> [!NOTE]
-> **The Lead**: This specification details the Phase 2 implementation on the `wails-phase-two` branch. It covers scaffolding the Wails desktop application framework under the `desktop/` directory, defining persistent MongoDB lifecycle management, configuring Go method bindings for file ingestion (`IngestFile`) and connection retry (`RetryConnectDB`), and setting up safe, PII-compliant progress and log bridges.
+> [!WARNING]
+> **Historical Design Specification — Superseded Components**:
+> The legacy desktop progress bridge described in this document (`desktop/progress.go` and `WailsProgressReporter`) has been permanently retired in **Phase 5E** ([Issue #99](https://github.com/ajponte/babylon_data_loader/issues/99), [PR #109](https://github.com/ajponte/babylon_data_loader/pull/109)).
+> 
+> Progress reporting is now handled by `desktop/notifier.go` (`WailsProgressNotifier`), which adapts the domain `port.ProgressNotifier` interface into Wails event broadcasts. In addition, application lifecycle management has been hardened with `OnShutdown: app.OnShutdown` wired in `desktop/main.go` to ensure graceful repository connection pool teardown.
+> 
+> For the authoritative current desktop and application pipeline specifications, refer to:
+> ➡️ **[`docs/specs/hexagonal-application-pipeline.md`](../hexagonal-application-pipeline.md)**
 
 ---
 

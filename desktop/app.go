@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	bcontext "babylon/dataloader/appcontext"
 	"babylon/dataloader/config"
@@ -25,8 +26,13 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// dbStatusEvent is the Wails runtime event topic for MongoDB connection status.
-const dbStatusEvent = "db:status"
+const (
+	// dbStatusEvent is the Wails runtime event topic for MongoDB connection status.
+	dbStatusEvent = "db:status"
+
+	// defaultShutdownTimeout is the maximum duration allocated for graceful repository connection teardown.
+	defaultShutdownTimeout = 5 * time.Second
+)
 
 // repository defines the composite persistence and sync log read contract required by desktop App.
 type repository interface {
@@ -191,10 +197,22 @@ func (a *App) OnShutdown(ctx context.Context) {
 	a.pipeline = nil
 	a.historyService = nil
 	a.dbConn = false
+	a.ctx = nil
 	a.mu.Unlock()
 
-	if repo != nil {
-		_ = repo.Close(ctx)
+	if repo == nil {
+		return
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultShutdownTimeout)
+	defer cancel()
+
+	if err := repo.Close(shutdownCtx); err != nil {
+		slog.ErrorContext(shutdownCtx, "Failed to cleanly close repository on shutdown", "error", err)
 	}
 }
 

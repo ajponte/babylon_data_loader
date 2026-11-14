@@ -15,13 +15,16 @@ import (
 )
 
 type mockRepo struct {
-	syncLogs []domainmodel.SyncLog
-	retLog   *domainmodel.SyncLog
-	saveErr  error
-	listErr  error
-	logErr   error
-	closeErr error
-	closed   bool
+	syncLogs   []domainmodel.SyncLog
+	retLog     *domainmodel.SyncLog
+	saveErr    error
+	listErr    error
+	logErr     error
+	closeErr   error
+	closed     bool
+	closeCalls int
+	closeCtx   context.Context
+	mu         sync.Mutex
 }
 
 var _ repository = (*mockRepo)(nil)
@@ -61,8 +64,24 @@ func (m *mockRepo) ListSyncLogs(ctx context.Context, limit int64) ([]domainmodel
 	return m.syncLogs, nil
 }
 
+type recordedContext struct {
+	context.Context
+	errDuringClose error
+}
+
+func (r recordedContext) Err() error {
+	return r.errDuringClose
+}
+
 func (m *mockRepo) Close(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.closed = true
+	m.closeCalls++
+	m.closeCtx = recordedContext{
+		Context:        ctx,
+		errDuringClose: ctx.Err(),
+	}
 	return m.closeErr
 }
 
@@ -451,17 +470,71 @@ func TestApp_OnShutdown(t *testing.T) {
 		if !mock.closed {
 			t.Error("expected repository to be closed on shutdown")
 		}
+		if mock.closeCalls != 1 {
+			t.Errorf("expected 1 close call, got %d", mock.closeCalls)
+		}
+		if mock.closeCtx == nil {
+			t.Fatal("expected closeCtx to be recorded")
+		}
+		deadline, ok := mock.closeCtx.Deadline()
+		if !ok {
+			t.Error("expected closeCtx to have an active deadline")
+		} else if time.Until(deadline) <= 0 || time.Until(deadline) > defaultShutdownTimeout {
+			t.Errorf("unexpected close deadline: %v", time.Until(deadline))
+		}
 		if app.dbConn {
 			t.Error("expected dbConn to be false after shutdown")
 		}
 		if app.repo != nil {
 			t.Error("expected repo pointer to be cleared after shutdown")
 		}
+		if app.pipeline != nil {
+			t.Error("expected pipeline to be cleared after shutdown")
+		}
+		if app.historyService != nil {
+			t.Error("expected historyService to be cleared after shutdown")
+		}
+		if app.ctx != nil {
+			t.Error("expected ctx to be cleared after shutdown")
+		}
 	})
 
 	t.Run("nil receiver is safe", func(t *testing.T) {
 		var nilApp *App
 		nilApp.OnShutdown(context.Background())
+	})
+
+	t.Run("nil repository is safe", func(t *testing.T) {
+		app := newTestApp(nil)
+		app.OnShutdown(context.Background())
+		if app.repo != nil {
+			t.Error("expected repo to remain nil")
+		}
+	})
+
+	t.Run("nil context is safe", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		var nilCtx context.Context
+		app.OnShutdown(nilCtx)
+		if !mock.closed {
+			t.Error("expected repository to be closed when ctx is nil")
+		}
+		if app.repo != nil {
+			t.Error("expected repo pointer to be cleared after shutdown")
+		}
+	})
+
+	t.Run("handles close error without panic", func(t *testing.T) {
+		mock := &mockRepo{closeErr: errors.New("simulated close failure")}
+		app := newTestApp(mock)
+		app.OnShutdown(context.Background())
+		if !mock.closed {
+			t.Error("expected Close to be called despite error")
+		}
+		if app.repo != nil {
+			t.Error("expected repo pointer to be cleared after shutdown")
+		}
 	})
 
 	t.Run("idempotent when called repeatedly", func(t *testing.T) {
@@ -471,6 +544,75 @@ func TestApp_OnShutdown(t *testing.T) {
 		app.OnShutdown(context.Background())
 		if !mock.closed {
 			t.Error("expected mock repo to remain closed")
+		}
+		if mock.closeCalls != 1 {
+			t.Errorf("expected exactly 1 Close call across repeated shutdowns, got %d", mock.closeCalls)
+		}
+	})
+
+	t.Run("pre-canceled context still permits graceful close", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel() // Pre-cancel
+
+		app.OnShutdown(canceledCtx)
+
+		if !mock.closed {
+			t.Error("expected repository to be closed even with pre-canceled context")
+		}
+		if mock.closeCtx == nil {
+			t.Fatal("expected closeCtx to be recorded")
+		}
+		if mock.closeCtx.Err() != nil {
+			t.Errorf("expected detached context without cancellation, got %v", mock.closeCtx.Err())
+		}
+		deadline, ok := mock.closeCtx.Deadline()
+		if !ok {
+			t.Error("expected detached context to retain an active timeout deadline")
+		} else if time.Until(deadline) <= 0 || time.Until(deadline) > defaultShutdownTimeout {
+			t.Errorf("unexpected close deadline on detached context: %v", time.Until(deadline))
+		}
+	})
+
+	t.Run("concurrent calls are race-free", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				app.OnShutdown(context.Background())
+			}()
+		}
+		wg.Wait()
+		mock.mu.Lock()
+		calls := mock.closeCalls
+		mock.mu.Unlock()
+		if calls != 1 {
+			t.Errorf("expected exactly 1 Close call, got %d", calls)
+		}
+	})
+
+	t.Run("post-shutdown operations fail predictably", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		app.OnShutdown(context.Background())
+
+		_, ingestErr := app.IngestFile("some_file.csv", "synthetic", "0000")
+		if ingestErr == nil {
+			t.Error("expected IngestFile to fail after shutdown")
+		}
+
+		_, historyErr := app.GetHistory()
+		if historyErr == nil {
+			t.Error("expected GetHistory to fail after shutdown")
+		}
+
+		connected := app.RetryConnectDB()
+		if connected {
+			t.Error("expected RetryConnectDB to return false after shutdown")
 		}
 	})
 }
