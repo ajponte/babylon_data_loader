@@ -1,13 +1,13 @@
-export namespace datalake {
+export namespace ingest {
 	
-	export class Stats {
+	export class RunStats {
 	    totalFiles: number;
 	    processedFiles: number;
 	    failedFiles: number;
 	    failures: Record<string, string>;
 	
 	    static createFrom(source: any = {}) {
-	        return new Stats(source);
+	        return new RunStats(source);
 	    }
 	
 	    constructor(source: any = {}) {
@@ -24,21 +24,20 @@ export namespace datalake {
 export namespace model {
 	
 	export class SyncLog {
-	    id?: string;
-	    fileName?: string;
+	    fileName: string;
 	    fileHash?: string;
 	    collectionName: string;
-	    recordCount?: number;
-	    upsertedCount?: number;
-	    matchedCount?: number;
-	    status?: string;
+	    recordCount: number;
+	    upsertedCount: number;
+	    matchedCount: number;
+	    status: string;
 	    errorMessage?: string;
 	    // Go type: time
-	    syncedAt?: any;
-	    durationMs?: number;
+	    syncedAt: any;
+	    durationMs: number;
 	    // Go type: time
-	    syncTimestamp?: any;
-	    recordsUploaded?: number;
+	    syncTimestamp: any;
+	    recordsUploaded: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SyncLog(source);
@@ -46,7 +45,6 @@ export namespace model {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
 	        this.fileName = source["fileName"];
 	        this.fileHash = source["fileHash"];
 	        this.collectionName = source["collectionName"];
