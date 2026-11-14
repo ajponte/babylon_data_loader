@@ -412,6 +412,37 @@ During the review pass synthesized in `agent-docs/reviews/feat/phase-5d-syntheti
 4. **AC-5D-4 (Disk Hygiene & CLI Safety)**: `cmd/cli` pre-validates bounds before touching the filesystem and guarantees partial file cleanup via deferred removal on any write or flush error.
 5. **Quality & Pass Rate**: 100% pass rate across the full test suite (`make test-ci`, `go test -race ./...`), 0 linter issues under `make check-quality`, and cross-compilation verified via `make build-cross`.
 
+---
+
+## 19. Phase 5E Desktop Legacy Reporter Removal & OnShutdown Repository Close Implementation Log
+
+Phase 5E eliminates the final remaining dependency of the `desktop/` application module on legacy packages (`datalake`), permanently decommissions `desktop/progress.go`, and hardens desktop lifecycle management with a thread-safe, timeout-bounded `OnShutdown` hook wired into Wails ([Issue #99](https://github.com/ajponte/babylon_data_loader/issues/99), [PR #109](https://github.com/ajponte/babylon_data_loader/pull/109)).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `desktop/progress.go` (Deleted) | Legacy Progress Bridge | Safely deleted legacy `WailsProgressReporter` (-24 lines). Progress telemetry routes exclusively through `desktop.WailsProgressNotifier` satisfying domain `port.ProgressNotifier`. | `go test ./desktop/...` |
+| `desktop/bridges_test.go` | Test Suite Cleanup | Removed `TestWailsProgressReporter_Report` (-71 lines) and eliminated `"babylon/dataloader/datalake"` import. Zero references to `datalake` remain in `desktop/`. | `go test ./desktop/...` |
+| `desktop/app.go` (`OnShutdown`) | Lifecycle & Teardown | Hardened `OnShutdown(ctx context.Context)`: detached state under `a.mu.Lock()` (`a.repo = nil`, `a.pipeline = nil`, `a.historyService = nil`, `a.dbConn = false`, `a.ctx = nil`), applied `defaultShutdownTimeout = 5 * time.Second` over `context.WithoutCancel(ctx)`, and cleanly closed repository without panicking. | `TestApp_OnShutdown` (9 table/subtests) |
+| `desktop/main.go` | Wails Application Options | Wired `OnShutdown: app.OnShutdown` into `options.App` configuration passed to `wails.Run`, ensuring automatic graceful connection pool release on window destruction or app quit. | `make build` |
+| `desktop/app_test.go` | Lifecycle Test Suite | Expanded `TestApp_OnShutdown` to 9 comprehensive subtests verifying nil receiver safety, nil repo safety, defensive nil context handling, idempotent sequential calls, pre-canceled context detachment, 10-goroutine concurrent execution, and post-shutdown fail-fast semantics. | `go test -v -race ./desktop/...` |
+
+### Multi-Agent Review Remediations (FIND-5E-01 Through FIND-5E-05)
+During the multi-agent review pass synthesized in `agent-docs/reviews/feat/phase-5e-desktop-legacy-removal-and-shutdown/REVIEW-FINDINGS.md`, 5 prioritized findings were remediated:
+
+| ID | Severity | Category | Target File(s) | Architectural Impact & Resolution |
+| :---: | :---: | :--- | :--- | :--- |
+| **FIND-5E-01** | `Medium` | Resource Teardown | `desktop/app.go`<br>`desktop/app_test.go` | Deriving `shutdownCtx` directly from incoming `ctx` caused immediate cancellation propagation if Wails canceled `ctx`, aborting MongoDB driver network socket teardown. Remediation: Wrapped `ctx` with `context.WithoutCancel(ctx)` before applying `defaultShutdownTimeout = 5 * time.Second`. Added test confirming pre-canceled contexts complete graceful close. |
+| **FIND-5E-02** | `Medium` | State Consistency | `desktop/app.go`<br>`desktop/app_test.go` | `a.ctx` remained non-nil after shutdown, permitting late frontend IPC invocations to bypass pre-flight initialization checks. Remediation: Cleared `a.ctx = nil` under `a.mu.Lock()` during teardown, and added subtests asserting post-shutdown operations (`IngestFile`, `GetHistory`, `RetryConnectDB`) fail predictably. |
+| **FIND-5E-03** | `Low` | Test Completeness | `desktop/app_test.go` | `TestApp_OnShutdown` did not verify `app.pipeline`, `app.historyService`, or active deadline propagation on `mockRepo.Close`. Remediation: Recorded `closeCtx` in `mockRepo`, verified deadline in `(0, defaultShutdownTimeout]`, and verified all struct pointers cleared. |
+| **FIND-5E-04** | `Low` | Concurrency Safety | `desktop/app_test.go` | Missing verification for simultaneous shutdown invocations during window teardown. Remediation: Added subtest `"concurrent calls are race-free"` running 10 parallel goroutines with `sync.WaitGroup`, asserting `mock.closeCalls == 1` with zero data races under `-race`. |
+| **FIND-5E-05** | `Low` | Staticcheck Hygiene | `desktop/app_test.go` | Passing untyped `nil` literal directly as `app.OnShutdown(nil)` triggered SA1012 warning. Remediation: Used typed `var nilCtx context.Context` with `//nolint:staticcheck // SA1012: testing defensive nil context handling`. |
+
+### Phase 5E Architectural Invariants & Verification Proofs
+1. **AC-5E-1 (Zero Legacy Imports in `desktop/`)**: Verified that `grep -rnE 'babylon/dataloader/(datalake|storage|csv|ingest)' desktop/` returns exactly 0 matches repository-wide within `desktop/`. Desktop module is 100% decoupled from legacy packages.
+2. **AC-5E-2 (Lifecycle Teardown & Context Detachment)**: `App.OnShutdown` guarantees that MongoDB connection pools are gracefully terminated within a 5-second timeout budget (`defaultShutdownTimeout`), detached from any upstream window context cancellation.
+3. **AC-5E-3 (Desktop CI Green)**: GitHub Actions CI workflow `desktop` validation job and Go unit test suite pass with 100% success rate across frontend assets (`npm run build && npm test`) and desktop Go package (`go test -tags webkit2_41 -race ./...`).
+4. **Architectural Unblocking**: Eliminating legacy imports from `desktop/` leaves legacy root packages `datalake/` and `csv/` imported solely by dead code, completely unblocking **Phase 5G: Delete `datalake/` + `csv/`** ([Issue #101](https://github.com/ajponte/babylon_data_loader/issues/101)).
+
 
 
 
