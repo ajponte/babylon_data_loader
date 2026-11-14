@@ -1,5 +1,14 @@
 # Phase 1 Specification: AWS Lambda Serverless Adapter
 
+> [!WARNING]
+> **Historical Design Specification — Superseded & Decommissioned**:
+> The Phase 1 `/tmp`-staging Lambda architecture described in this document has been permanently decommissioned in **Phase 5C** ([Issue #97](https://github.com/ajponte/babylon_data_loader/issues/97), [PR #107](https://github.com/ajponte/babylon_data_loader/pull/107)).
+> 
+> The AWS Lambda entrypoint now operates exclusively via pure in-memory streaming through `S3EventHandler` (`cmd/lambda/handler.go`) wired to the hexagonal application pipeline.
+> 
+> For the authoritative current architecture and runtime specifications, refer to:
+> ➡️ **[`docs/specs/hexagonal-application-pipeline.md`](hexagonal-application-pipeline.md)**
+
 This specification document outlines the Phase 1 serverless adapter and packaging architecture for running `babylon_data_loader` on AWS Lambda (ARM64 Graviton).
 
 The complete, authoritative specification is located at:

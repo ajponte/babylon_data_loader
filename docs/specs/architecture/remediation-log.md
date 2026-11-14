@@ -300,6 +300,83 @@ Phase 4L delivers the end-to-end integration test suite exercising the complete 
 4. **Target Isolation Protection**: Refuses execution if connection strings contain `mongodb+srv://` or if target database matches `datalake`.
 5. **Quality & Pass Rate**: 100% pass rate across all 4 integration tests (4/4 passing, `0.557s`), 100% pass rate in GitHub Actions CI workflow `integration-test` job (`1m25s`), and 0 linter issues under `make check-quality`.
 
+---
+
+## 15. Phase 5A Entry Gate & Reference Inventory Log
+
+Phase 5A executes the read-only entry gate verification and baseline reference inventory audit ([Issue #95](https://github.com/ajponte/babylon_data_loader/issues/95), Parent Issue #50) establishing baseline integrity on clean `main` prior to initiating legacy package deletions across Phase 5.
+
+| Verification Item | Target / Source | Evidence & Result | Status |
+| :--- | :--- | :--- | :---: |
+| **Prerequisite Exit Merges** | Commits on `main` branch | Phase 4J (`20a19f0`, PR #92), Phase 4K (`2796f06`, PR #93), Phase 4L (`5a723b0`, PR #94) verified present on `main` at release tag `v0.1.43`. | **Verified** |
+| **`datalake` Importers** | Legacy package `datalake/` | 3 external callers verified: `desktop/progress.go` (`*datalake.ProgressTracker`, scheduled for 5E), root `main.go` (5B), and `cmd/lambda/main.go` (5C). | **Verified** |
+| **`storage` Importers** | Legacy package `storage/` | 2 external callers verified: root `main.go` (5B) and `cmd/lambda/main.go` (5C). Zero calls from `desktop/` or `internal/**`. | **Verified** |
+| **`csv` Importers** | Legacy package `csv/` | 2 external callers verified: root `main.go` (5B) and `cmd/lambda/main.go` (5C). Zero calls from `desktop/` or `internal/**`. | **Verified** |
+| **`ingest` Importers** | Legacy package `ingest/` | 2 external callers verified: root `main.go` (5B) and `cmd/lambda/main.go` (5C). Zero calls from `desktop/` or `internal/**`. | **Verified** |
+| **`synthetic` Importers** | Legacy package `synthetic/` | 1 external caller verified: root `main.go` (5B) invoking `synthetic.GenerateAndSave`. | **Verified** |
+| **`apiClient` Importers** | Legacy package `apiClient/` | 0 external callers repository-wide; confirmed as dead code with zero runtime dependencies. | **Verified** |
+| **Tooling & Non-Go Callers** | Scripts & Terraform | Audited `.github/scripts/build-and-package.sh` (`main.go`), `makefile` (`build-cross`, `test-ci` bare `go test`, `test-lambda`), `tools/upload-fidelity-csv.sh` (`main.go`), and `babylon_deploy/terraform` (`LAMBDA_TMP_DIR`). | **Verified** |
+
+### Phase 5A Architectural Invariants & Recorded Decisions (O-1 Through O-9)
+1. **O-1 (Deletion Sizing Floor Exception)**: Pure package deletion slices (Phase 5F `storage/`, Phase 5G `datalake/`) are exempt from the standard 600-line diff ceiling.
+2. **O-2 (Production Gate Q-1 Confirmation)**: Full legacy deletion phases are gated on operational sign-off confirming that the in-memory Lambda container processes production Chase and Fidelity data with empty S3 `unprocessed/`.
+3. **O-3 (Prerequisite Dependency Invariant)**: Full Phase 4 exit criteria (`4J`, `4K`, `4L`) must be satisfied on `main` before retargeting or retiring any legacy code paths.
+4. **O-4 (Root Composition Layer Invariant)**: Configuration (`config/`) and telemetry context (`appcontext/`) packages remain at repository root to serve CLI, Lambda, and Desktop composition roots without introducing circular dependencies.
+5. **O-5 (Desktop CI Environment)**: Desktop continuous integration executes on `ubuntu-latest` with native Linux GUI libraries (`libgtk-3-dev`, `libwebkit2gtk-4.1-dev`), compiling frontend assets via `npm run build && npm test` and verifying Go packages under `go test -tags webkit2_41 -race`.
+6. **O-6 (Distributed Hand-Off Follow-Up Issues)**: Multi-record partial failure handling (#13) and S3 alert routing (#12) are tracked as independent follow-up issues rather than blocking Phase 5 dead-code decommissioning.
+7. **O-7 (Synthetic CSV Relocation)**: The standalone synthetic data generation writer is relocated to `internal/infra/sources/synthetic/` in Phase 5D before decommissioning legacy `synthetic/`.
+8. **O-8 (Tracked Binary Cleanup)**: The tracked 13MB `app` binary is purged from git history in Phase 5F, with `/app` added to `.gitignore`.
+9. **O-9 (External Workspace Script Maintenance)**: External workspace script `tools/upload-fidelity-csv.sh` is updated to call `go run ./cmd/cli ingest` concurrently with Phase 5B root `main.go` retirement.
+
+Issue #95 was closed with 100% checklist verification.
+
+---
+
+## 16. Phase 5B Build, Release & CI Retargeting Implementation Log
+
+Phase 5B retargets all build, cross-platform packaging, and continuous integration workflows to hexagonal entrypoints (`cmd/cli`, `cmd/lambda`), introduces native desktop CI validation, and permanently decommissions the legacy root `main.go` ([Issue #96](https://github.com/ajponte/babylon_data_loader/issues/96), [PR #106](https://github.com/ajponte/babylon_data_loader/pull/106), merged at commit `2c9d37f`, tag `v0.1.44`).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `makefile` (`build-cross`) | Cross-Compilation | Retargeted compilation from root package `.` to `./cmd/cli` across all 4 target platforms (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`). | `make build-cross && make package-cross && make verify-checksums` |
+| `makefile` (`test-ci`) | CI Test Suite | Removed trailing bare `go test` invocation that tested root package `.`, preventing failures once `main.go` was deleted. | `make test-ci` |
+| `makefile` (`test-lambda`) | Lambda Test Suite | Retargeted unit tests from `./storage/...` to `./internal/infra/storage/s3/...`, decoupling Lambda tests from legacy storage. | `make test-lambda` |
+| `makefile` (Cleanup) | Target Cleanup | Removed obsolete `migrate` and `rollback` targets attempting to call non-existent `${APP_EXECUTABLE} migrate`. | `make help` |
+| `.github/scripts/build-and-package.sh` | Release Packaging | Retargeted build command from `main.go` to `./cmd/cli`, ensuring release tarballs package hexagonal CLI binaries. | Direct execution with mock release flags |
+| `.github/workflows/go.yml` (`desktop`) | Desktop CI Job | Added Ubuntu CI validation job with `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` running Vite tests (`npm test`) and Go tests with build tags (`go test -tags webkit2_41 -race ./...`). | GitHub Actions CI `desktop` job |
+| `main.go` (Deleted) | Root Entrypoint | Safely deleted 95-line legacy entrypoint. Eliminates accepted Q-3 risk where release binaries were built from legacy root. Zero Go files remain at repository root. | `test ! -e main.go && ! go list .` |
+| `tools/upload-fidelity-csv.sh` | Workspace Tooling | Updated dry-run and execution invocations (Decision O-9) from `run main.go ingest` to `run ./cmd/cli ingest`. | Shell syntax and dry-run execution |
+
+### Phase 5B Architectural Invariants
+1. **Elimination of Accepted Risk Q-3**: Release binaries and tarball archives are built exclusively from `./cmd/cli`, ensuring production deployments run hexagonal pipelines with transactional audit logging and memory safety.
+2. **Zero Root Go Package**: No Go package remains at repository root (`go list .` returns no buildable Go source files). All Go code resides under `cmd/`, `internal/`, `config/`, `appcontext/`, or nested modules (`desktop/`).
+3. **Automated Desktop CI Gate**: Desktop adapter and TypeScript frontend changes are continuously tested in GitHub Actions on every pull request, preventing headless compilation regressions.
+4. **Hermetic Packaging**: Build scripts and cross-compilation targets produce reproducible, statically linked binaries across all target platforms with validated SHA-256 checksums.
+
+---
+
+## 17. Phase 5C Lambda Legacy Handler & `ingest/` Removal Implementation Log
+
+Phase 5C removes the legacy `/tmp`-staging fallback handler and obsolete structures in `cmd/lambda/main.go`, deletes `cmd/lambda/main_test.go`, deletes the legacy `ingest/` package (`sink.go`, `sink_test.go`), and completes all code-review remediations ([Issue #97](https://github.com/ajponte/babylon_data_loader/issues/97), [PR #107](https://github.com/ajponte/babylon_data_loader/pull/107)).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `cmd/lambda/main.go` | Lambda Entrypoint | Stripped legacy `/tmp`-staging handler, types (`S3StorageService`, `IngestRunner`, `Handler`, `DefaultIngestRunner`, `stagingDirs`), constants (`defaultIngestTimeout`, `dirPerms`), methods (`NewHandler`, `createStagingDirs`, `resolveS3Key`, `validateS3Key`, `downloadFile`, `executeIngestion`, `archiveS3File`, `processRecord`, `HandleS3Event`), and legacy imports (`config`, `csvparser`, `datalake`, `datasource`, `ingest`, `storage`). Retained clean `main()` wired to `NewS3EventHandler`. | `make build-lambda`, `make test-lambda` |
+| `cmd/lambda/main_test.go` | Obsolete Tests | Deleted 643 lines of legacy tests testing superseded `/tmp`-staging handler. | `go test -v ./cmd/lambda/...` |
+| `ingest/sink.go` | Legacy Sink | Deleted 93 lines of legacy disk-staging sink. | `make test-ci` |
+| `ingest/sink_test.go` | Legacy Tests | Deleted 225 lines of legacy sink tests. | `make test-ci` |
+| `cmd/lambda/handler.go` | Error API Remediations | Implemented FIND-5C-03: added `func (e *sanitizedError) As(target any) bool` delegating to `errors.As(e.orig, target)` to support standard error type extraction while preserving credential redaction. | `TestS3Handler_SanitizedErrorAndKeyValidation` |
+| `cmd/lambda/main.go` | Cold Start Telemetry | Implemented FIND-5C-04: added fail-fast validation in `main()` verifying `MONGO_SECRET_ID` or `MONGO_URI` is present before `lambda.Start`, and emitted structured cold-start diagnostic log. | Cold start manual & unit validation |
+| `cmd/lambda/handler_test.go` | Test Hardening | Implemented FIND-5C-02 (cache isolation via `config.ResetMongoURICache()` in test setup and `t.Cleanup()`, asserting `errors.Is(err, secretErr)`) and FIND-5C-06 (updated candidate key to `"unprocessed/..csv"` to exercise filename boundary check). | `TestS3Handler_SanitizedErrorAndKeyValidation` |
+
+### Phase 5C Architectural Invariants & Verification Proofs
+1. **AC-5C-1 (Zero Legacy Imports in `cmd/lambda`)**: Verified that `go list -deps ./cmd/lambda | grep -E 'babylon/dataloader/(datalake|storage|csv|ingest)(/|$)'` returns completely empty. Lambda runtime is 100% decoupled from legacy storage and ingest packages.
+2. **AC-5C-2 (Zero Importers of `ingest/`)**: Verified that `grep -rlE --include='*.go' '"babylon/dataloader/ingest"' . desktop` returns zero references across the entire repository.
+3. **Pure In-Memory Streaming**: Lambda invocations run exclusively via `S3EventHandler`, streaming object payloads directly through `port.ObjectStore`, `pipeline.Pipeline`, and `ingest.Ingestor` without `/tmp` disk staging.
+4. **Statement Coverage Gate**: `cmd/lambda/handler.go` achieves **94.5%** statement coverage under `go test -coverprofile=coverage.out ./cmd/lambda`, exceeding the >= 85% project definition of done.
+5. **Quality & Formatting**: Zero linter or formatting issues under `make check-quality`, and 100% pass rate across the full test suite (`make test-ci`, `go test -race ./...`, `make test-lambda`).
+
+
 
 
 
