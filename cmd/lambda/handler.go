@@ -231,7 +231,7 @@ func (h *S3EventHandler) validateS3Key(ctx context.Context, bucket, key string) 
 	}
 
 	filename := filepath.Base(key)
-	if filename == "." || filename == "/" || filename == "" {
+	if filename == "." || filename == "/" || filename == "" || filename == ".csv" {
 		h.logger.WarnContext(ctx, "Invalid filename extracted from key", "key", key)
 		return "", false
 	}
@@ -433,6 +433,10 @@ func (e *sanitizedError) Error() string {
 
 func (e *sanitizedError) Is(target error) bool {
 	return errors.Is(e.orig, target)
+}
+
+func (e *sanitizedError) As(target any) bool {
+	return errors.As(e.orig, target)
 }
 
 func sanitizeError(err error, rawURI string) error {

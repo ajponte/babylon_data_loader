@@ -29,6 +29,12 @@ func main() {
 	s3Client := s3.NewFromConfig(sdkConfig)
 	smClient := secretsmanager.NewFromConfig(sdkConfig)
 	secretID := os.Getenv("MONGO_SECRET_ID")
+	if secretID == "" && os.Getenv("MONGO_URI") == "" {
+		logger.ErrorContext(ctx, "Cold start validation failed: MONGO_SECRET_ID or MONGO_URI must be set")
+		os.Exit(1)
+	}
+
+	logger.InfoContext(ctx, "Lambda cold start initialization complete", "secretID", secretID)
 
 	handler := NewS3EventHandler(s3Client, smClient, secretID, nil, logger)
 	lambda.Start(handler.HandleS3Event)

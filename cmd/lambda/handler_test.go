@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"babylon/dataloader/config"
 	"babylon/dataloader/internal/domain/model"
 	"babylon/dataloader/internal/domain/port"
 	"babylon/dataloader/internal/infra/storage/mongo"
@@ -691,8 +692,19 @@ func TestS3Handler_CustomS3StoreFactory(t *testing.T) {
 	})
 }
 
+type customAsError struct {
+	Code int
+}
+
+func (e *customAsError) Error() string {
+	return fmt.Sprintf("custom error code %d", e.Code)
+}
+
 func TestS3Handler_SanitizedErrorAndKeyValidation(t *testing.T) {
 	t.Run("secret resolution error fails pipeline initialization", func(t *testing.T) {
+		config.ResetMongoURICache()
+		t.Cleanup(config.ResetMongoURICache)
+
 		api := newMockS3API(map[string][]byte{"unprocessed/chase9876_statement.csv": []byte(chaseCSVFixture)})
 		secretErr := errors.New("access denied to secret")
 		secrets := &handlerMockSecretsClient{err: secretErr}
@@ -703,8 +715,8 @@ func TestS3Handler_SanitizedErrorAndKeyValidation(t *testing.T) {
 			Records: []events.S3EventRecord{newS3Record("unprocessed/chase9876_statement.csv", "")},
 		}
 		err := h.HandleS3Event(context.Background(), event)
-		if err == nil {
-			t.Fatalf("expected error from secret resolution")
+		if !errors.Is(err, secretErr) {
+			t.Fatalf("expected error to wrap secretErr, got: %v", err)
 		}
 	})
 
@@ -719,13 +731,26 @@ func TestS3Handler_SanitizedErrorAndKeyValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("sanitizedError delegates errors.As", func(t *testing.T) {
+		orig := &customAsError{Code: 42}
+		sanitized := sanitizeError(orig, "mongodb://admin:pass@host/db")
+		var target *customAsError
+		if !errors.As(sanitized, &target) {
+			t.Fatalf("expected errors.As to match customAsError")
+		}
+		if target.Code != 42 {
+			t.Errorf("expected Code 42, got %d", target.Code)
+		}
+	})
+
 	t.Run("validateS3Key rejects invalid filename", func(t *testing.T) {
 		api := newMockS3API(nil)
 		repo := &fakeRepository{}
 		h := newTestHandler(api, repo)
-		_, valid := h.validateS3Key(context.Background(), testBucket, "unprocessed/.")
-		if valid {
-			t.Errorf("expected invalid filename for unprocessed/.")
+		for _, key := range []string{"unprocessed/.", "unprocessed/.csv"} {
+			if _, valid := h.validateS3Key(context.Background(), testBucket, key); valid {
+				t.Errorf("expected invalid filename for key %q", key)
+			}
 		}
 	})
 
