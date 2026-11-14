@@ -39,7 +39,7 @@ flowchart TD
 6. **Datalake Engine ([`datalake/`](../datalake))**: Represents core business entities, interfaces, and extraction services (like [`datasource/`](../datalake/datasource)).
 7. **Ingest Sink ([`ingest/`](../ingest))**: Coordinates the flow of reading unprocessed files, invoking the CSV parser, and calling the repository to bulk upsert records.
 8. **Storage Repository ([`storage/`](../storage))**: Interacts with MongoDB (both local instances and MongoDB Atlas). Implements bulk upserts into `transactions_<datasource>` collections and writes sync audits to `dataSync`.
-9. **Synthetic Generator ([`synthetic/`](../synthetic))**: Generates deterministic mock transaction datasets to allow realistic QA testing without handling real financial PII.
+9. **Synthetic Generator ([`internal/infra/sources/synthetic/`](../internal/infra/sources/synthetic))**: Integrated into hexagonal secondary sources (`internal/infra/sources/synthetic/`), generating deterministic mock transaction batches and streaming canonical CSV files for realistic QA testing and benchmarks without handling real financial PII.
 
 ---
 

@@ -139,6 +139,10 @@ internal/infra/sources/
 │   ├── parser.go                   # Holdings categorization & disclaimer filters
 │   └── parser_test.go              # Number sanitization & ticker normalization
 └── synthetic/                      # Synthetic Mock Fixture Adapter
+    ├── csv_extractor.go            # File CSV stream parser (preserves checking fields)
+    ├── csv_extractor_test.go       # Dialect & schema preservation tests
+    ├── csv_writer.go               # Deterministic CSV file generator & writer (replaces legacy synthetic/)
+    ├── csv_writer_test.go          # Writer determinism, bounds, & round-trip tests
     ├── extractor.go                # Deterministic PCG generator (math/rand/v2)
     └── extractor_test.go           # Concurrency, seeds, & bounds tests
 ```
