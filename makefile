@@ -66,7 +66,6 @@ test-ci: ## runs tests and create generates coverage report
 	make tidy
 	# go test -v -timeout 10m ./... -coverprofile=coverage.out -json > report.json
 	go test -v -timeout 10m ./... -coverprofile=coverage.out -json
-	go test
 unit-test: ## runs unit tests and creates a coverage report
 	make tidy
 	go test -v -timeout 10m ./... -coverprofile=coverage.out
@@ -94,8 +93,8 @@ build-lambda: ## build static linux/arm64 binary for lambda
 docker-build-lambda: ## build arm64 lambda container image
 	docker build --provenance=false -f Dockerfile.lambda -t babylon-data-loader-lambda:latest .
 
-test-lambda: ## run unit tests for lambda handler, secrets, and storage
-	go test -v -race ./cmd/lambda/... ./config/... ./storage/...
+test-lambda: ## run unit tests for lambda handler, config, and s3 storage
+	go test -v -race ./cmd/lambda/... ./config/... ./internal/infra/storage/s3/...
 
 upload-synthetic-dryrun: ## simulate S3 upload of synthetic test data
 	../tools/upload-csv-s3.sh --dry-run tmp/synthetic/test-synthetic-data.csv
@@ -145,13 +144,13 @@ clean-dist: ## cleans distribution and cross-compilation artifacts
 build-cross: clean-dist ## cross-compiles static binaries for all supported platforms
 	mkdir -p $(DIST_DIR)
 	@echo "$(CYAN)==> Cross-compiling for linux/amd64...$(RESET)"
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-amd64 .
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-amd64 ./cmd/cli
 	@echo "$(CYAN)==> Cross-compiling for linux/arm64...$(RESET)"
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-arm64 .
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-linux-arm64 ./cmd/cli
 	@echo "$(CYAN)==> Cross-compiling for darwin/amd64...$(RESET)"
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-darwin-amd64 .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-darwin-amd64 ./cmd/cli
 	@echo "$(CYAN)==> Cross-compiling for darwin/arm64...$(RESET)"
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-darwin-arm64 .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o $(DIST_DIR)/$(APP)-darwin-arm64 ./cmd/cli
 	@echo "$(GREEN)Cross-compilation successful. Binaries written to $(DIST_DIR)/$(RESET)"
 
 package-cross: build-cross ## packages cross-compiled binaries into tar.gz and generates checksums.txt
@@ -221,13 +220,7 @@ wire: ## for wiring dependencies (update if using some other DI tool)
 # generate_mocks:
 # 	go generate -x `go list ./... | grep - v wire`
 
-# [Optional] Database commands
-## Database
-migrate: build
-	${APP_EXECUTABLE} migrate --config=config/application.test.yml
 
-rollback: build
-	${APP_EXECUTABLE} migrate --config=config/application.test.yml
 
 
 

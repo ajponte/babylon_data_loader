@@ -15,7 +15,7 @@ CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build \
   -trimpath \
   -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT_SHA}" \
   -o "${OUTPUT_PATH}" \
-  main.go
+  ./cmd/cli
 chmod +x "${OUTPUT_PATH}"
 
 ARCHIVE_NAME="babylon-${BINARY_NAME}_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
