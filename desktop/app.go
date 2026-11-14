@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	bcontext "babylon/dataloader/appcontext"
@@ -51,6 +52,7 @@ type App struct {
 	newStore       func(root string) (port.ObjectStore, error)
 	mu             sync.RWMutex
 	dbConn         bool
+	retrying       bool
 }
 
 // NewApp creates a new App application struct with production default dependencies.
@@ -138,6 +140,25 @@ func (a *App) OnStartup(ctx context.Context) {
 	})
 }
 
+// OnShutdown is called during application teardown to release database connection pools.
+func (a *App) OnShutdown(ctx context.Context) {
+	if a == nil {
+		return
+	}
+
+	a.mu.Lock()
+	repo := a.repo
+	a.repo = nil
+	a.pipeline = nil
+	a.historyService = nil
+	a.dbConn = false
+	a.mu.Unlock()
+
+	if repo != nil {
+		_ = repo.Close(ctx)
+	}
+}
+
 // IngestFile processes a single CSV file in-place (Decision U3) without copying or mutating local disk state.
 func (a *App) IngestFile(filePath string, dataSource string, accountID string) (ingest.RunStats, error) {
 	a.mu.RLock()
@@ -152,12 +173,20 @@ func (a *App) IngestFile(filePath string, dataSource string, accountID string) (
 		return ingest.RunStats{}, errors.New("application is not initialized")
 	}
 
+	if err := ctx.Err(); err != nil {
+		return ingest.RunStats{}, err
+	}
+
 	if !connected || pipe == nil {
 		return ingest.RunStats{}, errors.New("database not connected; please connect to MongoDB first")
 	}
 
 	if filePath == "" {
 		return ingest.RunStats{}, errors.New("file path cannot be empty")
+	}
+
+	if !strings.EqualFold(filepath.Ext(filePath), ".csv") {
+		return ingest.RunStats{}, ingest.ErrNotCSV
 	}
 
 	dir := filepath.Dir(filePath)
@@ -206,13 +235,28 @@ func (a *App) IngestFile(filePath string, dataSource string, accountID string) (
 
 // RetryConnectDB attempts to reconnect to MongoDB if it is currently in a degraded state.
 func (a *App) RetryConnectDB() bool {
+	if a == nil {
+		return false
+	}
+
 	a.mu.Lock()
+	if a.retrying {
+		a.mu.Unlock()
+		return false
+	}
+	a.retrying = true
 	ctx := a.ctx
 	cfg := a.cfg
 	connected := a.dbConn
 	notifier := a.notifier
 	existingRepo := a.repo
 	a.mu.Unlock()
+
+	defer func() {
+		a.mu.Lock()
+		a.retrying = false
+		a.mu.Unlock()
+	}()
 
 	if ctx == nil {
 		slog.Error("RetryConnectDB called before startup")
@@ -290,6 +334,10 @@ var emitEvent = func(ctx context.Context, name string, optionalData ...interface
 
 // GetHistory retrieves the history of completed ingestion runs.
 func (a *App) GetHistory() ([]model.SyncLog, error) {
+	if a == nil {
+		return nil, errors.New("application is not initialized")
+	}
+
 	a.mu.RLock()
 	ctx := a.ctx
 	historySvc := a.historyService
@@ -298,6 +346,10 @@ func (a *App) GetHistory() ([]model.SyncLog, error) {
 
 	if ctx == nil {
 		return nil, errors.New("application is not initialized")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	if !connected || historySvc == nil {

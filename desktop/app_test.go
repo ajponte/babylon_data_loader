@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"babylon/dataloader/config"
+	"babylon/dataloader/internal/app/ingest"
 	domainmodel "babylon/dataloader/internal/domain/model"
 )
 
@@ -231,6 +233,29 @@ func TestApp_IngestFile_Guards(t *testing.T) {
 			t.Error("expected error on empty file path")
 		}
 	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		app.ctx = ctx
+
+		_, err := app.IngestFile("file.csv", "synthetic", "0000")
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("non-csv extension", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+
+		_, err := app.IngestFile("file.txt", "synthetic", "0000")
+		if err == nil || !errors.Is(err, ingest.ErrNotCSV) {
+			t.Errorf("expected ErrNotCSV, got %v", err)
+		}
+	})
 }
 
 func TestApp_ProcessFile_Success(t *testing.T) {
@@ -390,4 +415,110 @@ func TestApp_GetHistory_Failure(t *testing.T) {
 			t.Errorf("expected repo error %v, got %v", expectedErr, err)
 		}
 	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		app.ctx = ctx
+
+		_, err := app.GetHistory()
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var nilApp *App
+		_, err := nilApp.GetHistory()
+		if err == nil {
+			t.Error("expected error on nil receiver")
+		}
+	})
+}
+
+func TestApp_OnShutdown(t *testing.T) {
+	t.Run("closes initialized repository", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		if !app.dbConn {
+			t.Fatal("expected app to be connected initially")
+		}
+
+		app.OnShutdown(context.Background())
+
+		if !mock.closed {
+			t.Error("expected repository to be closed on shutdown")
+		}
+		if app.dbConn {
+			t.Error("expected dbConn to be false after shutdown")
+		}
+		if app.repo != nil {
+			t.Error("expected repo pointer to be cleared after shutdown")
+		}
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var nilApp *App
+		nilApp.OnShutdown(context.Background())
+	})
+
+	t.Run("idempotent when called repeatedly", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		app.OnShutdown(context.Background())
+		app.OnShutdown(context.Background())
+		if !mock.closed {
+			t.Error("expected mock repo to remain closed")
+		}
+	})
+}
+
+const validChaseCheckingCSV = "Details,Posting Date,Description,Amount,Type,Balance,Check or Slip #\n" +
+	"DEBIT,10/31/2026,Coffee Shop,-4.50,Debit Card,1000.00,\n"
+
+func TestApp_IngestFile_AutomaticSourceResolution(t *testing.T) {
+	mock := &mockRepo{}
+	app := newTestApp(mock)
+
+	csvPath := createTempCSV(t, "Chase1234_Activity_20261112.csv", validChaseCheckingCSV)
+
+	// Pass empty dataSource and accountID to exercise automatic ingest.ResolveSource fallback
+	stats, err := app.IngestFile(csvPath, "", "")
+	if err != nil {
+		t.Fatalf("IngestFile with auto source resolution failed: %v", err)
+	}
+
+	if stats.TotalFiles != 1 {
+		t.Errorf("expected TotalFiles 1, got %d", stats.TotalFiles)
+	}
+	if stats.ProcessedFiles != 1 {
+		t.Errorf("expected ProcessedFiles 1, got %d", stats.ProcessedFiles)
+	}
+	if stats.FailedFiles != 0 {
+		t.Errorf("expected FailedFiles 0, got %d", stats.FailedFiles)
+	}
+}
+
+func TestApp_ConcurrentAccess(t *testing.T) {
+	mock := &mockRepo{}
+	app := newTestApp(mock)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_ = app.RetryConnectDB()
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = app.GetHistory()
+		}()
+	}
+
+	wg.Wait()
 }
