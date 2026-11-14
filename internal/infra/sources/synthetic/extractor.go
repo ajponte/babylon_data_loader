@@ -24,6 +24,13 @@ const (
 
 	// maxInitialBatchCapacity bounds the upfront slice pre-allocation to prevent large memory spikes.
 	maxInitialBatchCapacity = 10_000
+
+	sourceSynthetic = "synthetic"
+	typeDebit       = "DEBIT"
+	typeCredit      = "CREDIT"
+	typeCheck       = "CHECK"
+	baseCheckNum    = 1000
+	checkCadence    = 7
 )
 
 // GeneratorOptions configures the generation of synthetic transactions.
@@ -56,7 +63,7 @@ func NewExtractor(opts GeneratorOptions) port.Extractor {
 
 // SourceType returns the unique source identifier for synthetic data.
 func (e *Extractor) SourceType() string {
-	return "synthetic"
+	return sourceSynthetic
 }
 
 // Extract generates synthetic ChaseTransaction records wrapped in an IngestionBatch.
@@ -99,11 +106,11 @@ func (e *Extractor) Extract(
 		currentBalance += amt
 		balanceCopy := math.Round(currentBalance*centsFactor) / centsFactor
 
-		txType := "DEBIT"
-		details := "DEBIT"
+		txType := typeDebit
+		details := typeDebit
 		if amt > 0 {
-			txType = "CREDIT"
-			details = "CREDIT"
+			txType = typeCredit
+			details = typeCredit
 		}
 
 		postingDate := time.Date(

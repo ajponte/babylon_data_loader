@@ -28,7 +28,6 @@ import (
 	"babylon/dataloader/internal/infra/sources/synthetic"
 	"babylon/dataloader/internal/infra/storage/localfs"
 	"babylon/dataloader/internal/infra/storage/mongo"
-	legacySynthetic "babylon/dataloader/synthetic"
 )
 
 const (
@@ -308,7 +307,17 @@ func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Co
 	}
 
 	d.logger.InfoContext(ctx, "Generating synthetic data")
-	if genErr := legacySynthetic.GenerateSyntheticData(opts.rows, opts.dir); genErr != nil {
+	if dirErr := os.MkdirAll(opts.dir, 0o750); dirErr != nil {
+		return fmt.Errorf("failed to create directory '%s': %w", opts.dir, dirErr)
+	}
+	filePath := filepath.Join(opts.dir, "test-synthetic-data.csv")
+	file, fileErr := os.Create(filePath)
+	if fileErr != nil {
+		return fmt.Errorf("failed to create file '%s': %w", filePath, fileErr)
+	}
+	defer file.Close()
+
+	if genErr := synthetic.WriteCSV(file, synthetic.GeneratorOptions{RowCount: opts.rows}); genErr != nil {
 		return fmt.Errorf("failed to generate synthetic data: %w", genErr)
 	}
 	d.logger.InfoContext(ctx, "Synthetic data generated successfully")
