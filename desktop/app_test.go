@@ -464,6 +464,38 @@ func TestApp_OnShutdown(t *testing.T) {
 		nilApp.OnShutdown(context.Background())
 	})
 
+	t.Run("nil repository is safe", func(t *testing.T) {
+		app := newTestApp(nil)
+		app.OnShutdown(context.Background())
+		if app.repo != nil {
+			t.Error("expected repo to remain nil")
+		}
+	})
+
+	t.Run("nil context is safe", func(t *testing.T) {
+		mock := &mockRepo{}
+		app := newTestApp(mock)
+		app.OnShutdown(nil)
+		if !mock.closed {
+			t.Error("expected repository to be closed when ctx is nil")
+		}
+		if app.repo != nil {
+			t.Error("expected repo pointer to be cleared after shutdown")
+		}
+	})
+
+	t.Run("handles close error without panic", func(t *testing.T) {
+		mock := &mockRepo{closeErr: errors.New("simulated close failure")}
+		app := newTestApp(mock)
+		app.OnShutdown(context.Background())
+		if !mock.closed {
+			t.Error("expected Close to be called despite error")
+		}
+		if app.repo != nil {
+			t.Error("expected repo pointer to be cleared after shutdown")
+		}
+	})
+
 	t.Run("idempotent when called repeatedly", func(t *testing.T) {
 		mock := &mockRepo{}
 		app := newTestApp(mock)
