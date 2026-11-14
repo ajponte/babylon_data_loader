@@ -374,7 +374,7 @@ sequenceDiagram
 | **4H** | Lambda Cutover | `TestS3Handler_SuccessArchivesAndSetsSourceURI`, `TestS3Handler_TransientFailureRetries`, `TestS3Handler_DeterministicFailureLeavesObject`, `TestS3Handler_LazyInitOnceAndRetryAfterFailure`, `TestS3Handler_SecretErrorDoesNotLeakURI`, `TestS3Handler_PreCanceledContext`, `TestS3Handler_FidelitySuccess`, `TestS3Handler_SyntheticSuccess`, `TestS3Handler_EmptyRecordsEvent`, `TestS3Handler_AuditWriteErrorIsSuccess` (15/15 passing, 85.2% coverage) |
 | **4I** | Desktop Notifier | `TestWailsProgressNotifier_MapsStages`, `TestWailsProgressNotifier_ThreadSafe`, `TestWailsProgressNotifier_ContextHandling`, `TestWailsProgressNotifier_CustomStageMapper`, `TestWailsProgressNotifier_DefaultEmitter`, `TestWailsProgressNotifier_ZeroValueSafe`, `TestWailsProgressNotifier_CancelledWailsCtx`, `TestWailsProgressNotifier_NegativeCountsClamped`, `TestWailsProgressNotifier_NilReceiverSafe` (100% pass rate) |
 | **4J** | History Read Port | `TestToHistoryEntries_LegacyJSONGolden`, `TestHistoryService_UsesDefaultLimit`, `TestHistoryService_PropagatesError` (100% pass rate, 90.8% desktop coverage) |
-| **4K** | Desktop Cutover | `TestApp_ProcessFile_Success`, `TestApp_GetHistory_Parity`, `TestApp_E2E_LocalMongo` |
+| **4K** | Desktop Cutover | `TestApp_OnStartup_Success`, `TestApp_OnStartup_Failure`, `TestApp_RetryConnectDB`, `TestApp_IngestFile_Guards`, `TestApp_ProcessFile_Success`, `TestApp_IngestFile_Error`, `TestApp_GetHistory_Parity`, `TestApp_GetHistory_Failure` (100% pass rate, 87.4% desktop coverage, 19/19 Vitest tests) |
 
 ---
 
@@ -429,11 +429,14 @@ type SyncLogReader interface {
 
 ### 9.3 Desktop History Service & DTO Specification
 
-Implementation reference: `desktop/history.go`.
+Implementation reference: `desktop/model/sync_log.go` and `desktop/history.go`.
 
-- **DTO Model (`historyEntry`)**:
+- **DTO Model (`model.SyncLog` / `HistoryEntry`)**:
+  Defined in package `model` (`desktop/model/sync_log.go`) and aliased as `type HistoryEntry = model.SyncLog` in `desktop/history.go`:
   ```go
-  type historyEntry struct {
+  package model
+
+  type SyncLog struct {
   	FileName        string    `json:"fileName"`
   	FileHash        string    `json:"fileHash,omitempty"`
   	CollectionName  string    `json:"collectionName"`
@@ -448,7 +451,35 @@ Implementation reference: `desktop/history.go`.
   	RecordsUploaded int64     `json:"recordsUploaded"`
   }
   ```
+- **Wails Namespace Continuity**: Defining `SyncLog` inside package `model` ensures `wails generate module` creates `export namespace model { export class SyncLog }`, keeping the React frontend (`HistoryPanel.tsx`) and Vitest suites passing with zero handwritten frontend alterations.
 - **Database ID Omission**: Database `id` / `_id` is excluded from the JSON payload per ADR Section 6.2 Divergence 10.
 - **Dual Field Parity**: `syncTimestamp` mirrors `syncedAt`, and `recordsUploaded` mirrors `upsertedCount`.
-- **Empty Slice Guarantee**: `toHistoryEntries(nil)` returns `[]historyEntry{}` ensuring serialization to `[]` instead of `null`.
-- **Default Limit Fallback**: `historyService.GetHistory` defaults non-positive limits (`limit <= 0`) to `DefaultHistoryLimit = 100`.
+- **Empty Slice Guarantee**: `ToHistoryEntries(nil)` returns `[]HistoryEntry{}` ensuring serialization to `[]` instead of `null`.
+- **Default Limit Fallback**: `HistoryService.GetHistory` defaults non-positive limits (`limit <= 0`) to `DefaultHistoryLimit = 100`.
+
+---
+
+<a id="desktop-cutover-spec"></a>
+## 10. Desktop Driving Adapter Cutover Specification (`desktop/app.go`)
+
+Authoritative implementation reference: `desktop/app.go` (implemented in Phase 4K).
+
+### 10.1 Driving Adapter Decoupling & Hexagonal Wiring
+`desktop/app.go` serves as the Wails driving adapter, completely decoupled from legacy packages (`babylon/dataloader/datalake`, `datalake/model`, `datalake/repository`, `storage`, and `csv`). It wires hexagonal domain and infrastructure components:
+- **Persistence Adapter**: `internal/infra/storage/mongo.Repository` satisfying composite interface `repository` (`port.Repository`, `port.SyncLogReader`, and `Close(ctx context.Context) error`).
+- **Pipeline Orchestrator**: `internal/app/pipeline.Pipeline` with default source extractors (`chase`, `fidelity`, `synthetic`).
+- **Telemetry Notifier**: `desktop.WailsProgressNotifier` emitting coarse progress stages (`parsing`, `saving`, `complete`) over the Wails event bus `ingest:progress` (Decision P11).
+- **History Service**: `desktop.HistoryService` mediating query requests between the frontend and `port.SyncLogReader` (Decision P12).
+- **Ingestion Coordinator**: `internal/app/ingest.Ingestor` executing single-file ingestion.
+
+### 10.2 In-Place File Ingestion (`Decision U3`)
+Desktop statements selected via the UI file picker are read directly in place without copying to `data/unprocessed/` or `data/processed/`:
+1. **Local Object Store**: Initialized per ingestion invocation via `localfs.New(filepath.Dir(filePath))` targeting the parent folder of the chosen file.
+2. **Object Key Resolution**: Key is set to `filepath.Base(filePath)`.
+3. **Zero Archival Guarantee**: `ObjectRequest.ArchiveKey = ""` ensures `Ingestor.makeFinalize` returns `nil`. The original file on the user's filesystem is untouched (not moved, renamed, or deleted).
+4. **Source Overrides**: If the user provides `dataSource` or `accountID` via UI dropdowns, an explicit `ingest.SourceRef` override is passed; otherwise, `ingest.ResolveSource(filename)` automatically detects statement metadata.
+
+### 10.3 Testability & Resilience Seams
+- **Dependency Factory Injection**: `App` struct exposes `connectRepo` and `newStore` factory hooks, defaulting to `defaultConnectRepo` (`mongo.NewRepository`) and `defaultNewStore` (`localfs.New`). This permits hermetic unit tests with mock repositories and mock stores without network calls.
+- **Reconnection Resilience (`RetryConnectDB`)**: Defensively closes existing degraded repositories before establishing new connections and re-initializing the ingestion pipeline.
+- **JSON Compatibility**: `IngestFile` returns `ingest.RunStats` matching the legacy JSON contract (`totalFiles`, `processedFiles`, `failedFiles`, `failures`). Wails generates `export namespace ingest { export class RunStats }` in `desktop/frontend/wailsjs/go/models.ts`.

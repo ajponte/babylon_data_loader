@@ -256,5 +256,28 @@ Phase 4J introduces the driven consumer read port `port.SyncLogReader` (Decision
 4. **Empty Array Guarantee**: Empty or nil input slices serialize to `[]` (not `null`) to maintain contract consistency with the React frontend.
 5. **Quality & Coverage**: Desktop statement coverage reached **90.8%** with 100% test pass rate across `internal/domain/port/...`, `desktop/...`, and `desktop/frontend`.
 
+---
+
+## 13. Phase 4K Desktop App Cutover (`desktop/app.go`) Implementation Log
+
+Phase 4K executes the driving adapter cutover for the Wails desktop application ([Issue #82](https://github.com/ajponte/babylon_data_loader/issues/82), Parent Issue #49). It eliminates legacy packages (`babylon/dataloader/datalake`, `datalake/model`, `storage`, and `csv`) in favor of hexagonal components: `mongo.Repository`, `pipeline.Pipeline`, `ingest.Ingestor` over in-place `localfs.Store` (Decision U3), `WailsProgressNotifier` (Decision P11), and `HistoryService` (Decision P12).
+
+| Component / File | Role | Architectural Impact | Verification Test |
+| :--- | :--- | :--- | :--- |
+| `desktop/model/sync_log.go` | DTO Model | Defines `model.SyncLog` in package `model` preserving exact Wails TypeScript namespace contracts (`export namespace model { export class SyncLog }`) without database ID (Divergence 10). | `desktop/frontend/src/components/HistoryPanel.test.tsx` (7 Vitest tests) |
+| `desktop/history.go` | Type Alias | Aliases `type HistoryEntry = model.SyncLog` to bridge domain sync log mapping to the Wails DTO model. | `TestToHistoryEntries_LegacyJSONGolden`, `TestHistoryService_UsesDefaultLimit` |
+| `desktop/app.go` (`IngestFile`) | Driving Ingestion | In-place stream reading via `localfs.New(filepath.Dir(filePath))` and blank `ArchiveKey` (Decision U3). Source overrides support dropdown selection. | `TestApp_ProcessFile_Success`, `TestApp_IngestFile_Error`, `TestApp_IngestFile_Guards` |
+| `desktop/app.go` (`GetHistory`) | Driving Query | Exposes `GetHistory() ([]model.SyncLog, error)` using `HistoryService.GetHistory` and `port.SyncLogReader`. | `TestApp_GetHistory_Parity`, `TestApp_GetHistory_Failure` |
+| `desktop/app.go` (`OnStartup` / `RetryConnectDB`) | Lifecycle & Resilience | Connects `mongo.Repository`, wires `pipeline.Pipeline` with default extractors, and defensively closes degraded connections on retry. Injected factory hooks (`connectRepo`, `newStore`) enable hermetic testing. | `TestApp_OnStartup_Success`, `TestApp_OnStartup_Failure`, `TestApp_RetryConnectDB` |
+| `desktop/frontend/wailsjs/...` | Auto-Generated Bindings | Regenerated via `wails generate module`, producing clean TypeScript definitions for `ingest.RunStats` and `model.SyncLog` with zero handwritten frontend edits. | `cd desktop/frontend && npx tsc --noEmit && npm test` (19 Vitest tests) |
+
+### Phase 4K Architectural Invariants
+1. **In-Place File Processing (Decision U3)**: Files are processed directly from their source path on disk via `localfs.New(filepath.Dir(filePath))`. `ArchiveKey` is intentionally empty, ensuring the local filesystem is never mutated or cleaned up.
+2. **Zero Handwritten Frontend Alterations**: By placing the DTO in `desktop/model/sync_log.go`, Wails preserves `export namespace model { export class SyncLog }` matching React frontend expectations in `HistoryPanel.tsx` without modifying any TypeScript source files.
+3. **Decoupled Persistence & Testability Hooks**: `App` struct accepts injectable factory functions `connectRepo` and `newStore`, defaulting to `mongo.NewRepository` and `localfs.New`. All unit tests execute hermetically without running a live MongoDB instance.
+4. **Defensive Reconnection (`RetryConnectDB`)**: Closes any existing degraded repository handle prior to reconnecting and constructing a fresh ingestion pipeline.
+5. **Quality & Coverage**: Desktop statement coverage achieved **87.4%** under `go test -race`, with 100% pass rate across the desktop Go test suite and all 19 frontend Vitest tests.
+
+
 
 
