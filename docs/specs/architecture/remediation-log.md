@@ -443,6 +443,27 @@ During the multi-agent review pass synthesized in `agent-docs/reviews/feat/phase
 3. **AC-5E-3 (Desktop CI Green)**: GitHub Actions CI workflow `desktop` validation job and Go unit test suite pass with 100% success rate across frontend assets (`npm run build && npm test`) and desktop Go package (`go test -tags webkit2_41 -race ./...`).
 4. **Architectural Unblocking**: Eliminating legacy imports from `desktop/` leaves legacy root packages `datalake/` and `csv/` imported solely by dead code, completely unblocking **Phase 5G: Delete `datalake/` + `csv/`** ([Issue #101](https://github.com/ajponte/babylon_data_loader/issues/101)).
 
+---
+
+## 20. Phase 5F Storage & Dead Code Deletion Implementation Log
+
+Phase 5F executes the complete deletion of the legacy `storage/` package, the unused `apiClient/` package, and the tracked 13.3 MB executable binary `app` ([Issue #100](https://github.com/ajponte/babylon_data_loader/issues/100), [PR #110](https://github.com/ajponte/babylon_data_loader/pull/110)).
+
+| Component / Target | Action / Change | Architectural Impact & Rationale | Verification Evidence |
+| :--- | :--- | :--- | :--- |
+| `storage/` Package (8 files) | Deleted (-2,475 lines) | Permanently deleted `storage/client.go` (-24), `storage/mongo.go` (-153), `storage/mongo_repository.go` (-372), `storage/mongo_repository_internal_test.go` (-62), `storage/mongo_repository_test.go` (-1,230), `storage/mongo_test.go` (-182), `storage/s3.go` (-130), and `storage/s3_test.go` (-322). Replaced by hexagonal storage adapters in `internal/infra/storage/mongo` and `internal/infra/storage/s3`. | `test ! -d storage && test -z "$(git ls-files storage/)"` |
+| `apiClient/` Package (1 file) | Deleted (-418 lines) | Permanently deleted dead HTTP client (`apiClient/apiClient.go`) with zero callers across the codebase. | `test ! -d apiClient && test -z "$(git ls-files apiClient/)"` |
+| `app` (Binary) | Deleted from Git (-13.3 MB) | Purged 13.3 MB pre-compiled executable binary from git tracking (`git rm app`). | `test ! -f app && test -z "$(git ls-files app)"` |
+| `.gitignore` | Modified (+1 line) | Added `/app` under `# Binaries for programs and plugins` to prevent accidental re-commitment. | `git check-ignore app` confirms ignored |
+| `go.mod` / `go.sum` | Dependencies Tidied | Ran `go mod tidy` to prune unneeded dependencies no longer referenced by deleted packages. | `make check-quality` |
+
+### Architectural Impact & Invariants
+1. **Decision O-1 Compliance (Floor & Ceiling Exemption)**: Phase 5F is a pure deletion slice (-2,893 lines, 11 files deleted/modified), safely adhering to architectural decision O-1 which exempts pure package deletion phases from the 600-line diff ceiling.
+2. **AC-5F-1 (Absence & Zero Tracking)**: Verified that `storage/`, `apiClient/`, and `app` are completely absent from the filesystem (`test ! -d storage && test ! -d apiClient && test ! -f app`) and that git tracking reports 0 files (`test -z "$(git ls-files app storage/ apiClient/)"`).
+3. **AC-5F-2 (Zero Import References)**: Verified that `git grep -nE '"babylon/dataloader/(storage|apiClient)"' -- ':!.golangci.yml'` returns 0 matches repository-wide outside linter rule definitions in `.golangci.yml`.
+4. **Comprehensive Quality & Test Health**: 100% pass rate maintained across `make check-quality` (0 linter issues), `make test-ci` (100% pass across all unit tests), `go test -race ./...`, desktop frontend Vitest (`npm test -- --run`) and Go suites (`go test -tags webkit2_41 -race ./...`), and integration suite (`make test-integration`).
+5. **Phase 5G Unblocked**: With all legacy storage and API client code eliminated, legacy root packages `datalake/` and `csv/` have zero external consumers, fully unblocking **Phase 5G: Delete `datalake/` + `csv/`; Prune Depguard Legacy Rules** ([Issue #101](https://github.com/ajponte/babylon_data_loader/issues/101)).
+
 
 
 

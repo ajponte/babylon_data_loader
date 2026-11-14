@@ -38,7 +38,7 @@ flowchart TD
 5. **CSV Parser ([`csv/`](../csv))**: Flexibly parses bank and credit card CSV statements with dynamic header mapping and type coercion.
 6. **Datalake Engine ([`datalake/`](../datalake))**: Represents core business entities, interfaces, and extraction services (like [`datasource/`](../datalake/datasource)).
 7. **Ingest Sink ([`ingest/`](../ingest))**: Coordinates the flow of reading unprocessed files, invoking the CSV parser, and calling the repository to bulk upsert records.
-8. **Storage Repository ([`storage/`](../storage))**: Interacts with MongoDB (both local instances and MongoDB Atlas). Implements bulk upserts into `transactions_<datasource>` collections and writes sync audits to `dataSync`.
+8. **Storage Repository ([`internal/infra/storage/`](../internal/infra/storage))**: Hexagonal driven storage adapters implementing domain persistence ports (`port.Repository`, `port.SyncLogReader`, `port.ObjectStore`). Includes MongoDB persistence (`internal/infra/storage/mongo`) with atomic batch upserts and `dataSync` transactional audit logging, as well as AWS S3 object storage (`internal/infra/storage/s3`) and local filesystem storage (`internal/infra/storage/localfs`).
 9. **Synthetic Generator ([`internal/infra/sources/synthetic/`](../internal/infra/sources/synthetic))**: Integrated into hexagonal secondary sources (`internal/infra/sources/synthetic/`), generating deterministic mock transaction batches and streaming canonical CSV files for realistic QA testing and benchmarks without handling real financial PII.
 
 ---
