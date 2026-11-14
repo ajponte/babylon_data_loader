@@ -25,6 +25,9 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// dbStatusEvent is the Wails runtime event topic for MongoDB connection status.
+const dbStatusEvent = "db:status"
+
 // repository defines the composite persistence and sync log read contract required by desktop App.
 type repository interface {
 	port.Repository
@@ -77,6 +80,37 @@ func (a *App) getNewStore() func(string) (port.ObjectStore, error) {
 	return defaultNewStore
 }
 
+// emitDBStatus broadcasts database connection telemetry to the Wails runtime.
+func emitDBStatus(ctx context.Context, connected bool, err error) {
+	payload := map[string]any{"connected": connected}
+	if err != nil {
+		payload["error"] = err.Error()
+	}
+	emitEvent(ctx, dbStatusEvent, payload)
+}
+
+// validateIngestInput verifies that the target file path is non-empty and has a .csv extension.
+func validateIngestInput(filePath string) error {
+	if filePath == "" {
+		return errors.New("file path cannot be empty")
+	}
+	if !strings.EqualFold(filepath.Ext(filePath), ".csv") {
+		return ingest.ErrNotCSV
+	}
+	return nil
+}
+
+// buildSourceOverride constructs an ingest.SourceRef from optional UI dropdown values.
+func buildSourceOverride(dataSource, accountID string) *ingest.SourceRef {
+	if dataSource == "" && accountID == "" {
+		return nil
+	}
+	return &ingest.SourceRef{
+		SourceType: dataSource,
+		AccountID:  accountID,
+	}
+}
+
 func newDesktopPipeline(repo port.Repository, notifier port.ProgressNotifier) (*pipeline.Pipeline, error) {
 	p := pipeline.New(repo, notifier)
 	if err := ingest.RegisterDefaults(
@@ -88,6 +122,28 @@ func newDesktopPipeline(repo port.Repository, notifier port.ProgressNotifier) (*
 		return nil, fmt.Errorf("failed to register extractors: %w", err)
 	}
 	return p, nil
+}
+
+// initPipelineAndServices connects to MongoDB, configures the ingestion pipeline, and instantiates the history service.
+func (a *App) initPipelineAndServices(
+	ctx context.Context,
+	uri string,
+	notifier *WailsProgressNotifier,
+) (repository, *pipeline.Pipeline, *HistoryService, error) {
+	repo, err := a.getConnectRepo()(ctx, uri)
+	if err != nil {
+		emitDBStatus(ctx, false, err)
+		return nil, nil, nil, err
+	}
+
+	pipe, err := newDesktopPipeline(repo, notifier)
+	if err != nil {
+		_ = repo.Close(ctx)
+		emitDBStatus(ctx, false, err)
+		return nil, nil, nil, err
+	}
+
+	return repo, pipe, NewHistoryService(repo), nil
 }
 
 // OnStartup is called when the app starts. The context is saved so runtime methods can be invoked.
@@ -106,38 +162,21 @@ func (a *App) OnStartup(ctx context.Context) {
 	a.notifier = NewWailsProgressNotifier(ctx)
 	a.mu.Unlock()
 
-	repo, err := a.getConnectRepo()(ctx, a.cfg.MongoURI)
+	repo, pipe, historySvc, err := a.initPipelineAndServices(ctx, a.cfg.MongoURI, a.notifier)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to connect to MongoDB on startup", "error", err)
-		emitEvent(ctx, "db:status", map[string]any{
-			"connected": false,
-			"error":     err.Error(),
-		})
-		return
-	}
-
-	pipe, err := newDesktopPipeline(repo, a.notifier)
-	if err != nil {
-		slog.ErrorContext(ctx, "Failed to initialize pipeline on startup", "error", err)
-		_ = repo.Close(ctx)
-		emitEvent(ctx, "db:status", map[string]any{
-			"connected": false,
-			"error":     err.Error(),
-		})
 		return
 	}
 
 	a.mu.Lock()
 	a.repo = repo
 	a.pipeline = pipe
-	a.historyService = NewHistoryService(repo)
+	a.historyService = historySvc
 	a.dbConn = true
 	a.mu.Unlock()
 
 	slog.InfoContext(ctx, "Successfully connected to MongoDB on startup")
-	emitEvent(ctx, "db:status", map[string]any{
-		"connected": true,
-	})
+	emitDBStatus(ctx, true, nil)
 }
 
 // OnShutdown is called during application teardown to release database connection pools.
@@ -181,12 +220,8 @@ func (a *App) IngestFile(filePath string, dataSource string, accountID string) (
 		return ingest.RunStats{}, errors.New("database not connected; please connect to MongoDB first")
 	}
 
-	if filePath == "" {
-		return ingest.RunStats{}, errors.New("file path cannot be empty")
-	}
-
-	if !strings.EqualFold(filepath.Ext(filePath), ".csv") {
-		return ingest.RunStats{}, ingest.ErrNotCSV
+	if err := validateIngestInput(filePath); err != nil {
+		return ingest.RunStats{}, err
 	}
 
 	dir := filepath.Dir(filePath)
@@ -201,29 +236,21 @@ func (a *App) IngestFile(filePath string, dataSource string, accountID string) (
 		notifier.SetFileName(baseName)
 	}
 
-	var override *ingest.SourceRef
-	if dataSource != "" || accountID != "" {
-		override = &ingest.SourceRef{
-			SourceType: dataSource,
-			AccountID:  accountID,
-		}
-	}
-
-	ingestor := ingest.NewIngestor(pipe, store)
+	// Decision U3: Read file in-place with zero archival/deletion on local filesystem.
 	req := ingest.ObjectRequest{
 		Key:        baseName,
-		ArchiveKey: "", // Decision U3: zero archival/deletion for local desktop files
-		Override:   override,
+		ArchiveKey: "",
+		Override:   buildSourceOverride(dataSource, accountID),
 		Notifier:   notifier,
 	}
 
+	ingestor := ingest.NewIngestor(pipe, store)
 	stats := ingest.RunStats{
 		TotalFiles: 1,
 		Failures:   make(map[string]string),
 	}
 
-	_, ingestErr := ingestor.IngestObject(ctx, req)
-	if ingestErr != nil {
+	if _, ingestErr := ingestor.IngestObject(ctx, req); ingestErr != nil {
 		stats.FailedFiles = 1
 		stats.Failures[baseName] = ingestErr.Error()
 		return stats, ingestErr
@@ -231,6 +258,23 @@ func (a *App) IngestFile(filePath string, dataSource string, accountID string) (
 
 	stats.ProcessedFiles = 1
 	return stats, nil
+}
+
+// ensureRuntimeDefaults lazily populates application configuration and telemetry notifier if uninitialized.
+func (a *App) ensureRuntimeDefaults(ctx context.Context, cfg *config.Config, notifier *WailsProgressNotifier) (*config.Config, *WailsProgressNotifier) {
+	if cfg == nil {
+		cfg = config.LoadConfig(bcontext.WithLogger(ctx, slog.Default()))
+		a.mu.Lock()
+		a.cfg = cfg
+		a.mu.Unlock()
+	}
+	if notifier == nil {
+		notifier = NewWailsProgressNotifier(ctx)
+		a.mu.Lock()
+		a.notifier = notifier
+		a.mu.Unlock()
+	}
+	return cfg, notifier
 }
 
 // RetryConnectDB attempts to reconnect to MongoDB if it is currently in a degraded state.
@@ -267,39 +311,12 @@ func (a *App) RetryConnectDB() bool {
 		return true
 	}
 
-	if cfg == nil {
-		cfg = config.LoadConfig(bcontext.WithLogger(ctx, slog.Default()))
-		a.mu.Lock()
-		a.cfg = cfg
-		a.mu.Unlock()
-	}
-
-	if notifier == nil {
-		notifier = NewWailsProgressNotifier(ctx)
-		a.mu.Lock()
-		a.notifier = notifier
-		a.mu.Unlock()
-	}
+	cfg, notifier = a.ensureRuntimeDefaults(ctx, cfg, notifier)
 
 	slog.InfoContext(ctx, "Attempting to reconnect to MongoDB...")
-	repo, err := a.getConnectRepo()(ctx, cfg.MongoURI)
+	repo, pipe, historySvc, err := a.initPipelineAndServices(ctx, cfg.MongoURI, notifier)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to reconnect to MongoDB", "error", err)
-		emitEvent(ctx, "db:status", map[string]any{
-			"connected": false,
-			"error":     err.Error(),
-		})
-		return false
-	}
-
-	pipe, err := newDesktopPipeline(repo, notifier)
-	if err != nil {
-		slog.ErrorContext(ctx, "Failed to initialize pipeline on reconnect", "error", err)
-		_ = repo.Close(ctx)
-		emitEvent(ctx, "db:status", map[string]any{
-			"connected": false,
-			"error":     err.Error(),
-		})
 		return false
 	}
 
@@ -310,14 +327,12 @@ func (a *App) RetryConnectDB() bool {
 	a.mu.Lock()
 	a.repo = repo
 	a.pipeline = pipe
-	a.historyService = NewHistoryService(repo)
+	a.historyService = historySvc
 	a.dbConn = true
 	a.mu.Unlock()
 
 	slog.InfoContext(ctx, "Successfully reconnected to MongoDB")
-	emitEvent(ctx, "db:status", map[string]any{
-		"connected": true,
-	})
+	emitDBStatus(ctx, true, nil)
 	return true
 }
 
@@ -332,7 +347,7 @@ var emitEvent = func(ctx context.Context, name string, optionalData ...interface
 	runtime.EventsEmit(ctx, name, optionalData...)
 }
 
-// GetHistory retrieves the history of completed ingestion runs.
+// GetHistory retrieves the history of completed ingestion runs via the history read port (Decision P12).
 func (a *App) GetHistory() ([]model.SyncLog, error) {
 	if a == nil {
 		return nil, errors.New("application is not initialized")
