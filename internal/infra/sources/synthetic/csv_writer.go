@@ -14,6 +14,11 @@ import (
 // ErrNilWriter indicates that a nil io.Writer was supplied to WriteCSV.
 var ErrNilWriter = errors.New("synthetic csv: writer cannot be nil")
 
+// ErrExcessiveRowCount indicates that requested row count exceeds MaxSyntheticRowCount.
+var ErrExcessiveRowCount = errors.New("synthetic csv: row count exceeds maximum allowable limit")
+
+const csvColumnCount = 8
+
 func legacyCSVHeader() []string {
 	return []string{
 		"Details",
@@ -27,6 +32,42 @@ func legacyCSVHeader() []string {
 	}
 }
 
+// formatSyntheticRecord formats a single synthetic transaction row into the provided reusable record buffer.
+func formatSyntheticRecord(
+	rng *rand.Rand,
+	baseDate time.Time,
+	index int,
+	currentBalance *float64,
+	record []string,
+) {
+	amt := math.Round((rng.Float64()*maxAmount-maxAmount/2.0)*centsFactor) / centsFactor
+	if amt == 0 {
+		amt = 10.00
+	}
+	*currentBalance += amt
+	balanceCopy := math.Round(*currentBalance*centsFactor) / centsFactor
+
+	txType := typeDebit
+	details := typeDebit
+	checkOrSlipNum := ""
+	if amt > 0 {
+		txType = typeCredit
+		details = typeCredit
+	} else if index%checkCadence == 0 {
+		details = typeCheck
+		checkOrSlipNum = strconv.Itoa(baseCheckNum + index)
+	}
+
+	record[0] = details
+	record[1] = baseDate.AddDate(0, 0, -index).Format("01/02/2006")
+	record[2] = fmt.Sprintf("Synthetic transaction %d", index)
+	record[3] = sourceSynthetic
+	record[4] = fmt.Sprintf("%.2f", amt)
+	record[5] = txType
+	record[6] = fmt.Sprintf("%.2f", balanceCopy)
+	record[7] = checkOrSlipNum
+}
+
 // WriteCSV generates deterministic synthetic transaction rows and streams them as CSV.
 func WriteCSV(w io.Writer, opts GeneratorOptions) error {
 	if w == nil {
@@ -36,7 +77,12 @@ func WriteCSV(w io.Writer, opts GeneratorOptions) error {
 		opts.RowCount = 0
 	}
 	if opts.RowCount > MaxSyntheticRowCount {
-		return fmt.Errorf("row count %d exceeds maximum allowable limit of %d", opts.RowCount, MaxSyntheticRowCount)
+		return fmt.Errorf(
+			"%w: %d exceeds maximum allowable limit of %d",
+			ErrExcessiveRowCount,
+			opts.RowCount,
+			MaxSyntheticRowCount,
+		)
 	}
 
 	seed := opts.Seed
@@ -49,49 +95,21 @@ func WriteCSV(w io.Writer, opts GeneratorOptions) error {
 
 	csvWriter := csv.NewWriter(w)
 
+	// Note: csv.Writer internally buffers writes using a default 4KB bufio.Writer.
+	// Writing the header writes to this buffer and does not flush to the underlying io.Writer
+	// unless the buffer fills or Flush() is called.
 	if err := csvWriter.Write(legacyCSVHeader()); err != nil {
 		return fmt.Errorf("failed to write CSV header: %w", err)
 	}
 
 	baseDate := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)
 	currentBalance := baseBalance
+	record := make([]string, csvColumnCount)
 
 	for i := range opts.RowCount {
-		rowNumber := i + 1
-		amt := math.Round((rng.Float64()*maxAmount-maxAmount/2.0)*centsFactor) / centsFactor
-		if amt == 0 {
-			amt = 10.00
-		}
-		currentBalance += amt
-		balanceCopy := math.Round(currentBalance*centsFactor) / centsFactor
-
-		txType := typeDebit
-		details := typeDebit
-		checkOrSlipNum := ""
-		if amt > 0 {
-			txType = typeCredit
-			details = typeCredit
-		} else if i%checkCadence == 0 {
-			details = typeCheck
-			checkOrSlipNum = strconv.Itoa(baseCheckNum + i)
-		}
-
-		postingDate := baseDate.AddDate(0, 0, -i).Format("01/02/2006")
-		description := fmt.Sprintf("Synthetic transaction %d", i)
-
-		record := []string{
-			details,
-			postingDate,
-			description,
-			sourceSynthetic,
-			fmt.Sprintf("%.2f", amt),
-			txType,
-			fmt.Sprintf("%.2f", balanceCopy),
-			checkOrSlipNum,
-		}
-
+		formatSyntheticRecord(rng, baseDate, i, &currentBalance, record)
 		if err := csvWriter.Write(record); err != nil {
-			return fmt.Errorf("failed to write CSV record %d: %w", rowNumber, err)
+			return fmt.Errorf("failed to write CSV record %d: %w", i+1, err)
 		}
 	}
 

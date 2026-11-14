@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"babylon/dataloader/internal/domain/model"
 	"babylon/dataloader/internal/domain/port"
+	"babylon/dataloader/internal/infra/sources/synthetic"
 )
 
 const inlineLegacySyntheticCSV = `Details,Posting Date,Description,Category,Amount,Type,Balance,Check or Slip #
@@ -569,6 +571,47 @@ func TestRun_GenerateSyntheticDataFlagError(t *testing.T) {
 	err := run(context.Background(), args, d)
 	if err == nil {
 		t.Fatalf("expected flag parsing error, got nil")
+	}
+}
+
+func TestRun_GenerateSyntheticData_InvalidRows(t *testing.T) {
+	outDir := filepath.Join(t.TempDir(), "should-not-exist")
+	d := deps{
+		logger: testLogger(),
+		now:    fixedClock,
+	}
+
+	tests := []struct {
+		name    string
+		rows    string
+		wantErr string
+	}{
+		{
+			name:    "negative rows rejected",
+			rows:    "-1",
+			wantErr: "invalid rows -1: must be between 0 and",
+		},
+		{
+			name:    "excessive rows rejected",
+			rows:    strconv.Itoa(synthetic.MaxSyntheticRowCount + 1),
+			wantErr: "must be between 0 and",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"generate-synthetic-data", "--rows", tc.rows, "--dir", outDir}
+			err := run(context.Background(), args, d)
+			if err == nil {
+				t.Fatalf("expected error for rows %s, got nil", tc.rows)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %q", tc.wantErr, err.Error())
+			}
+			if _, statErr := os.Stat(outDir); !os.IsNotExist(statErr) {
+				t.Errorf("expected dir %s not to be created, statErr=%v", outDir, statErr)
+			}
+		})
 	}
 }
 

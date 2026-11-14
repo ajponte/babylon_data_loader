@@ -288,6 +288,13 @@ func parseSyntheticFlags(args []string, cfg *config.Config) (syntheticOptions, e
 	if err := fs.Parse(args); err != nil {
 		return syntheticOptions{}, fmt.Errorf("failed to parse flags: %w", err)
 	}
+	if *rows < 0 || *rows > synthetic.MaxSyntheticRowCount {
+		return syntheticOptions{}, fmt.Errorf(
+			"invalid rows %d: must be between 0 and %d",
+			*rows,
+			synthetic.MaxSyntheticRowCount,
+		)
+	}
 	return syntheticOptions{
 		rows:           *rows,
 		dir:            *dir,
@@ -315,11 +322,23 @@ func runGenerateSyntheticData(ctx context.Context, args []string, cfg *config.Co
 	if fileErr != nil {
 		return fmt.Errorf("failed to create file '%s': %w", filePath, fileErr)
 	}
-	defer file.Close()
+
+	success := false
+	defer func() {
+		_ = file.Close()
+		if !success {
+			_ = os.Remove(filePath)
+		}
+	}()
 
 	if genErr := synthetic.WriteCSV(file, synthetic.GeneratorOptions{RowCount: opts.rows}); genErr != nil {
 		return fmt.Errorf("failed to generate synthetic data: %w", genErr)
 	}
+	if closeErr := file.Close(); closeErr != nil {
+		return fmt.Errorf("failed to close file '%s': %w", filePath, closeErr)
+	}
+	success = true
+
 	d.logger.InfoContext(ctx, "Synthetic data generated successfully")
 	return nil
 }

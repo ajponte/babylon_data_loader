@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -161,11 +162,21 @@ func assertRoundTripTransaction(t *testing.T, i int, tx model.ChaseTransaction) 
 	return false
 }
 
-func TestWriteCSV_RoundTripWithCSVExtractor(t *testing.T) {
-	const count = 25
+func TestWriteCSV_MaxSyntheticRowCountBoundary(t *testing.T) {
 	opts := synthetic.GeneratorOptions{
-		RowCount: count,
+		RowCount: synthetic.MaxSyntheticRowCount,
 		Seed:     42,
+	}
+	if err := synthetic.WriteCSV(io.Discard, opts); err != nil {
+		t.Fatalf("expected WriteCSV with MaxSyntheticRowCount to succeed, got: %v", err)
+	}
+}
+
+func runRoundTripExtractCase(t *testing.T, rowCount int, seed int64) {
+	t.Helper()
+	opts := synthetic.GeneratorOptions{
+		RowCount: rowCount,
+		Seed:     seed,
 	}
 
 	var buf bytes.Buffer
@@ -181,8 +192,8 @@ func TestWriteCSV_RoundTripWithCSVExtractor(t *testing.T) {
 		t.Fatalf("CSVExtractor.Extract failed: %v", err)
 	}
 
-	if batch.RecordCount != count {
-		t.Errorf("expected batch record count %d, got %d", count, batch.RecordCount)
+	if batch.RecordCount != rowCount {
+		t.Errorf("expected batch record count %d, got %d", rowCount, batch.RecordCount)
 	}
 
 	payload, ok := batch.Payload.([]model.ChaseTransaction)
@@ -190,8 +201,8 @@ func TestWriteCSV_RoundTripWithCSVExtractor(t *testing.T) {
 		t.Fatalf("expected batch.Payload to be []model.ChaseTransaction, got %T", batch.Payload)
 	}
 
-	if len(payload) != count {
-		t.Fatalf("expected %d transactions in payload, got %d", count, len(payload))
+	if len(payload) != rowCount {
+		t.Fatalf("expected %d transactions in payload, got %d", rowCount, len(payload))
 	}
 
 	hasCheck := false
@@ -201,8 +212,28 @@ func TestWriteCSV_RoundTripWithCSVExtractor(t *testing.T) {
 		}
 	}
 
-	if !hasCheck {
+	if rowCount >= 50 && !hasCheck {
 		t.Error("expected at least one transaction with populated CheckOrSlipNum")
+	}
+}
+
+func TestWriteCSV_RoundTripWithCSVExtractor(t *testing.T) {
+	tests := []struct {
+		name     string
+		rowCount int
+		seed     int64
+	}{
+		{name: "zero rows default seed", rowCount: 0, seed: 0},
+		{name: "single row seed 1", rowCount: 1, seed: 1},
+		{name: "seven rows canonical seed 42", rowCount: 7, seed: 42},
+		{name: "fifty rows high seed 999", rowCount: 50, seed: 999},
+		{name: "fifty rows negative seed", rowCount: 50, seed: -1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runRoundTripExtractCase(t, tc.rowCount, tc.seed)
+		})
 	}
 }
 
@@ -223,6 +254,9 @@ func TestWriteCSV_ValidationAndErrors(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for excessive row count, got nil")
 		}
+		if !errors.Is(err, synthetic.ErrExcessiveRowCount) {
+			t.Errorf("expected ErrExcessiveRowCount, got: %v", err)
+		}
 		if !strings.Contains(err.Error(), "exceeds maximum allowable limit") {
 			t.Errorf("unexpected error message: %v", err)
 		}
@@ -242,9 +276,10 @@ func TestWriteCSV_ValidationAndErrors(t *testing.T) {
 
 	t.Run("writer failure during records returns wrapped error", func(t *testing.T) {
 		writeErr := errors.New("simulated pipe closed")
-		// Fail after first buffer write; with 100 rows (> 7KB), it exceeds 4KB buffer
-		w := &errWriter{err: writeErr, failAfterN: 0}
-		opts := synthetic.GeneratorOptions{RowCount: 100}
+		// failAfterN: 1 allows the first 4KB write (header + initial batch) to succeed.
+		// With 200 rows (approx 16KB), the second write buffer flush occurs during record emission.
+		w := &errWriter{err: writeErr, failAfterN: 1}
+		opts := synthetic.GeneratorOptions{RowCount: 200}
 		err := synthetic.WriteCSV(w, opts)
 		if err == nil {
 			t.Fatal("expected error from failing writer, got nil")
