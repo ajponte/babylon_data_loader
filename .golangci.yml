@@ -275,22 +275,10 @@ linters:
           files:
             - "**/internal/**"
           deny:
-            - pkg: "babylon/dataloader/storage"
-              desc: "legacy; use internal/infra/storage"
-            - pkg: "babylon/dataloader/datalake"
-              desc: "legacy; deleted in Phase 5"
-            - pkg: "babylon/dataloader/csv"
-              desc: "legacy"
-            - pkg: "babylon/dataloader/ingest"
-              desc: "legacy"
             - pkg: "babylon/dataloader/appcontext"
-              desc: "legacy"
+              desc: "composition-root only"
             - pkg: "babylon/dataloader/config"
               desc: "composition-root only"
-            - pkg: "babylon/dataloader/apiClient"
-              desc: "legacy"
-            - pkg: "babylon/dataloader/synthetic"
-              desc: "legacy"
             - pkg: "babylon/dataloader/cmd"
               desc: "entrypoints only"
 
