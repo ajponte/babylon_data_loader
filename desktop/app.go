@@ -197,6 +197,7 @@ func (a *App) OnShutdown(ctx context.Context) {
 	a.pipeline = nil
 	a.historyService = nil
 	a.dbConn = false
+	a.ctx = nil
 	a.mu.Unlock()
 
 	if repo == nil {
@@ -207,11 +208,11 @@ func (a *App) OnShutdown(ctx context.Context) {
 		ctx = context.Background()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, defaultShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultShutdownTimeout)
 	defer cancel()
 
 	if err := repo.Close(shutdownCtx); err != nil {
-		slog.ErrorContext(ctx, "Failed to cleanly close repository on shutdown", "error", err)
+		slog.ErrorContext(shutdownCtx, "Failed to cleanly close repository on shutdown", "error", err)
 	}
 }
 
