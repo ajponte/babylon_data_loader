@@ -13,6 +13,8 @@
 
 Phase 4 executes the application-layer cutover. It wires the extractors implemented in Phase 2 and secondary storage adapters built in Phase 3 into a unified application orchestrator (`internal/app/pipeline`), drives it via domain use cases (`internal/app/ingest`), and migrates all three composition entrypoints: AWS Lambda (`cmd/lambda`), the local CLI (`cmd/cli`), and the Wails desktop application (`desktop`). Upon completion of Phase 4, no entrypoint imports legacy packages (`ingest/`, `datalake/`, `csv/`, or `storage/`), unblocking Phase 5 cleanup.
 
+In Phase 5B and Phase 5C, transitional legacy code paths were permanently decommissioned: root `main.go` was safely deleted in Phase 5B (retargeting all local execution, cross-platform release builds, and CI workflows to `cmd/cli`), and the legacy `/tmp`-staging Lambda fallback handler and `ingest/` package were deleted in Phase 5C. The AWS Lambda adapter (`cmd/lambda`) operates exclusively via pure in-memory streaming through `S3EventHandler`, eliminating all local `/tmp` staging.
+
 **Headline Invariant**: For the same input file, the cut-over runtimes write identical record documents and identical `dataSync` audit rows as the legacy runtimes. The only approved differences are the Phase 3 exceptions (D4 synthetic collection shape unified with Chase, and `source.s3Uri` now populated from entrypoint metadata) and the divergences explicitly recorded in §6.
 
 ---
@@ -26,8 +28,8 @@ The application pipeline is organized into strict hexagonal layers enforced by `
 | `internal/app/pipeline/` | Application Orchestration | `$gostd`, `internal/domain/**`, `internal/app/**` | Generic single-stream batch execution, extractor registry, failure-auditing policy, and progress telemetry. |
 | `internal/app/ingest/` | Application Use Cases | `$gostd`, `internal/domain/**`, `internal/app/**` | Filename resolution (`ResolveSource`), stream fingerprinting (`Fingerprint`), object download loop, archive dispatch, and `RunStats`. |
 | `internal/infra/storage/localfs/` | Secondary Driven Adapter | `$gostd`, `internal/domain/**`, `internal/infra/storage/localfs/**` | Implements `port.ObjectStore` over local filesystem directories (`List`, `DownloadStream`, `ArchiveFile`). |
-| `cmd/cli/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | CLI composition root (`ingest`, `generate-synthetic-data`). Drives `ingest.Ingestor` with `localfs.Store` and CLI `slog` progress; composed of single-responsibility helpers (`connectRepository`, `newIngestionPipeline`, `initStoreAndDiscoverKeys`, `resolveArchiveKey`, `newSyntheticPipeline`, `newSyntheticRequest`, `formatStatsJSON`). |
-| `cmd/lambda/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | AWS Lambda composition root (`handler.go`). Consumes S3 events, resolves streams via `s3.Client`, and writes to `mongo.Repository`. |
+| `cmd/cli/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | CLI composition root (`ingest`, `generate-synthetic-data`). Following Phase 5B, legacy root `main.go` has been permanently deleted, and all local runs, cross-platform release builds, and CI workflows target `cmd/cli/`. Drives `ingest.Ingestor` with `localfs.Store` and CLI `slog` progress; composed of single-responsibility helpers (`connectRepository`, `newIngestionPipeline`, `initStoreAndDiscoverKeys`, `resolveArchiveKey`, `newSyntheticPipeline`, `newSyntheticRequest`, `formatStatsJSON`). |
+| `cmd/lambda/` | Primary Driving Adapter | `internal/**`, `config`, `appcontext` | AWS Lambda composition root (`cmd/lambda/main.go`, `cmd/lambda/handler.go`). Consumes S3 events and operates exclusively via pure in-memory streaming through `S3EventHandler`, resolving streams via `s3.Client` and writing to `mongo.Repository`. The legacy `/tmp`-staging Lambda fallback (`Handler`, `DefaultIngestRunner`, `stagingDirs`) was permanently decommissioned in Phase 5C, eliminating all local disk staging. |
 | `desktop/` | Primary Driving Adapter | `internal/**`, `desktop/**` (module `babylon/dataloader/desktop`) | Wails desktop application. Ingests local files in place via `ingest.Ingestor` and reports progress via `WailsProgressNotifier`. |
 
 ---
@@ -338,7 +340,7 @@ sequenceDiagram
 - **U1 (Audit Scope)**: Attempts past source resolution are audited. Unresolvable filenames are logged in run stats but unaudited.
 - **U2 (Synthetic Parser)**: Dedicated `synthetic.CSVExtractor` (2G) parses synthetic CSVs to `transactions_synthetic` retaining `details`, `balance`, and `checkOrSlipNum`.
 - **U3 (Desktop In-Place Read)**: Desktop reads selected file in place; eliminates disk copying to `data/unprocessed/` and `data/processed/`.
-- **U4 (Release Binaries)**: Release binaries build root `main.go` until Phase 5; `make build` uses `cmd/cli`.
+- **U4 (Release Binaries)**: Release binaries built root `main.go` until Phase 5B; following Phase 5B, root `main.go` was permanently deleted and release packaging retargeted to `cmd/cli`.
 - **U5 (User-Run Steps)**: D4 collection drop and Atlas verifications are executed exclusively by human operators.
 - **U6 (Lambda Failure Handling)**: Transient errors error out for Lambda retry; deterministic errors audit and log, leaving object in `unprocessed/`.
 - **P1–P13 (Engineering Policies)**: Layer boundaries (P1), fallback registration (P2), detached failure context (P3), timing restamp (P4), non-fatal success audit (P5), finalize before audit (P6), 32 MiB cap (P7), `source.s3Uri` provenance (P8), lazy Mongo client (P9), lazy indexes (P10), desktop module rename (P11), `port.SyncLogReader` (P12), additive cutover (P13).

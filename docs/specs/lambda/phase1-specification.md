@@ -1,7 +1,13 @@
 # Phase 1 Specification: AWS Lambda Serverless Adapter & ARM64 Packaging
 
-> [!NOTE]
-> **Tech Lead Note**: This specification establishes the Phase 1 cloud-native serverless architecture implemented on the `feature/lambda-adapter` branch for [babylon_data_loader](file://../../..). It enables event-driven S3 ingestion executed on **AWS Lambda** (ARM64 Graviton) backed by AWS Secrets Manager credential caching and multi-stage container packaging, while maintaining 100% backward compatibility with the existing CLI and local desktop workflows.
+> [!WARNING]
+> **Historical Design Specification — Superseded & Decommissioned**:
+> The Phase 1 `/tmp`-staging Lambda architecture described in this document has been permanently decommissioned in **Phase 5C** ([Issue #97](https://github.com/ajponte/babylon_data_loader/issues/97), [PR #107](https://github.com/ajponte/babylon_data_loader/pull/107)).
+> 
+> The AWS Lambda runtime no longer downloads objects to `/tmp` disk staging or executes via the legacy `ingest/` sink. The function operates exclusively via pure in-memory streaming through `S3EventHandler` (`cmd/lambda/handler.go`) wired to the hexagonal application pipeline.
+> 
+> For the authoritative current architecture and runtime specifications, refer to:
+> ➡️ **[`docs/specs/hexagonal-application-pipeline.md`](../hexagonal-application-pipeline.md)**
 
 ---
 
