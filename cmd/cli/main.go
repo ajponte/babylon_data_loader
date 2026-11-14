@@ -141,7 +141,7 @@ func run(ctx context.Context, args []string, d deps) error {
 	switch command {
 	case "ingest":
 		return runIngest(timeoutCtx, cfg, d)
-	case "generate-synthetic-data":
+	case "generate", "generate-synthetic-data":
 		return runGenerateSyntheticData(timeoutCtx, cmdArgs, cfg, d)
 	default:
 		return fmt.Errorf("unknown command: %s", command)

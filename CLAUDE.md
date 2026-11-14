@@ -38,7 +38,9 @@ This project contains a comprehensive agent documentation harness under the [doc
 ### Test and Quality
 - **All Quality Checks (Lint, Format, Vet)**: `make check-quality`
 - **Run unit tests**: `make unit-test`
-- **Run Lambda tests**: `make test-lambda` (runs race-detected unit tests for Lambda handler, config, and storage)
+- **Run Lambda tests**: `make test-lambda` (runs race-detected unit tests for Lambda handler, config, and S3 object storage (./cmd/lambda/... ./config/... ./internal/infra/storage/s3/...))
+- **Run desktop frontend tests**: `(cd desktop/frontend && npm test)` (runs Vitest suite for React components)
+- **Run desktop backend tests**: `(cd desktop && go test -race ./...)` (runs race-detected Go tests for desktop Wails adapter)
 - **Run hermetic unit tests with JSON output (CI)**: `make test-ci`
 - **Run storage integration tests**: `MONGO_IT_URI="mongodb://localhost:27017" make test-integration` (executes `//go:build integration` tests against live Mongo; requires `MONGO_IT_URI`, provisions ephemeral `babylon_it_<unixnano>` DBs, and cleans up automatically)
 - **Show test coverage in HTML**: `make coverage`
@@ -54,6 +56,8 @@ Continuous integration runs automatically via GitHub Actions ([`.github/workflow
 
 - **Lint & Unit Testing (`build` job)**:
   - Executes `golangci-lint-action`, binary build (`make build`), and hermetic unit testing (`make test-ci`).
+- **Desktop Application Verification (`desktop` job)**:
+  - Validates desktop frontend test suite (`npm test`) and desktop Go backend unit/concurrency tests with race detector (`go test -race ./...`).
 - **Automated Storage Integration Testing (`integration-test` job)**:
   - Runs in parallel/sequence with a healthy containerized MongoDB service (`mongo:latest`) on port `27017`.
   - Executes `make test-integration` with `MONGO_IT_URI: mongodb://localhost:27017`, validating real index creation, upsert idempotency, same-day charge deduplication, and BSON schemas in CI.
@@ -91,8 +95,8 @@ The delivery pipeline is automated via GitHub Actions ([`.github/workflows/cd.ym
 1. **No Real PII**: Do not hardcode, commit, or check in real datasets, transaction records, or any production database dumps to this repository.
 2. **Log Safety**: Never include real PII (such as account details, names, sensitive description fields, or exact balances) in logs. Keep `slog` log fields generic and aggregate.
 3. **Use Synthetic Data for Dev/Test**: Always use the built-in synthetic generators to produce non-sensitive mock datasets for testing and local environment setups:
-   - To generate local CSVs for testing: `go run main.go generate-synthetic-data --rows 100 --dir tmp/synthetic`
-   - To populate local MongoDB: `go run main.go generate-synthetic-data --rows 100 --persist-to-mongo`
+   - To generate local CSVs for testing: `go run ./cmd/cli generate --rows 100 --dir tmp/synthetic`
+   - To populate local MongoDB: `go run ./cmd/cli generate --rows 100 --persist-to-mongo`
 4. **Environment Variables**: Never hardcode credentials. Ensure Mongo/DB configurations are fetched from the environment:
    - `MONGO_HOST`
    - `MONGO_USER`

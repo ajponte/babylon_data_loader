@@ -6,21 +6,23 @@ This guide provides instructions for building, running, testing, and developing 
 
 ## Architecture Overview
 
-`babylon_data_loader` is a high-performance financial data ingestion pipeline designed for batch transaction feeds, local desktop execution, and serverless cloud execution.
+`babylon_data_loader` is a high-performance financial data ingestion system designed for batch transaction feeds, local desktop execution, and serverless cloud execution, structured around Hexagonal Architecture (Ports and Adapters).
 
-1. **Go Ingestion Engine (`pkg/ingest`, `pkg/csv`, `pkg/datasource`)**:
-   - Parses, validates, and normalizes transactional financial feeds from diverse sources.
-   - Maintains strict financial precision (no floating-point types for currency) and guarantees idempotent record processing.
-2. **MongoDB Datalake Repository (`pkg/datalake`)**:
-   - High-throughput persistence layer interfacing with MongoDB Atlas.
-   - Uses bulk upserts with deterministic idempotency keys to eliminate duplicate transaction records.
-3. **AWS Lambda S3 Adapter (`cmd/lambda`, `pkg/storage`, `pkg/config`)**:
-   - Event-driven serverless runner triggered by Amazon S3 `ObjectCreated` events.
-   - Resolves database credentials dynamically from AWS Secrets Manager with in-memory thread-safe caching.
-   - Stages landing files in `/tmp/unprocessed`, executes ingestion, and archives completed feeds to S3 `processed/`.
-4. **Wails Desktop Application (`desktop/`)**:
-   - Local developer and operations UI built with Go and Wails v2 with a Vite/frontend interface.
-   - Allows interactive data ingestion, local debugging, and manual data inspections.
+1. **Entrypoints & Driving Adapters (`cmd/cli`, `cmd/lambda`, `desktop`)**:
+   - `cmd/cli`: Command-line interface providing `ingest` and `generate` commands for local batch processing and test data creation.
+   - `cmd/lambda`: Event-driven serverless runner triggered by Amazon S3 `ObjectCreated` events. Resolves database credentials dynamically from AWS Secrets Manager (`MONGO_SECRET_ID`) with in-memory thread-safe caching. Streams S3 objects directly in-memory via `port.ObjectStore` (eliminating `/tmp` staging) and archives completed feeds to `processed/`.
+   - `desktop`: Local developer and operations UI built with Go and Wails v2 with a React/Vite frontend. Provides interactive data ingestion, real-time progress events (`ingest:progress`), audit history queries, and graceful `OnShutdown` resource teardown.
+2. **Application Layer (`internal/app/pipeline`, `internal/app/ingest`)**:
+   - `internal/app/pipeline`: Orchestrates file streaming, source parsing, batch upserts, audit history logging (`dataSync`), and archival.
+   - `internal/app/ingest`: Application-level coordinator binding source resolution and storage dependencies.
+3. **Domain Core (`internal/domain/model`, `internal/domain/port`)**:
+   - `internal/domain/model`: Pure domain entities (`TransactionRecord`, `FidelityPositionRecord`, `DataSyncLog`, `LineageMetadata`, `SourceType`) maintaining strict financial precision (no floating-point currency representation).
+   - `internal/domain/port`: Cohesive interface contracts for repository persistence (`port.Repository`), audit log queries (`port.SyncLogReader`), object storage (`port.ObjectStore`), progress notifications (`port.ProgressNotifier`), and source extraction (`port.SourceExtractor`).
+4. **Driven Infrastructure Adapters (`internal/infra/sources/*`, `internal/infra/storage/*`)**:
+   - Sources (`internal/infra/sources/chase`, `internal/infra/sources/fidelity`, `internal/infra/sources/synthetic`): Extract and normalize bank, brokerage, and deterministic synthetic datasets into canonical domain records.
+   - Storage (`internal/infra/storage/mongo`, `internal/infra/storage/s3`, `internal/infra/storage/localfs`): High-throughput persistence to MongoDB Atlas / local Docker with deterministic idempotency keys, in-memory S3 streaming, and local filesystem management.
+5. **Composition Roots (`config`, `appcontext`)**:
+   - Environment and secrets configuration management, and structured `slog` context propagation.
 
 ---
 
@@ -35,7 +37,10 @@ The repository includes a comprehensive `makefile` for build, test, and containe
 - `make lint`: Runs `golangci-lint` against all packages.
 - `make vet`: Runs standard `go vet ./...`.
 - `make unit-test`: Executes unit test suite across all packages with coverage reporting.
-- `make test-lambda`: Runs tests for Lambda handler (`cmd/lambda`), configuration (`config`), and S3 storage (`storage`) with Go race detection (`-race`).
+- `make test-lambda`: Runs tests for Lambda handler (`cmd/lambda`), configuration (`config`), and S3 storage (`internal/infra/storage/s3`) with Go race detection (`-race`).
+- Desktop Testing:
+  - `(cd desktop/frontend && npm test)`: Runs Vitest suite for React components.
+  - `(cd desktop && go test -race ./...)`: Runs race-detected Go tests for desktop Wails adapter.
 
 ### Build & Container Packaging
 - `make build`: Compiles the core CLI executable into `out/data-loader`.
