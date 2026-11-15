@@ -1,5 +1,8 @@
 # Wails Integration Plan
 
+> [!WARNING]
+> **Historical: describes the pre-hexagonal layout (`datalake/`, `storage/`, `csv/`, `ingest/`), deleted in Phase 5. Current design: `docs/specs/desktop/phase3-specification.md` and `docs/specs/hexagonal-application-pipeline.md`.**
+
 > [!NOTE]
 > **Architecture Update (Phase 5E)**:
 > In **Phase 5E** ([Issue #99](https://github.com/ajponte/babylon_data_loader/issues/99), [PR #109](https://github.com/ajponte/babylon_data_loader/pull/109)), legacy progress reporting components (`WailsProgressReporter` and `desktop/progress.go`) were permanently decommissioned in favor of the hexagonal `WailsProgressNotifier` (`desktop/notifier.go`). In addition, application lifecycle management is hardened via `OnShutdown: app.OnShutdown` wired in `desktop/main.go`. For canonical desktop architecture, refer to [`docs/specs/hexagonal-application-pipeline.md`](hexagonal-application-pipeline.md).
@@ -16,7 +19,7 @@
 
 ### In scope (v1)
 - A desktop binary (Wails v2) that wraps the `babylon/dataloader` ingest pipeline under the `desktop/` directory.
-- Single-file CSV upload via OS file picker. The file is copied to the configured [UnprocessedDir](../datalake/datalake.go#L45) before ingestion, running the existing [IngestCSVFiles](../datalake/client.go#L15) flow ([Q5](wails-open-questions.md#q5-file-destination)).
+- Single-file CSV upload via OS file picker. The file is copied to the configured `UnprocessedDir` before ingestion, running the existing `IngestCSVFiles` flow ([Q5](wails-open-questions.md#q5-file-destination)).
 - Explicit `dataSource` + `accountID` selection in the UI (bypassing filename heuristic) ([Q8](wails-open-questions.md#q8-filename-derived-metadata-is-a-hard-coupling)).
 - Fixed list of supported data sources (`Chase`, `Synthetic`) in the UI dropdown ([Q9](wails-open-questions.md#q9-supported-data-sources)).
 - A single, persistent MongoDB client reused for the app's lifetime ([Q13](wails-open-questions.md#q13-persistent-vs-per-action-connection)).
@@ -30,7 +33,7 @@
 
 ### Explicitly deferred
 - Drag-and-drop batch upload ([Q4](wails-open-questions.md#q4-single-vs-batch-upload)).
-- Deleting uploaded files (files are copied to [UnprocessedDir](../datalake/datalake.go#L45) and then automatically moved to [ProcessedDir](../datalake/datalake.go#L46) post-ingest) ([Q6](wails-open-questions.md#q6-post-ingest-file-handling), [Q19](wails-open-questions.md#q19-uploaded-file-storage)).
+- Deleting uploaded files (files are copied to `UnprocessedDir` and then automatically moved to `ProcessedDir` post-ingest) ([Q6](wails-open-questions.md#q6-post-ingest-file-handling), [Q19](wails-open-questions.md#q19-uploaded-file-storage)).
 - Fully replacing the CLI. The CLI and [run-ingest](../makefile#L85) flow remain fully supported ([Q2](wails-open-questions.md#q2-replacement-vs-addition)).
 
 ---
@@ -83,7 +86,7 @@ flowchart TD
     LOG -- "ingest:log" --> PP
 ```
 
-Key idea: The desktop layer acts as a thin shell around our core Go package code. The [datalake](../datalake/), [csv](../csv/), and [storage](../storage/) modules are refactored to support row-by-row stream callbacks and deduplication/skip statistics.
+Key idea: The desktop layer acts as a thin shell around our core Go package code. The `datalake`, `csv`, and `storage` modules (deleted in Phase 5) are refactored to support row-by-row stream callbacks and deduplication/skip statistics.
 
 ---
 
@@ -124,9 +127,9 @@ babylon_data_loader/
 ## 4. Backend Changes to Existing Packages
 
 ### 4.1 Ingestion Mechanism: In-place Copy (Q5)
-When `App.IngestFile` is called, the file is copied to the configured [UnprocessedDir](../datalake/datalake.go#L45) before processing. This ensures the scanner validation and processed folder lifecycle are uniformly preserved.
+When `App.IngestFile` is called, the file is copied to the configured `UnprocessedDir` before processing. This ensures the scanner validation and processed folder lifecycle are uniformly preserved.
 
-Add `IngestCSVFile` to the [datalake.Client](../datalake/client.go#L14) interface:
+Add `IngestCSVFile` to the `datalake.Client` interface:
 ```go
 type Client interface {
     IngestCSVFiles(
@@ -159,7 +162,7 @@ type IngestFileOptions struct {
 ```
 
 ### 4.2 Deduplication Statistics & Skip Counters (Q7)
-Update the [Repository](../datalake/repository/repository.go#L10) interface and return a custom stats object:
+Update the `Repository` interface and return a custom stats object:
 ```go
 type UpsertStats struct {
     UpsertedCount int64
@@ -185,7 +188,7 @@ return UpsertStats{
 ```
 
 ### 4.3 Streaming CSV Parser (Q10)
-Update [csvparser.Parser](../csv/parser.go#L6) to support a streaming/row-level callback. This allows the backend to stream rows and report progress incrementally, preventing memory exhaustion on larger files:
+Update `csvparser.Parser` to support a streaming/row-level callback. This allows the backend to stream rows and report progress incrementally, preventing memory exhaustion on larger files:
 ```go
 type RowProgress struct {
     CurrentRecord int64
@@ -213,7 +216,7 @@ type StreamingParser interface {
 We report row-level and phase-level progress using `runtime.EventsEmit` via an interface-injected reporter ([Q10](wails-open-questions.md#q10-granularity), [Q11](wails-open-questions.md#q11-phases-to-expose), [Q12](wails-open-questions.md#q12-wails-event-channel)).
 
 ### 5.1 Interface
-New file: [datalake/progress.go](../datalake/progress.go).
+New file: `datalake/progress.go`.
 ```go
 package datalake
 
@@ -279,7 +282,7 @@ func (a *App) OnStartup(ctx context.Context) {
     runtime.EventsEmit(ctx, "db:status", map[string]any{"connected": true})
 }
 
-This wiring uses [ConnectToMongoDB](../storage/mongo.go#L92), [NewMongoRepository](../storage/mongo_repository.go#L26), and [NewMongoProvider](../storage/mongo.go#L76) to establish connection and repositories.
+This wiring uses `ConnectToMongoDB`, `NewMongoRepository`, and `NewMongoProvider` to establish connection and repositories.
 ```
 
 ---
@@ -314,16 +317,16 @@ Built with React, Vite, and TypeScript ([Q15](wails-open-questions.md#q15-fronte
 
 ### Phase 1: Core Go Pipeline Refactoring
 **Goal**: Refactor the Go datalake ingestion pipeline to support single-file processing, stream progress row-by-row, and return deduplication/duplicate skip counters.
-- **Repository Changes**: Update [repository.Repository](../datalake/repository/repository.go#L10) and [storage.MongoRepository](../storage/mongo_repository.go#L21) to capture and return `UpsertStats` (including `MatchedCount` and `UpsertedCount` from `BulkWriteResult`). Update [storage/mongo_repository.go](../storage/mongo_repository.go).
-- **Parser Changes**: Refactor [csvparser.Parser](../csv/parser.go#L6) in [csv/parser.go](../csv/parser.go) and [csvparser.DefaultParser](../csv/csv.go#L32) in [csv/csv.go](../csv/csv.go) to support streaming. Implement a `ParseStream` method executing row-by-row callbacks.
-- **Datalake Client changes**: Implement `IngestCSVFile` in [datalake/client.go](../datalake/client.go) and update [CSVFileProcessor](../datalake/datalake.go#L41) in [datalake/datalake.go](../datalake/datalake.go) to support single-file copying to [UnprocessedDir](../datalake/datalake.go#L45) ([Q5](wails-open-questions.md#q5-file-destination)) and dispatching row progress updates to [ProgressReporter](../datalake/progress.go).
-- **Testing**: Add unit tests in [datalake/datalake_test.go](../datalake/datalake_test.go) and [csv/csv_test.go](../csv/csv_test.go) asserting progress emissions, row counts, and duplicate count returns.
+- **Repository Changes**: Update `repository.Repository` and `storage.MongoRepository` to capture and return `UpsertStats` (including `MatchedCount` and `UpsertedCount` from `BulkWriteResult`). Update `storage/mongo_repository.go`.
+- **Parser Changes**: Refactor `csvparser.Parser` in `csv/parser.go` and `csvparser.DefaultParser` in `csv/csv.go` to support streaming. Implement a `ParseStream` method executing row-by-row callbacks.
+- **Datalake Client changes**: Implement `IngestCSVFile` in `datalake/client.go` and update `CSVFileProcessor` in `datalake/datalake.go` to support single-file copying to `UnprocessedDir` ([Q5](wails-open-questions.md#q5-file-destination)) and dispatching row progress updates to `ProgressReporter`.
+- **Testing**: Add unit tests in `datalake/datalake_test.go` and `csv/csv_test.go` asserting progress emissions, row counts, and duplicate count returns.
 
 ### Phase 2: Desktop App Setup & Bindings
 **Goal**: Scaffold the Wails application in the `desktop/` directory, set up app lifecycle, bind Go methods, and manage database connection failure gracefully.
 - **Directory Layout**: Initialize the project directory as `desktop/` ([Q17](wails-open-questions.md#q17-repo-layout)) using React+TS templates.
 - **Lifecycle & Connection (Q13, Q14)**: Set up the long-lived MongoDB connection inside [desktop/app.go](../desktop/app.go). Handle connection failures by setting the app in degraded state and emitting `db:status`.
-- **Bindings**: Implement `App.IngestFile` (which copies files to [UnprocessedDir](../datalake/datalake.go#L45) before processing) and `App.RetryConnectDB()`.
+- **Bindings**: Implement `App.IngestFile` (which copies files to `UnprocessedDir` before processing) and `App.RetryConnectDB()`.
 
 ### Phase 3: Frontend Implementation
 **Goal**: Design the upload UI with React, Vite, and TypeScript, handle input validation, show stage progress, and render skipped duplicates.
@@ -347,8 +350,8 @@ Built with React, Vite, and TypeScript ([Q15](wails-open-questions.md#q15-fronte
 
 ### 10.1 Go Test Coverage
 - Validate `ParseStream` behaves properly with large records.
-- Verify [BulkUpsertTransactions](../storage/mongo_repository.go#L33) accurately maps `BulkWriteResult` and tracks duplicate matched transactions correctly.
-- Add mock tests for [ProgressReporter](../datalake/progress.go) verifying events are fired in order.
+- Verify `BulkUpsertTransactions` accurately maps `BulkWriteResult` and tracks duplicate matched transactions correctly.
+- Add mock tests for `ProgressReporter` verifying events are fired in order.
 
 ### 10.2 Frontend Vitest Coverage
 - Verify form displays validation alerts on invalid account IDs.
@@ -367,7 +370,7 @@ Created in [desktop/MANUAL_QA.md](../desktop/MANUAL_QA.md):
 
 - **Large CSV memory consumption**: Resolved via stream-oriented row-level callbacks introduced in Phase 1.
 - **PII compliance**: Resolved. Logs are strictly scrubbed, and only permitted metadata attributes are transmitted over Wails events, in accordance with [pii_handling.md](../docs/pii_handling.md).
-- **Deduplication resolution**: Matches are tracked via MongoDB `MatchedCount` inside [BulkUpsertTransactions](../storage/mongo_repository.go#L33) and reported seamlessly to the frontend.
+- **Deduplication resolution**: Matches are tracked via MongoDB `MatchedCount` inside `BulkUpsertTransactions` and reported seamlessly to the frontend.
 
 ---
 

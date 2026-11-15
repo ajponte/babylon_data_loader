@@ -130,7 +130,7 @@ Authoritative implementation reference: `internal/app/ingest/source.go`.
 
 ### 4.1 Source Resolution Rules (`ResolveSource`)
 
-Filename resolution matches legacy `datalake/datasource.GenericExtractor.ExtractInfo` semantics using standard base-name extraction across S3 keys and OS paths. Resolution evaluates in strict legacy order:
+Filename resolution matches legacy `datalake/datasource.GenericExtractor.ExtractInfo` semantics (deleted in Phase 5) using standard base-name extraction across S3 keys and OS paths. Resolution evaluates in strict legacy order:
 
 1. **Chase**: Regexp `chase(\d{4})` on lower-cased base name $\rightarrow$ `("chase", accountID)`.
 2. **Fidelity**: `fidelity` anywhere in lower-cased path OR prefix `portfolio_positions` on base name $\rightarrow$ `("fidelity", "portfolio")`.
@@ -467,7 +467,7 @@ Implementation reference: `desktop/model/sync_log.go` and `desktop/history.go`.
 Authoritative implementation reference: `desktop/app.go` (implemented in Phase 4K).
 
 ### 10.1 Driving Adapter Decoupling & Hexagonal Wiring
-`desktop/app.go` serves as the Wails driving adapter, completely decoupled from legacy packages (`babylon/dataloader/datalake`, `datalake/model`, `datalake/repository`, `storage`, and `csv`). It wires hexagonal domain and infrastructure components:
+`desktop/app.go` serves as the Wails driving adapter, completely decoupled from legacy packages (`babylon/dataloader/datalake`, `datalake/model`, `datalake/repository`, `storage`, and `csv`, deleted in Phase 5). It wires hexagonal domain and infrastructure components:
 - **Persistence Adapter**: `internal/infra/storage/mongo.Repository` satisfying composite interface `repository` (`port.Repository`, `port.SyncLogReader`, and `Close(ctx context.Context) error`).
 - **Pipeline Orchestrator**: `internal/app/pipeline.Pipeline` with default source extractors (`chase`, `fidelity`, `synthetic`).
 - **Telemetry Notifier**: `desktop.WailsProgressNotifier` emitting coarse progress stages (`parsing`, `saving`, `complete`) over the Wails event bus `ingest:progress` (Decision P11).

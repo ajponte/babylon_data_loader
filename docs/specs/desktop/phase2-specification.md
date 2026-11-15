@@ -1,13 +1,7 @@
 # Phase 2 Specification: Wails Desktop App Setup & Bindings
 
 > [!WARNING]
-> **Historical Design Specification — Superseded Components**:
-> The legacy desktop progress bridge described in this document (`desktop/progress.go` and `WailsProgressReporter`) has been permanently retired in **Phase 5E** ([Issue #99](https://github.com/ajponte/babylon_data_loader/issues/99), [PR #109](https://github.com/ajponte/babylon_data_loader/pull/109)).
-> 
-> Progress reporting is now handled by `desktop/notifier.go` (`WailsProgressNotifier`), which adapts the domain `port.ProgressNotifier` interface into Wails event broadcasts. In addition, application lifecycle management has been hardened with `OnShutdown: app.OnShutdown` wired in `desktop/main.go` to ensure graceful repository connection pool teardown.
-> 
-> For the authoritative current desktop and application pipeline specifications, refer to:
-> ➡️ **[`docs/specs/hexagonal-application-pipeline.md`](../hexagonal-application-pipeline.md)**
+> **Historical: describes the pre-hexagonal layout (`datalake/`, `storage/`, `csv/`, `ingest/`), deleted in Phase 5. Current design: `docs/specs/hexagonal-application-pipeline.md`.**
 
 ---
 
@@ -38,7 +32,7 @@ A Go workspace file [go.work](../../../go.work) was introduced at the repository
 
 ### 2.1 Persistent Connection & Degraded State Management
 The application establishes a single, persistent MongoDB client on startup:
-- **`OnStartup`**: Loads configurations using [config.LoadConfig](../../../config/config.go) and attempts to connect via [ConnectToMongoDBFunc](../../../storage/mongo.go#L89).
+- **`OnStartup`**: Loads configurations using [config.LoadConfig](../../../config/config.go) and attempts to connect via `ConnectToMongoDBFunc` (superseded by `internal/infra/storage/mongo`).
 - **Degraded Mode**: If the database is unreachable, the application continues to load instead of crashing, emitting a `db:status` event with `connected=false` and the error message to warn the user.
 - **`RetryConnectDB`**: Exposes a binding for the UI to attempt reconnection after a startup failure. Emits a `db:status` event with `connected=true` on success.
 

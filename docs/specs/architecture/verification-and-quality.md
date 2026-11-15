@@ -122,4 +122,15 @@ ok      babylon/dataloader/internal/infra/sources/chase    16.486s
 | **Fast-Fail Short-Circuits** | `BenchmarkChaseExtractor_Extract_PreCanceledContext`<br>`BenchmarkChaseExtractor_Extract_PreCanceledContext_Parallel`<br>`BenchmarkChaseExtractor_Extract_EmptyStream` | 26.27 ns<br>63.91 ns<br>543.7 ns | —<br>—<br>— | 32 B/op (1 alloc)<br>32 B/op (1 alloc)<br>4,337 B (6 allocs) | **Immediate Cancellation & EOF Interruption**: Pre-canceled contexts short-circuit in ~26 ns sequentially and ~64 ns under concurrent cancellation storms without touching I/O or classification; empty streams are rejected by the classifier with `ErrUnknownDialect` on the first EOF peek, before any CSV reader is built. |
 | **High-Volume Scaling (Sequential vs Parallel)** | `BenchmarkChaseExtractor_Extract_HighVolume_500Rows`<br>`BenchmarkChaseExtractor_Extract_HighVolume_Parallel` | 341.1 µs<br>153.8 µs | 83.18 MB/s<br>184.40 MB/s | 308,753 B (1,536 allocs)<br>308,759 B (1,536 allocs) | **2.2x High-Volume Parallel Scaling**: 500-row statement processing achieves 83.18 MB/s sequentially (~682 ns/row, ~617 B/row) and scales to 184.40 MB/s (153.8 µs/batch) concurrently with steady heap bounds and zero GC degradation. |
 
+---
+
+## 4. Phase 5 Decommissioning & Architecture Governance Verification
+
+Phase 5 decommissioning enforces strict technical governance across the codebase:
+- **Absence of Legacy Code**: Complete deletion of deprecated packages (`datalake/`, `storage/`, `csv/`, `ingest/`, `synthetic/`, `apiClient/`, deleted in Phase 5), root `main.go`, and legacy progress reporter.
+- **Strict Quality & Linters**: Zero issues reported by `make check-quality` (`golangci-lint`, `goimports`, `gofumpt`, `go vet`).
+- **Comprehensive Test Pass**: 100% passing tests with race detection via `make test-ci`, `go test -race ./...`, `(cd desktop && go test -race ./...)`, and `(cd desktop/frontend && npm test)`.
+- **Active Boundary Enforcement**: Depguard rules in `.golangci.yml` strictly maintain composition-root boundaries (`appcontext`, `config`) and entrypoint isolation (`cmd`).
+
+
 

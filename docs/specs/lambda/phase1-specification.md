@@ -1,13 +1,7 @@
 # Phase 1 Specification: AWS Lambda Serverless Adapter & ARM64 Packaging
 
 > [!WARNING]
-> **Historical Design Specification — Superseded & Decommissioned**:
-> The Phase 1 `/tmp`-staging Lambda architecture described in this document has been permanently decommissioned in **Phase 5C** ([Issue #97](https://github.com/ajponte/babylon_data_loader/issues/97), [PR #107](https://github.com/ajponte/babylon_data_loader/pull/107)).
-> 
-> The AWS Lambda runtime no longer downloads objects to `/tmp` disk staging or executes via the legacy `ingest/` sink. The function operates exclusively via pure in-memory streaming through `S3EventHandler` (`cmd/lambda/handler.go`) wired to the hexagonal application pipeline.
-> 
-> For the authoritative current architecture and runtime specifications, refer to:
-> ➡️ **[`docs/specs/hexagonal-application-pipeline.md`](../hexagonal-application-pipeline.md)**
+> **Historical: describes the pre-hexagonal layout (`datalake/`, `storage/`, `csv/`, `ingest/`), deleted in Phase 5. Current design: `docs/specs/hexagonal-application-pipeline.md`.**
 
 ---
 
@@ -140,7 +134,7 @@ For complete datalake specifications, see [`docs/specs/mongodb-atlas-datalake.md
 
 ---
 
-### 3.3. S3 Storage Helper & Client Abstraction ([`storage/s3.go`](../../../storage/s3.go))
+### 3.3. S3 Storage Helper & Client Abstraction (`storage/s3.go`)
 Decouples AWS S3 API calls from the Lambda handler to facilitate testing:
 
 ```go
@@ -166,7 +160,7 @@ func (s *S3Storage) Delete(ctx context.Context, bucket, key string) error
 
 ---
 
-### 3.4. Lambda Handler Entrypoint ([`cmd/lambda/main.go`](../../../cmd/lambda/main.go))
+### 3.4. Lambda Handler Entrypoint (`cmd/lambda/main.go`)
 The main execution entrypoint for AWS Lambda:
 
 #### Handler Structure & Dependency Injection:
@@ -254,8 +248,8 @@ All components are covered by unit tests using mock AWS SDK clients and race det
 | Test Suite | File | Coverage Areas | Result |
 | :--- | :--- | :--- | :---: |
 | **Secrets Manager Tests** | [`config/secrets_test.go`](../../../config/secrets_test.go) | `MONGO_URI` env fallback, JSON secret parsing, component URI building, plaintext URI, binary secrets, cache hits, 20-goroutine concurrent access, error handling | **PASS (100%)** |
-| **S3 Storage Tests** | [`storage/s3_test.go`](../../../storage/s3_test.go) | Download success/error/validation, Copy success/error/validation, Delete success/error/validation | **PASS (100%)** |
-| **Lambda Handler Tests** | [`cmd/lambda/main_test.go`](../../../cmd/lambda/main_test.go) | Non-CSV filtering, prefix filtering, URL-decoded key unescaping, download errors, secret resolution errors, ingest errors, copy errors, delete errors, success path, MongoDB connect errors | **PASS (100%)** |
+| **S3 Storage Tests** | `storage/s3_test.go` | Download success/error/validation, Copy success/error/validation, Delete success/error/validation | **PASS (100%)** |
+| **Lambda Handler Tests** | `cmd/lambda/main_test.go` | Non-CSV filtering, prefix filtering, URL-decoded key unescaping, download errors, secret resolution errors, ingest errors, copy errors, delete errors, success path, MongoDB connect errors | **PASS (100%)** |
 | **Code Quality Gate** | `make check-quality` | `golangci-lint` (0 issues), `go vet`, `gofumpt`, `goimports` | **PASS (100%)** |
 | **Full Regression Suite** | `make all` | Quality gate + all package unit tests with coverage + CLI binary build | **PASS (100%)** |
 

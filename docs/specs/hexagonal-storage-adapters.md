@@ -25,9 +25,9 @@ The secondary storage adapters encapsulate all persistence and datalake interact
 
 ### 2.1 Repository Architecture & Driver Seams
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/repository.go`.
 
-The MongoDB persistence adapter [`Repository`](../../internal/infra/storage/mongo/repository.go) implements [`port.Repository`](../../internal/domain/port/repository.go) with decoupled driver interfaces and defensive lifecycle management:
+The MongoDB persistence adapter `Repository` implements [`port.Repository`](../../internal/domain/port/repository.go) with decoupled driver interfaces and defensive lifecycle management:
 
 1. **Configuration & Defaults**:
    - `Config` specifies `URI` (required), `Database` (defaults to `"datalake"` via `withDefaults()`), and `Timeout` (connect/ping budget, defaults to `10s`).
@@ -59,9 +59,9 @@ The MongoDB persistence adapter [`Repository`](../../internal/infra/storage/mong
 
 ### 2.2 S3 Client Architecture & Driver Seams
 
-Authoritative implementation reference: [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go).
+Authoritative implementation reference: `internal/infra/storage/s3/client.go`.
 
-The AWS S3 datalake storage adapter [`Client`](../../internal/infra/storage/s3/client.go) implements [`port.ObjectStore`](../../internal/domain/port/object_store.go) (`var _ port.ObjectStore = (*Client)(nil)`), isolating AWS SDK dependencies behind a mockable interface seam:
+The AWS S3 datalake storage adapter `Client` implements [`port.ObjectStore`](../../internal/domain/port/object_store.go) (`var _ port.ObjectStore = (*Client)(nil)`), isolating AWS SDK dependencies behind a mockable interface seam:
 
 1. **Configuration & Constructors**:
    - `Config` specifies:
@@ -79,14 +79,14 @@ The AWS S3 datalake storage adapter [`Client`](../../internal/infra/storage/s3/c
      }
      ```
    - Production instances bind standard `*awss3.Client` (which satisfies `ObjectAPI` natively).
-   - Test suites instantiate `Client` via `NewClient` using test double `fakeObjectAPI` ([`client_test.go`](../../internal/infra/storage/s3/client_test.go)), intercepting requests, capturing parameter payloads, and injecting deterministic error responses.
+   - Test suites instantiate `Client` via `NewClient` using test double `fakeObjectAPI` (`client_test.go`), intercepting requests, capturing parameter payloads, and injecting deterministic error responses.
 
 ---
 
 ## 3. Decision Record (M0 Decisions)
 
 > [!NOTE]
-> **Milestone Status (Phase 3H)**: Milestone 1 (M1 - Contract Frozen DTO mappers), Milestone 2 (Phase 3C/3E/3F/3G - Mongo persistence adapter), and Milestone 3 (Phase 3D - S3 Object Store adapter & Phase 3H - Storage Integration Verification) are fully implemented and verified with 96.2% statement test coverage in [`internal/infra/storage/s3/`](../../internal/infra/storage/s3/), 93.7% unit test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/), and a complete 10-scenario build-tagged integration test suite in [`internal/infra/storage/mongo/integration_test.go`](../../internal/infra/storage/mongo/integration_test.go). See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
+> **Milestone Status (Phase 3H)**: Milestone 1 (M1 - Contract Frozen DTO mappers), Milestone 2 (Phase 3C/3E/3F/3G - Mongo persistence adapter), and Milestone 3 (Phase 3D - S3 Object Store adapter & Phase 3H - Storage Integration Verification) are fully implemented and verified with 96.2% statement test coverage in `internal/infra/storage/s3/`, 93.7% unit test coverage in `internal/infra/storage/mongo/`, and a complete 10-scenario build-tagged integration test suite in `internal/infra/storage/mongo/integration_test.go`. See [§9. Implementation Milestones & Verification](#9-implementation-milestones--verification) for milestone roadmap and test coverage evidence.
 
 ### 3.1 User Decisions (D1–D8, A1)
 
@@ -99,7 +99,7 @@ The AWS S3 datalake storage adapter [`Client`](../../internal/infra/storage/s3/c
 | **D5** | **`SaveBatch` Failure Contract**: Valid batches returning an error yield `(failedSyncLog, wrappedErr)` built via `model.NewFailedSyncLog`. Nil or invalid batches return `(nil, err)`. `LogSync` strictly rejects zero `SyncedAt` (`model.ErrMissingSyncTime`). | Guarantees auditable attempts with routed collection name while enforcing validation. |
 | **D6** | **Hermetic CI & Automated Integration Testing**: Integration tests use `//go:build integration` under `make test-integration` against containerized MongoDB (local Docker or automated GitHub Actions `mongo:latest` service container). Excluded from hermetic `make test-ci`. | Proves unique index and E11000 semantics against a real MongoDB engine in automated CI and local environments without slow testcontainers runtime dependencies. |
 | **D7** | **S3 Adapter Parallelism**: S3 adapter implemented in `internal/infra/storage/s3/` behind `port.ObjectStore` in parallel. | Independent adapter with low coupling to MongoDB persistence. |
-| **D8** | **`ListSyncLogs` Read Path**: Implemented in storage layer for desktop History panel parity before Phase 5 cleanup. | Precludes regression when legacy `storage/` package is decommissioned. |
+| **D8** | **`ListSyncLogs` Read Path**: Implemented in storage layer for desktop History panel parity before Phase 5 cleanup. | Precludes regression when legacy `storage/` package was decommissioned (deleted in Phase 5). |
 | **A1** | **Legacy-Only Fields Resolution (Option C)**: Fidelity performance/allocation metrics restored via Phase 2E; Chase `TransactionDate` restored via Phase 2F. Provenance `source.s3Uri` declared as empty `omitempty` placeholder in Phase 3, populated in Phase 4. | Eliminates silent financial data loss on new ingests while isolating file transport concerns. |
 
 ### 3.2 Derived Engineering Decisions (E1–E8)
@@ -119,7 +119,7 @@ The AWS S3 datalake storage adapter [`Client`](../../internal/infra/storage/s3/c
 
 ### 4.1 Index Catalog
 
-Authoritative implementation references: [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go).
+Authoritative implementation references: `internal/infra/storage/mongo/repository.go` and `internal/infra/storage/mongo/indexes.go`.
 
 | Collection | Index Name | Keys (Ordered) | Unique | Sparse | Upsert Filter |
 | :--- | :--- | :--- | :---: | :---: | :--- |
@@ -132,14 +132,14 @@ Authoritative implementation references: [`internal/infra/storage/mongo/reposito
 
 ### 4.2 BSON Document Schemas & DTO Mappings
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/mapper.go`.
 
 #### `lineageDoc` (Embedded Subdocument)
 ```go
 type lineageDoc struct {
 	// S3URI is a Phase 4 placeholder: batch/file metadata supplied by the Lambda entrypoint.
 	// Always empty in Phase 3, so omitempty keeps it out of inserts and $set (E6 preserves
-	// existing values). Field order matches legacy datalake/model.SourceLineage.
+	// existing values). Field order matches legacy datalake/model.SourceLineage (deleted in Phase 5).
 	S3URI      string    `bson:"s3Uri,omitempty"`
 	FileName   string    `bson:"fileName"`
 	RowNumber  int64     `bson:"rowNumber"` // int64, NOT int: Go int encodes as BSON int32.
@@ -169,7 +169,7 @@ type chaseDoc struct {
 
 #### `fidelityDoc` (`positions_fidelity`)
 ```go
-// Field order matches legacy datalake/model.FidelityPosition. No omitempty on the 2E
+// Field order matches legacy datalake/model.FidelityPosition (deleted in Phase 5). No omitempty on the 2E
 // fields: legacy always emits them (placeholders stored as 0.0 / "").
 type fidelityDoc struct {
 	AccountNumber        string     `bson:"accountNumber"`
@@ -196,12 +196,12 @@ type fidelityDoc struct {
 
 #### Pure Mapper Signatures
 
-Persistence transformations are implemented as pure, side-effect-free functions in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go). They accept immutable domain models by value or reference and return unexported BSON DTOs:
+Persistence transformations are implemented as pure, side-effect-free functions in `internal/infra/storage/mongo/mapper.go` and `internal/infra/storage/mongo/audit.go`. They accept immutable domain models by value or reference and return unexported BSON DTOs:
 
 - `toChaseDoc(tx model.ChaseTransaction, dataSource string) chaseDoc`: Maps domain Chase transactions (and synthetic transactions) to persistence DTO `chaseDoc`, parameterizing `dataSource` (`"chase"` or `"synthetic"`).
 - `toFidelityDoc(p model.FidelityPosition) fidelityDoc`: Maps domain Fidelity positions to persistence DTO `fidelityDoc`, binding `dataSource` to `"fidelity"`.
 - `toLineageDoc(l model.SourceLineage) lineageDoc`: Maps domain lineage metadata to embedded subdocument `lineageDoc`, converting `RowNumber` to `int64` (BSON int64 compatibility) and leaving `S3URI` empty. (In Phase 4B, file provenance `SourceURI` is populated at the document level from `batch.SourceURI` in `indexes.go`).
-- `toSyncLogDoc(log *model.SyncLog) syncLogDoc`: Maps domain audit logs to persistence DTO `syncLogDoc` in [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), converting `SyncedAt` to UTC and mapping legacy desktop dual fields (`collection_name`, `sync_timestamp`, and conditional `records_uploaded`).
+- `toSyncLogDoc(log *model.SyncLog) syncLogDoc`: Maps domain audit logs to persistence DTO `syncLogDoc` in `internal/infra/storage/mongo/audit.go`, converting `SyncedAt` to UTC and mapping legacy desktop dual fields (`collection_name`, `sync_timestamp`, and conditional `records_uploaded`).
 
 #### Memory Safety & Immutability Invariants
 
@@ -216,7 +216,7 @@ Persistence transformations are implemented as pure, side-effect-free functions 
 
 #### `syncLogDoc` (`dataSync` with Legacy Dual Fields)
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/audit.go`.
 
 ```go
 type syncLogDoc struct {
@@ -239,7 +239,7 @@ type syncLogDoc struct {
 ```
 
 ##### Mapping Rules & Dual-Field Compatibility (`toSyncLogDoc`)
-Implemented in [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), the pure mapper `toSyncLogDoc(log *model.SyncLog) syncLogDoc` translates domain audit logs to BSON documents:
+Implemented in `internal/infra/storage/mongo/audit.go`, the pure mapper `toSyncLogDoc(log *model.SyncLog) syncLogDoc` translates domain audit logs to BSON documents:
 1. **Canonical Attributes**:
    - `FileName`, `FileHash`, `CollectionName`, `RecordCount`, `UpsertedCount`, `MatchedCount`, and `DurationMs` map directly from the domain model.
    - `Status` converts the domain `model.SyncStatus` enum to string (`"SUCCESS"` or `"FAILED"`).
@@ -256,7 +256,7 @@ To prevent overwriting unmapped legacy lineage attributes (such as historical `s
 
 ### 4.3 Record Write Keys, Upsert Filters, Flattened Dotted `$set` Builder & Batch Router
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/indexes.go`.
 
 1. **Upsert Filter Builders**:
    - `chaseFilter(d chaseDoc) bson.D`: Returns 5-field filter matching the unique compound index keys: `{accountId, postingDate, description, amount, source.rowNumber}`. Value types match stored BSON types (string, UTC BSON Date, string, float64, int64).
@@ -277,7 +277,7 @@ Authoritative implementation reference: [`internal/infra/storage/mongo/indexes.g
 
 ### 5.1 `SaveBatch(ctx, batch)` (`port.Repository`)
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/records.go`.
 
 Persists an immutable domain `*model.IngestionBatch` to the routed MongoDB collection using an unordered bulk upsert operation. The adapter verifies compile-time interface adherence via `var _ port.Repository = (*Repository)(nil)` and enforces strict isolation, deterministic error classification, and failure contract guarantees:
 
@@ -309,7 +309,7 @@ Persists an immutable domain `*model.IngestionBatch` to the routed MongoDB colle
 
 ### 5.2 `LogSync(ctx, log)` (`port.Repository`)
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/audit.go`.
 
 Writes an audit record to the `dataSync` datalake collection. The contract enforces the following verified invariants:
 1. **Context Cancellation**: Evaluates `ctx.Err()` immediately before any operations; returns the cancellation or deadline error without side effects (`TestLogSync_CancelledContext`).
@@ -322,7 +322,7 @@ Writes an audit record to the `dataSync` datalake collection. The contract enfor
 
 ### 5.3 `ListSyncLogs(ctx, limit)` (*mongo.Repository / Future `SyncLogReader` Consumer Port)
 
-Authoritative implementation reference: [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go).
+Authoritative implementation reference: `internal/infra/storage/mongo/history.go`.
 
 Retrieves audit history records from the datalake `dataSync` collection, returning domain `[]model.SyncLog`. This read path replaces legacy `MongoRepository.GetSyncLogs` (consumed by desktop history) while preserving bit-for-bit document decoding parity.
 
@@ -362,19 +362,19 @@ Historical MongoDB Atlas documents may have been written by legacy loaders prior
 
 ### 5.4 S3 Object Store Contract (`port.ObjectStore`)
 
-Authoritative implementation references: [`internal/domain/port/object_store.go`](../../internal/domain/port/object_store.go) and [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go).
+Authoritative implementation references: [`internal/domain/port/object_store.go`](../../internal/domain/port/object_store.go) and `internal/infra/storage/s3/client.go`.
 
 The datalake object store adapter provides streaming raw statement retrieval and transactional-safe post-processing archiving:
 
 #### `DownloadStream(ctx context.Context, key string) (io.ReadCloser, error)`
 1. **Key Validation**: Rejects empty or whitespace-only keys with sentinel `s3.ErrMissingKey` without invoking SDK calls.
 2. **Context Propagation**: Passes caller context directly to `api.GetObject`, ensuring client cancellations or execution timeouts abort active network transfers.
-3. **Streaming Download Semantics**: Returns unbuffered `io.ReadCloser` (`out.Body`) directly to the caller. Unlike legacy [`storage/s3.go`](../../storage/s3.go) (which wrote downloaded objects to temporary local disk files via `os.Create` / `io.Copy`), the hexagonal adapter streams raw bytes directly into memory buffers or stream parsers. This eliminates local disk allocations, filesystem contention, and temp-file leakage in serverless/container environments. Caller owns closing the returned reader.
+3. **Streaming Download Semantics**: Returns unbuffered `io.ReadCloser` (`out.Body`) directly to the caller. Unlike legacy `storage/s3.go` (deleted in Phase 5; which wrote downloaded objects to temporary local disk files via `os.Create` / `io.Copy`), the hexagonal adapter streams raw bytes directly into memory buffers or stream parsers. This eliminates local disk allocations, filesystem contention, and temp-file leakage in serverless/container environments. Caller owns closing the returned reader.
 4. **Hermetic Error Classification**: Translates AWS SDK `*types.NoSuchKey`, `*types.NotFound`, and coded error strings `"NoSuchKey"` / `"NotFound"` into wrapped sentinel `port.ErrObjectNotFound`. Transient or network failures wrap the underlying driver error.
 
 #### `ArchiveFile(ctx context.Context, srcKey, destKey string) error`
 1. **Key Validation**: Rejects empty or whitespace-only `srcKey` or `destKey` with `s3.ErrMissingKey`.
-2. **URL-Escaped `CopySource` Parity**: Computes `CopySource` as `<bucket>/<url.PathEscape(segment)>...` where leading slashes are stripped and each path segment is escaped individually. This guarantees bit-for-bit parity with legacy [`storage/s3.go`](../../storage/s3.go) across keys with spaces (`bank report.csv` -> `bank%20report.csv`), unicode characters (`résumé.csv` -> `r%C3%A9sum%C3%A9.csv`), and percent literals (`100%real.csv` -> `100%25real.csv`).
+2. **URL-Escaped `CopySource` Parity**: Computes `CopySource` as `<bucket>/<url.PathEscape(segment)>...` where leading slashes are stripped and each path segment is escaped individually. This guarantees bit-for-bit parity with legacy `storage/s3.go` (deleted in Phase 5) across keys with spaces (`bank report.csv` -> `bank%20report.csv`), unicode characters (`résumé.csv` -> `r%C3%A9sum%C3%A9.csv`), and percent literals (`100%real.csv` -> `100%25real.csv`).
 3. **Strict Copy-Then-Delete Ordering**: Executes `CopyObject` first and verifies clean completion before calling `DeleteObject`. If `CopyObject` fails or encounters an error, the source object is **never deleted**, preserving datalake durability and preventing catastrophic data loss.
 4. **Non-Atomic Idempotence & Safe Retries**: While S3 lacks multi-operation transactional atomicity, `ArchiveFile` is idempotent and safe for retries: `CopyObject` unconditionally overwrites destination keys, and `DeleteObject` is idempotent in S3. If copy succeeds but delete fails (e.g., delete permission denial), the delete error is surfaced immediately to the caller for operational triage.
 5. **Driver Error Normalization**: If `CopyObject` fails due to a missing source (`*types.NoSuchKey`, `*types.NotFound`, or error codes `"NoSuchKey"` / `"NotFound"`), it is classified as `port.ErrObjectNotFound`. Error classification avoids direct dependencies on `smithy-go` types by using duck-typed interfaces (`type coder interface{ ErrorCode() string }`).
@@ -401,7 +401,7 @@ The datalake object store adapter provides streaming raw statement retrieval and
 1. **2E Fidelity Placeholder Superset**: Accepts extended placeholder tokens (`-`, `pending`, `unknown`, accounting parens) mapping to `0.0` or `""`.
 2. **2F Strict Transaction Date Rejection**: Rejects unparseable non-placeholder dates with `ErrInvalidRow` instead of silently storing null.
 3. **`source.s3Uri` Population (Phase 4B)**: Supplied from entrypoint metadata via `model.FileMetadata` and `model.IngestionBatch`; emitted as dotted path `source.s3Uri: <uri>` in `$set` when non-empty, and omitted when empty.
-4. **S3 Streaming Download vs. Disk Spooling**: Legacy [`storage/s3.go`](../../storage/s3.go) forced S3 object downloads into local disk files via `os.Create` and `io.Copy`. The hexagonal adapter [`s3.Client`](../../internal/infra/storage/s3/client.go) returns an unbuffered `io.ReadCloser` stream directly to the caller (`port.ObjectStore.DownloadStream`), eliminating disk I/O bottlenecks and temporary file leakage in serverless execution environments.
+4. **S3 Streaming Download vs. Disk Spooling**: Legacy `storage/s3.go` (deleted in Phase 5) forced S3 object downloads into local disk files via `os.Create` and `io.Copy`. The hexagonal adapter `s3.Client` returns an unbuffered `io.ReadCloser` stream directly to the caller (`port.ObjectStore.DownloadStream`), eliminating disk I/O bottlenecks and temporary file leakage in serverless execution environments.
 
 ---
 
@@ -417,14 +417,14 @@ The datalake object store adapter provides streaming raw statement retrieval and
 | Milestone | Phase | Description | Status | Verification Criteria |
 | :--- | :--- | :--- | :--- | :--- |
 | **M0** | Phase 3A | Architecture specification, legacy parity tables, and depguard rules. | **Complete** | Layer isolation validated via `golangci-lint` depguard rules. |
-| **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go). | **Complete** | 100% statement test coverage in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go); pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
-| **M2** | Phase 3C / 3E / 3F / 3G | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, batch router, `SaveBatch` driver execution, bulk upsert, error classification, and `ListSyncLogs` history read path in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go), [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go), [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go), [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go), and [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go). | **Complete** (100% across 3C, 3E, 3F, 3G) | 93.7% statement test coverage in [`internal/infra/storage/mongo/`](../../internal/infra/storage/mongo/); 10 table-driven unit tests passing with `-race`, compile-time `var _ port.Repository = (*Repository)(nil)` verified, legacy index parity, upsert filters equal to unique keys, flattened lineage, pure batch routing, non-mutating query execution, and legacy document normalization parity verified. |
-| **M3** | Phase 3D / 3H | AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go) and build-tagged integration verification suite in [`internal/infra/storage/mongo/integration_test.go`](../../internal/infra/storage/mongo/integration_test.go). | **Complete** | 96.2% statement test coverage in [`internal/infra/storage/s3/client_test.go`](../../internal/infra/storage/s3/client_test.go); hermetic S3 API mocks, streaming download, URL-escaping parity, and copy-then-delete ordering verified; 10 integration tests passing with `-tags=integration` proving live MongoDB index parity, conflict detection, idempotency, same-day charge row preservation, and legacy field preservation against ephemeral test databases. |
+| **M1** | Phase 3B | Contract Frozen: BSON persistence DTOs, pure mappers, and BSON serialization schemas in `internal/infra/storage/mongo/mapper.go`. | **Complete** | 100% statement test coverage in `internal/infra/storage/mongo/mapper_test.go`; pointer un-aliasing, UTC normalization, BSON int64 types, and field parity verified. |
+| **M2** | Phase 3C / 3E / 3F / 3G | Repository skeleton, index lifecycle, `dataSync` audit sink, record write keys, upsert filters, flattened dotted `$set` builder, batch router, `SaveBatch` driver execution, bulk upsert, error classification, and `ListSyncLogs` history read path in `internal/infra/storage/mongo/repository.go`, `internal/infra/storage/mongo/audit.go`, `internal/infra/storage/mongo/indexes.go`, `internal/infra/storage/mongo/records.go`, and `internal/infra/storage/mongo/history.go`. | **Complete** (100% across 3C, 3E, 3F, 3G) | 93.7% statement test coverage in `internal/infra/storage/mongo/`; 10 table-driven unit tests passing with `-race`, compile-time `var _ port.Repository = (*Repository)(nil)` verified, legacy index parity, upsert filters equal to unique keys, flattened lineage, pure batch routing, non-mutating query execution, and legacy document normalization parity verified. |
+| **M3** | Phase 3D / 3H | AWS S3 object store adapter behind `port.ObjectStore` in `internal/infra/storage/s3/client.go` and build-tagged integration verification suite in `internal/infra/storage/mongo/integration_test.go`. | **Complete** | 96.2% statement test coverage in `internal/infra/storage/s3/client_test.go`; hermetic S3 API mocks, streaming download, URL-escaping parity, and copy-then-delete ordering verified; 10 integration tests passing with `-tags=integration` proving live MongoDB index parity, conflict detection, idempotency, same-day charge row preservation, and legacy field preservation against ephemeral test databases. |
 | **M4** | Phase 4 | Pipeline cutover, Lambda entrypoint wiring, and legacy decommissioning. | *Planned* | Zero data migration cutover and end-to-end ingestion verification. |
 
 ### 9.1 Phase 3B Verification & Test Coverage Evidence
 
-Milestone 1 (M1 - Contract Frozen) DTO mappers are fully implemented in [`internal/infra/storage/mongo/mapper.go`](../../internal/infra/storage/mongo/mapper.go) and achieve 100% statement test coverage across all branches in [`internal/infra/storage/mongo/mapper_test.go`](../../internal/infra/storage/mongo/mapper_test.go) (`go test -cover -race ./internal/infra/storage/mongo/...`).
+Milestone 1 (M1 - Contract Frozen) DTO mappers are fully implemented in `internal/infra/storage/mongo/mapper.go` and achieve 100% statement test coverage across all branches in `internal/infra/storage/mongo/mapper_test.go` (`go test -cover -race ./internal/infra/storage/mongo/...`).
 
 Key verified invariants include:
 - **Round-Trip BSON Schema Parity**: All field names, BSON types, and embedded subdocuments match live MongoDB Atlas collections exactly.
@@ -434,7 +434,7 @@ Key verified invariants include:
 
 ### 9.2 Phase 3C Verification & Test Coverage Evidence
 
-Phase 3C implements the repository skeleton, driver seams, index lifecycle management, and `dataSync` audit sink in [`internal/infra/storage/mongo/repository.go`](../../internal/infra/storage/mongo/repository.go) and [`internal/infra/storage/mongo/audit.go`](../../internal/infra/storage/mongo/audit.go). It achieves **87.9% statement test coverage** across the package (`go test -cover -race ./internal/infra/storage/mongo/...`) with 100% hermetic mock execution during `make check-quality` / `make test-ci`.
+Phase 3C implements the repository skeleton, driver seams, index lifecycle management, and `dataSync` audit sink in `internal/infra/storage/mongo/repository.go` and `internal/infra/storage/mongo/audit.go`. It achieves **87.9% statement test coverage** across the package (`go test -cover -race ./internal/infra/storage/mongo/...`) with 100% hermetic mock execution during `make check-quality` / `make test-ci`.
 
 Key verified invariants include:
 - **Credential Leak Defense**: `TestNewRepository_ErrorDoesNotLeakCredentials` asserts that connection URIs, usernames, and passwords never leak into constructor error messages or error string outputs upon connection or ping failures.
@@ -446,20 +446,20 @@ Key verified invariants include:
 
 ### 9.3 Phase 3D Verification & Test Coverage Evidence
 
-Phase 3D implements the AWS S3 object store adapter behind `port.ObjectStore` in [`internal/infra/storage/s3/client.go`](../../internal/infra/storage/s3/client.go). It achieves **96.2% statement test coverage** across `internal/infra/storage/s3` (`go test -cover -race ./internal/infra/storage/s3/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
+Phase 3D implements the AWS S3 object store adapter behind `port.ObjectStore` in `internal/infra/storage/s3/client.go`. It achieves **96.2% statement test coverage** across `internal/infra/storage/s3` (`go test -cover -race ./internal/infra/storage/s3/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
 
 Key verified invariants include:
 - **Hermetic Mock Seam (`fakeObjectAPI`)**: All operations (`GetObject`, `CopyObject`, `DeleteObject`) execute against the mockable `ObjectAPI` seam with 0 AWS network calls and 0 AWS credentials required (`TestNewClient_Validation`, `TestDownloadStream_ContextPropagated`).
 - **Unbuffered Streaming Download**: `TestDownloadStream_ReturnsBodyUnbuffered` verifies that `DownloadStream` returns the S3 body `io.ReadCloser` directly without spooling to local disk or buffering in memory.
 - **Strict Copy-Then-Delete Ordering**: `TestArchiveFile_CopyThenDelete` asserts exact call sequence `[CopyObject, DeleteObject]`. `TestArchiveFile_NoDeleteWhenCopyFails` proves that if `CopyObject` encounters an error, `DeleteObject` is never invoked, preventing data loss.
 - **Delete Failure Propagation**: `TestArchiveFile_DeleteFailureSurfaced` validates that when `CopyObject` succeeds but `DeleteObject` fails, the error is surfaced to caller for retry handling.
-- **Bit-for-Bit URL-Escaped `CopySource` Parity**: `TestArchiveFile_CopySourceEscaping_LegacyParity` table-driven test verifies segment-by-segment escaping (`url.PathEscape`) matching legacy [`storage/s3.go`](../../storage/s3.go) across spaces, plus signs, percent signs, unicode characters, leading slashes, and nested directories.
+- **Bit-for-Bit URL-Escaped `CopySource` Parity**: `TestArchiveFile_CopySourceEscaping_LegacyParity` table-driven test verifies segment-by-segment escaping (`url.PathEscape`) matching legacy `storage/s3.go` (deleted in Phase 5) across spaces, plus signs, percent signs, unicode characters, leading slashes, and nested directories.
 - **Hermetic Error Classification**: `TestDownloadStream_NoSuchKey` and `TestArchiveFile_SourceMissing` assert that `*types.NoSuchKey`, `*types.NotFound`, and coded error strings `"NoSuchKey"` / `"NotFound"` map to sentinel `port.ErrObjectNotFound` without importing smithy-go.
 - **Layer Isolation & Architectural Invariants**: Clean `depguard` linting confirms that `internal/infra/storage/s3` only imports allowed packages (`internal/domain/port`, standard library, and approved AWS SDK packages), maintaining strict hexagonal isolation and unwired adapter status until Phase 4.
 
 ### 9.4 Phase 3E Verification & Test Coverage Evidence
 
-Phase 3E implements the record write keys, legacy index catalog registration, unique upsert filters, flattened dotted `$set` builder, and batch write planner in [`internal/infra/storage/mongo/indexes.go`](../../internal/infra/storage/mongo/indexes.go). It achieves **89.3% statement test coverage** across `internal/infra/storage/mongo` (`go test -cover -race ./internal/infra/storage/mongo/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
+Phase 3E implements the record write keys, legacy index catalog registration, unique upsert filters, flattened dotted `$set` builder, and batch write planner in `internal/infra/storage/mongo/indexes.go`. It achieves **89.3% statement test coverage** across `internal/infra/storage/mongo` (`go test -cover -race ./internal/infra/storage/mongo/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
 
 Key verified invariants include:
 - **Legacy Index Catalog Parity**: `TestIndexCatalog_LegacyParity` and `TestIndexCatalog_RegisteredInRepository` verify that `chaseIndexes()` and `fidelityIndexes()` match Atlas indexes byte-for-byte in names, key order, sort direction, unique constraints, and sparse options. Indexes are ensured in deterministic order (`dataSync`, `transactions_chase`, `positions_fidelity`), and `transactions_synthetic` has zero index specifications (decision D1).
@@ -470,7 +470,7 @@ Key verified invariants include:
 
 ### 9.5 Phase 3F Verification & Test Coverage Evidence
 
-Phase 3F implements `SaveBatch` unordered bulk upsert, lazy index ensuring, error classification (`ErrTransient`, `ErrDuplicateKey`), and the D5/E7 failure contracts in [`internal/infra/storage/mongo/records.go`](../../internal/infra/storage/mongo/records.go). It achieves **92.1% statement test coverage** across `internal/infra/storage/mongo` (`go test -cover -race ./internal/infra/storage/mongo/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
+Phase 3F implements `SaveBatch` unordered bulk upsert, lazy index ensuring, error classification (`ErrTransient`, `ErrDuplicateKey`), and the D5/E7 failure contracts in `internal/infra/storage/mongo/records.go`. It achieves **92.1% statement test coverage** across `internal/infra/storage/mongo` (`go test -cover -race ./internal/infra/storage/mongo/...`) with zero race conditions, zero `depguard` violations, and 100% hermetic unit testing during `make check-quality` / `make test-ci`.
 
 Key verified invariants include:
 - **Compile-Time Port Implementation**: `TestRepository_ImplementsPort` verifies compile-time assignment `var _ port.Repository = (*Repository)(nil)`.
@@ -484,7 +484,7 @@ Key verified invariants include:
 
 ### 9.6 Phase 3G Verification & Test Coverage Evidence
 
-Phase 3G implements the `ListSyncLogs` read path and legacy document normalization in [`internal/infra/storage/mongo/history.go`](../../internal/infra/storage/mongo/history.go). It elevates `internal/infra/storage/mongo` to **93.7% statement test coverage** (`go test -cover -race ./internal/infra/storage/mongo/...`) with 10 unit tests in [`internal/infra/storage/mongo/history_test.go`](../../internal/infra/storage/mongo/history_test.go) passing with zero race conditions, zero `depguard` violations, and 100% CI pass.
+Phase 3G implements the `ListSyncLogs` read path and legacy document normalization in `internal/infra/storage/mongo/history.go`. It elevates `internal/infra/storage/mongo` to **93.7% statement test coverage** (`go test -cover -race ./internal/infra/storage/mongo/...`) with 10 unit tests in `internal/infra/storage/mongo/history_test.go` passing with zero race conditions, zero `depguard` violations, and 100% CI pass.
 
 Key verified invariants include:
 - **Default Limit & Sorted Query Execution**: `TestListSyncLogs_SortAndLimit` and `TestListSyncLogs_DefaultLimit` prove that non-positive limits (`0`, `-5`, `-100`) default to `DefaultSyncLogLimit = 100`, sort criteria is `{syncedAt: -1}`, and queries target the `dataSync` collection.
@@ -496,10 +496,10 @@ Key verified invariants include:
 
 ### 9.7 Phase 3H Verification & Storage Integration Harness Evidence
 
-Phase 3H implements the integration verification suite for the MongoDB persistence adapter in [`internal/infra/storage/mongo/integration_test.go`](../../internal/infra/storage/mongo/integration_test.go) and integrates the `test-integration` target in [`makefile`](../../makefile). This suite executes end-to-end driver operations against an active MongoDB engine (such as the containerized MongoDB service in `babylon_deploy/local/docker-compose.yml`), verifying physical index creation, unique compound key deduplication, idempotent upserts, conflict detection, and BSON type encodings that cannot be fully verified with hermetic mock drivers alone.
+Phase 3H implements the integration verification suite for the MongoDB persistence adapter in `internal/infra/storage/mongo/integration_test.go` and integrates the `test-integration` target in [`makefile`](../../makefile). This suite executes end-to-end driver operations against an active MongoDB engine (such as the containerized MongoDB service in `babylon_deploy/local/docker-compose.yml`), verifying physical index creation, unique compound key deduplication, idempotent upserts, conflict detection, and BSON type encodings that cannot be fully verified with hermetic mock drivers alone.
 
 #### Integration Harness Architecture & Tooling Seams
-- **Build Tag Isolation (`//go:build integration`)**: All integration tests are tagged with `//go:build integration` at the file header of [`internal/infra/storage/mongo/integration_test.go`](../../internal/infra/storage/mongo/integration_test.go). This ensures that standard CI and local verification workflows (`make test-ci`, `go test ./...`) completely exclude integration tests, maintaining fast, hermetic, and network-free CI passes (Decision D6).
+- **Build Tag Isolation (`//go:build integration`)**: All integration tests are tagged with `//go:build integration` at the file header of `internal/infra/storage/mongo/integration_test.go`. This ensures that standard CI and local verification workflows (`make test-ci`, `go test ./...`) completely exclude integration tests, maintaining fast, hermetic, and network-free CI passes (Decision D6).
 - **Target `make test-integration`**: Dedicated target in [`makefile`](../../makefile) executes:
   ```bash
   go test -tags=integration -race -timeout 5m -count=1 -v ./internal/infra/storage/... ./cmd/cli/...

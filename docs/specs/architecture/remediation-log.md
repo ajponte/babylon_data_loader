@@ -464,6 +464,48 @@ Phase 5F executes the complete deletion of the legacy `storage/` package, the un
 4. **Comprehensive Quality & Test Health**: 100% pass rate maintained across `make check-quality` (0 linter issues), `make test-ci` (100% pass across all unit tests), `go test -race ./...`, desktop frontend Vitest (`npm test -- --run`) and Go suites (`go test -tags webkit2_41 -race ./...`), and integration suite (`make test-integration`).
 5. **Phase 5G Unblocked**: With all legacy storage and API client code eliminated, legacy root packages `datalake/` and `csv/` have zero external consumers, fully unblocking **Phase 5G: Delete `datalake/` + `csv/`; Prune Depguard Legacy Rules** ([Issue #101](https://github.com/ajponte/babylon_data_loader/issues/101)).
 
+---
+
+## 21. Phase 5 Comprehensive Decommissioning & Technical Governance Log
+
+Phase 5 completes the decommissioning of legacy architecture components, permanently eliminates 10,500+ lines of deprecated code and dead binaries, updates developer documentation, and enforces architectural invariants across the codebase ([Parent Issue #50](https://github.com/ajponte/babylon_data_loader/issues/50)).
+
+### 21.1 Deleted Legacy Package & Artifact Inventory
+
+| Phase | PR | Target Artifact(s) | Action | Net Lines Removed | Architectural Rationale & Replacement |
+| :---: | :---: | :--- | :---: | :---: | :--- |
+| **5B** | [#106](https://github.com/ajponte/babylon_data_loader/pull/106) | `main.go` | Deleted | -95 lines | Retired legacy root CLI entrypoint; all CLI commands route through `cmd/cli`. |
+| **5C** | [#107](https://github.com/ajponte/babylon_data_loader/pull/107) | `cmd/lambda/main.go`<br>`cmd/lambda/main_test.go`<br>`ingest/` (`sink.go`, `sink_test.go`) | Deleted | -705 lines | Removed legacy `/tmp`-disk-staging Lambda fallback and legacy `ingest` package; streaming Lambda routes exclusively via `cmd/lambda/handler.go`. |
+| **5D** | [#108](https://github.com/ajponte/babylon_data_loader/pull/108) | `synthetic/` (`synthetic.go`, `synthetic_test.go`) | Deleted | -295 lines | Decommissioned root `synthetic/` package; relocated deterministic CSV writer to `internal/infra/sources/synthetic/csv_writer.go`. |
+| **5E** | [#109](https://github.com/ajponte/babylon_data_loader/pull/109) | `desktop/progress.go`<br>`desktop/bridges_test.go` | Deleted / Cleaned | -95 lines | Removed legacy `WailsProgressReporter`; progress notifications route through `desktop.WailsProgressNotifier`. Hardened `OnShutdown` connection teardown. |
+| **5F** | [#110](https://github.com/ajponte/babylon_data_loader/pull/110) | `storage/` (8 files)<br>`apiClient/` (1 file)<br>`app` (Executable binary) | Deleted | -2,893 lines<br>(-13.3 MB binary) | Purged legacy MongoDB and S3 storage implementations, dead API client, and tracked binary; replaced by `internal/infra/storage/mongo` and `internal/infra/storage/s3`. Added `/app` to `.gitignore`. |
+| **5G** | [#111](https://github.com/ajponte/babylon_data_loader/pull/111) | `datalake/` (24 files)<br>`csv/` (3 files) | Deleted | -7,615 lines | Decommissioned legacy datalake mappers, client, models, datasource extractors, and legacy CSV parser. Pruned depguard rules in `.golangci.yml`. |
+| **Total** | | **39 files + binary** | | **-11,698 lines** | **100% pure Hexagonal Architecture (Ports and Adapters)** |
+
+### 21.2 Tooling, Automation & CI Enhancements
+
+| Area | Modification | Architectural Significance | Verification |
+| :--- | :--- | :--- | :--- |
+| **`makefile` Targets** | Retargeted `build`, `build-cross`, `test-ci`, `test-lambda`, `run-ingest`, `run-generate` | Compiles exclusively from `cmd/cli`; bounds unit tests without legacy packages; routes synthetic generation via `cmd/cli generate`. | `make build && make test-ci` |
+| **Release Automation** | Updated `.github/scripts/build-and-package.sh` | Retargeted cross-platform binary builds from root `main.go` to `./cmd/cli` across `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`. | Dry-run execution & build script verification |
+| **Desktop CI Workflow** | Added Ubuntu headless `desktop` CI job in `.github/workflows/go.yml` | Validates Linux desktop buildability with `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`; executes Vitest frontend tests and Go race-detected tests. | GitHub Actions CI green |
+| **Linter Architecture Rules** | Pruned `.golangci.yml` `internal-no-legacy` depguard block | Removed deleted legacy package paths; strictly retained composition-root boundaries (`appcontext`, `config`) and entrypoint isolation (`cmd`). | `make check-quality` (0 issues) |
+| **Git Hygiene** | Added `/app` to `.gitignore` | Prevents accidental re-tracking of compiled desktop/CLI binary artifacts. | `git check-ignore app` |
+
+### 21.3 Architecture Decision Audit (Decisions O-1 Through O-9)
+
+| Decision | Title & Context | Resolution & Enforcement Status |
+| :---: | :--- | :--- |
+| **O-1** | **Deletion Sizing Floor & Ceiling Exemption** | **Closed / Enforced**: Pure package deletion slices (Phase 5F `storage/` at -2.9K lines, Phase 5G `datalake/` + `csv/` at -7.6K lines) were successfully executed as focused, atomic deletion PRs exempt from the 600-line diff ceiling. |
+| **O-2** | **Production Gate Q-1 Confirmation** | **Closed / Confirmed**: Phase 5A verified that production Lambda container processes live S3 events using in-memory streaming with zero lingering unprocessed files before legacy code removal commenced. |
+| **O-3** | **Prerequisite Dependency Invariant** | **Closed / Verified**: Phase 4 completion criteria (4J, 4K, 4L) verified on `main` before retargeting build tools or decommissioning legacy packages. |
+| **O-4** | **Root Composition Layer Invariant** | **Active / Enforced**: `config/` and `appcontext/` packages remain at repository root to serve composition roots across `cmd/cli`, `cmd/lambda`, and `desktop` without circular dependencies, guarded by depguard. |
+| **O-5** | **Desktop CI Environment** | **Closed / Enforced**: Headless desktop test workflow added to CI running on `ubuntu-latest` with GTK3 and WebKit2GTK dependencies; passes 19 Vitest tests and Go race detector on every pull request. |
+| **O-6** | **Distributed Hand-Off Follow-Up Issues** | **Closed / Tracked**: Multi-record partial failure handling (#13) and S3 alert routing (#12) cataloged as non-blocking technical debt. |
+| **O-7** | **Synthetic CSV Relocation** | **Closed / Enforced**: Deterministic CSV writer relocated to `internal/infra/sources/synthetic/csv_writer.go` in Phase 5D (PR #108) prior to decommissioning legacy `synthetic/`. |
+| **O-8** | **Tracked Binary Cleanup** | **Closed / Enforced**: Tracked 13.3 MB executable binary `app` permanently removed from git tracking in Phase 5F (PR #110); `/app` added to `.gitignore`. |
+| **O-9** | **External Workspace Script Maintenance** | **Closed / Enforced**: External script `tools/upload-fidelity-csv.sh` updated to invoke `go run ./cmd/cli ingest` concurrently with Phase 5B root `main.go` deletion (PR #106). |
+
 
 
 
