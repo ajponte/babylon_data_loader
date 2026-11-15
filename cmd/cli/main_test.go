@@ -561,6 +561,27 @@ func TestRun_GenerateSyntheticDataToDir(t *testing.T) {
 	}
 }
 
+func TestRun_GenerateSyntheticData_Alias(t *testing.T) {
+	outDir := t.TempDir()
+	d := deps{
+		logger: testLogger(),
+		now:    fixedClock,
+	}
+
+	args := []string{"generate", "--rows", "2", "--dir", outDir}
+	if err := run(context.Background(), args, d); err != nil {
+		t.Fatalf("run generate to dir failed: %v", err)
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("failed to read outDir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("expected generated synthetic file in %s", outDir)
+	}
+}
+
 func TestRun_GenerateSyntheticDataFlagError(t *testing.T) {
 	d := deps{
 		logger: testLogger(),
