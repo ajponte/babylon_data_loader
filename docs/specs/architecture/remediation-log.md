@@ -521,7 +521,7 @@ With the transition of `babylon-data-loader` on AWS Lambda to pure in-memory str
 | Repository | File / Component | Role | Architectural Impact & Rationale | Verification Proof |
 | :--- | :--- | :--- | :--- | :--- |
 | `babylon_deploy` | `terraform/modules/data-loader/main.tf` | Terraform Infrastructure | Removed obsolete `LAMBDA_TMP_DIR = "/tmp"` environment variable from `aws_lambda_function.data_loader`, leaving strictly `MONGO_SECRET_ID`. Eliminates dead configuration drift. | `terraform validate` (Valid)<br>`git grep "LAMBDA_TMP_DIR"` (0 matches) |
-| `babylon_deploy` | `docs/specs/data-loader-infrastructure-cicd.md` | Deployment Specification | Updated Section 4.1 environment variable inventory to document `MONGO_SECRET_ID` as the sole operational configuration parameter. | Verified documentation parity |
+| `babylon_deploy` | `docs/specs/data-loader-infrastructure-cicd.md` | Deployment Specification | Updated Section 6.1 (`#### 2. Data Loader Compute Module`) environment variable inventory to document `MONGO_SECRET_ID` as the sole operational configuration parameter. | Verified documentation parity |
 | `babylon_deploy` | `docs/specs/data-loader-serverless-pipeline.md` | Architecture Specification | Updated Section 5.1 architecture diagram (removed `/tmp` staging subgraph; shows direct in-memory streaming via `s3.ObjectStore`), Section 5.2 sequence diagram (removed local disk write/cleanup; reflects `OpenReadStream` and archival copy/delete), and Section 6.1 implementation notes (removed `/tmp` staging and `DefaultIngestRunner` references). | `git grep "DefaultIngestRunner"` (0 matches)<br>`git grep "/tmp/unprocessed"` (0 matches) |
 
 ### 22.3 Architectural Invariants & Verification Proofs
