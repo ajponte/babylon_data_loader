@@ -160,7 +160,7 @@ Frontend unit tests are set up inside `desktop/frontend/` using **Vitest** and *
   * Compile-time assertion: `var _ port.SyncLogReader = (*mongo.Repository)(nil)`.
 
 ### 3.3 Desktop Hexagonal Driving Adapter Cutover (Phase 4K)
-- **`desktop/app.go`**: Fully decoupled from legacy packages (`datalake`, `datalake/model`, `storage`, `csv`):
+- **`desktop/app.go`**: Fully decoupled from legacy packages (`datalake`, `datalake/model`, `storage`, `csv`, deleted in Phase 5):
   * Rewired to hexagonal `internal/infra/storage/mongo.Repository`, `internal/app/pipeline.Pipeline`, `internal/app/ingest.Ingestor`, `HistoryService`, and `WailsProgressNotifier`.
   * **In-Place File Processing (Decision U3)**: Uses `localfs.New(filepath.Dir(filePath))` and leaves `ArchiveKey` blank, ensuring user local files are processed directly without copying, renaming, or deleting them on disk.
   * **Zero Frontend Alterations**: Regenerated Wails bindings via `wails generate module` without modifying any handwritten React frontend code.

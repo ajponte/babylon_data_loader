@@ -112,7 +112,7 @@ babylon_data_loader/
 │       └── reusable-publish-go.yml    # Reusable multi-platform Go binary publisher
 ├── Dockerfile.lambda                  # Multi-stage Graviton Linux ARM64 container
 ├── makefile                           # Local cross-compilation & packaging targets
-└── main.go                            # CLI entrypoint
+└── cmd/cli/main.go                    # CLI entrypoint
 babylon_deploy/
 └── terraform/
     ├── main.tf                        # Root Terraform wiring (shared ECR module)
@@ -136,7 +136,7 @@ Local developers and continuous integration workers utilize standardized targets
 
 #### Build Targets & Parameters
 * **`clean-dist`**: Cleans the `out/dist` workspace to prevent stale artifacts.
-* **`build-cross`**: Compiles stripped, statically linked executables for four primary target environments: `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64`.
+* **`build-cross`**: Compiles stripped, statically linked executables for `./cmd/cli` across four primary target environments: `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64`.
 * **`package-cross`**: Packages cross-compiled binaries into compressed archives matching standard distribution naming formats and produces a unified `checksums.txt` file.
 * **`verify-checksums`**: Validates the cryptographic integrity of generated archives against `checksums.txt`.
 
@@ -771,7 +771,7 @@ babylon-data-loader_v0.1.0_linux_arm64.tar.gz: OK
 Executing `make check-quality` and `make test-ci` verifies zero regressions across the codebase:
 - `golangci-lint run`: Passed (0 errors).
 - `go vet ./...`: Passed.
-- `go test -v -timeout 10m ./... -coverprofile=coverage.out`: Passed (100% tests green across `cmd/lambda/...`, `config/...`, `ingest/...`, and `storage/...`).
+- `go test -v -timeout 10m ./... -coverprofile=coverage.out`: Passed (historical verification: 100% tests green across `cmd/lambda/...`, `config/...`, and `internal/infra/storage/s3/...`).
 
 ### 4.3. GitHub Actions Continuous Delivery Pipeline Verification (Run 37137652746)
 

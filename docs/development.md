@@ -56,7 +56,7 @@ MONGO_IT_URI="mongodb://localhost:27017" make test-integration
 ```
 
 ##### Safety Guards & Ephemeral Databases
-The integration test suite ([`internal/infra/storage/mongo/integration_test.go`](../internal/infra/storage/mongo/integration_test.go)) enforces strict isolation guards:
+The integration test suite (`internal/infra/storage/mongo/integration_test.go`) enforces strict isolation guards:
 - **Build Tag Separation**: Tagged with `//go:build integration`. Standard `make test-ci` and `go test ./...` exclude integration tests, ensuring unit tests remain 100% hermetic and network-free.
 - **Protocol Guard**: Rejects connection URIs with the `mongodb+srv://` scheme to prevent accidental execution against remote MongoDB Atlas clusters.
 - **Database Name Guard**: Forbids running against any database named `datalake` (case-insensitive check).

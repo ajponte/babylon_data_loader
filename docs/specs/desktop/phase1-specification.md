@@ -1,5 +1,8 @@
 # Phase 1 Specification: Core Go Ingest Pipeline Refactoring
 
+> [!WARNING]
+> **Historical: describes the pre-hexagonal layout (`datalake/`, `storage/`, `csv/`, `ingest/`), deleted in Phase 5. Current design: `docs/specs/desktop/phase3-specification.md` and `docs/specs/hexagonal-application-pipeline.md`.**
+
 > [!NOTE]
 > **The Lead**: This specification outlines the Phase 1 backend changes implemented on the `wails-phase-one` branch to support the desktop app integration defined in [wails-integration-plan.md](../../../agent-docs/wails-integration-plan.md). The changes refactor the Go ingestion pipeline to support single-file processing, stream progress updates row-by-row, and return deduplication/duplicate skip counters, laying a SOLID foundation for the upcoming Wails desktop frontend.
 
@@ -40,18 +43,18 @@ classDiagram
 ```
 
 ### 1.1 Ingestion Mechanism: In-place Copy
-- Added [IngestCSVFile](../../../datalake/client.go) to the [datalake.Client](../../../datalake/client.go) interface.
+- Added `IngestCSVFile` to the `datalake.Client` interface.
 - Before a file is processed, it is copied from its source path to the configured `UnprocessedDir`. This preserves the existing directory scanner lifecycle (unprocessed vs. processed directories).
 - The operation runs the core ingestion logic against the copied file and handles its relocation to `ProcessedDir` post-ingest.
 
 ### 1.2 Deduplication Statistics & Skip Counters
-- Modified [repository.Repository](../../../datalake/repository/repository.go) interface to return [UpsertStats](../../../datalake/repository/repository.go).
+- Modified `repository.Repository` interface to return `UpsertStats`.
 - Introduced `UpsertStats` containing `UpsertedCount`, `MatchedCount`, and `ModifiedCount`.
-- Updated [storage.MongoRepository](../../../storage/mongo_repository.go) to map MongoDB's `BulkWriteResult` fields directly to the new `UpsertStats` struct, capturing exact deduplication figures (matched documents that were skipped).
+- Updated `storage.MongoRepository` to map MongoDB's `BulkWriteResult` fields directly to the new `UpsertStats` struct, capturing exact deduplication figures (matched documents that were skipped).
 
 ### 1.3 Streaming CSV Parser
-- Introduced the `StreamingParser` interface in [csv/parser.go](../../../csv/parser.go).
-- Added `ParseStream` to `DefaultParser` in [csv/csv.go](../../../csv/csv.go), executing progress callbacks for each processed row.
+- Introduced the `StreamingParser` interface in `csv/parser.go`.
+- Added `ParseStream` to `DefaultParser` in `csv/csv.go`, executing progress callbacks for each processed row.
 - Implemented double-pass file processing: first pass using `countRecords` counts the total records, and second pass streams rows while reporting real-time progress (`CurrentRecord` and `TotalRecords`).
 
 ---
@@ -59,7 +62,7 @@ classDiagram
 ## 2. Technical Specification & Design Patterns
 
 ### 2.1 Dependency Inversion (DIP) for Progress Reporting
-To avoid coupling the core ingest packages with Wails event-emitting APIs, we defined a clean abstract [ProgressReporter](../../../datalake/progress.go) interface and [ProgressEvent](../../../datalake/progress.go) structures:
+To avoid coupling the core ingest packages with Wails event-emitting APIs, we defined a clean abstract `ProgressReporter` interface and `ProgressEvent` structures:
 
 ```go
 type Phase string
@@ -117,13 +120,13 @@ stateDiagram-v2
 - **SOLID Design Principles**: Modularity is strictly preserved. `csvparser` remains focused on raw mapping, `storage` focuses on MongoDB operations, and `datalake` coordinates the process. No Wails packages are imported in the backend code.
 - **Precision Arithmetic**: Checked currency mapping flows; all amounts are validated as cents using string-based parsing (no floating-point calculations).
 - **Quality & Code Health**:
-  - Found and fixed a cognitive complexity issue in [csv/csv.go](../../../csv/csv.go#L50). Refactored `ParseStream` by extracting the record parsing loop to `readRecords` helper function, dropping cognitive complexity from 23 to below the strict linter threshold (20).
+  - Found and fixed a cognitive complexity issue in `csv/csv.go`. Refactored `ParseStream` by extracting the record parsing loop to `readRecords` helper function, dropping cognitive complexity from 23 to below the strict linter threshold (20).
   - Validated that `make lint` and `make unit-test` pass successfully with zero warnings/errors.
   - Test coverage meets high quality bars: `csv` package achieved **87.2%** test coverage; `datalake` package achieved **51.8%** coverage.
 
 ### 3.2 Documentation Engineer Verification
 - **Inverted Pyramid Structure**: The document prioritizes the lead context (purpose, goals, most important changes first) before detailing deep Go structure differences and interface signatures.
-- **Link Integrity**: Clickable markdown links point directly to specific files and symbols within the repository using relative paths (e.g. `[progress.go](../../../datalake/progress.go)`). No personal absolute paths are referenced.
+- **Link Integrity**: Clickable markdown links point directly to specific files and symbols within the repository using relative paths (e.g. `progress.go`). No personal absolute paths are referenced.
 - **Ubiquitous Language**: Terminology is consistent with the project glossaries: `Transaction`, `DataSource`, `UpsertStats`, `ProgressEvent`.
 - **Alert Blocks**: Leveraged markdown alert elements to call out critical patterns and implementation contexts.
 

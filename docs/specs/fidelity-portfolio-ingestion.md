@@ -1,5 +1,8 @@
 # Fidelity Portfolio Positions Ingestion Specification
 
+> [!WARNING]
+> **Historical: describes the pre-hexagonal layout (`datalake/`, `storage/`, `csv/`, `ingest/`), deleted in Phase 5. Current design: `docs/specs/architecture/fidelity-adapter.md` and `docs/specs/hexagonal-ingestion-adapters.md`.**
+
 ## 1. Executive Summary
 
 This document specifies the architecture, data models, parsing heuristics, and storage contracts for ingesting point-in-time brokerage portfolio position statements from **Fidelity Investments** into the Babylon Datalake. 
@@ -50,7 +53,7 @@ Fidelity portfolio position export files exhibit unique format quirks that break
 
 ### 3.1. `FidelityPosition` Document Model
 
-Defined in [`datalake/model/fidelity_position.go`](../../datalake/model/fidelity_position.go), each document represents an immutable point-in-time snapshot of an asset held within an account:
+Defined in `datalake/model/fidelity_position.go` (superseded by `internal/domain/model/fidelity_position.go`), each document represents an immutable point-in-time snapshot of an asset held within an account:
 
 | Field Name | BSON Tag | Go Type | Description | Example |
 | :--- | :--- | :--- | :--- | :--- |
@@ -104,7 +107,7 @@ type SourceLineage struct {
 
 ### 4.2. Declarative "Errors Are Values" Model Mapping
 
-Rather than repeating 11 distinct `if err != nil` blocks, [`MapRawRecordToFidelityPosition`](../../datalake/model/fidelity_parser.go) employs Rob Pike's canonical error-accumulator pattern via `fidelityRecordParser`:
+Rather than repeating 11 distinct `if err != nil` blocks, `MapRawRecordToFidelityPosition` (superseded by `internal/infra/sources/fidelity/parser.go`) employs Rob Pike's canonical error-accumulator pattern via `fidelityRecordParser`:
 
 ```go
 type fidelityRecordParser struct {

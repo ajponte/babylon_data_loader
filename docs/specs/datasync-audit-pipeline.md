@@ -1,5 +1,8 @@
 # DataSync Ingestion Audit & Observability Specification
 
+> [!WARNING]
+> **Historical: describes the pre-hexagonal layout (`datalake/`, `storage/`, `csv/`, `ingest/`), deleted in Phase 5. Current design: `docs/specs/hexagonal-domain-core.md` and `docs/specs/hexagonal-storage-adapters.md`.**
+
 ## 1. Executive Summary & Architectural Context
 
 This specification defines the architecture, domain models, indexing strategies, storage contracts, and observability tooling for the ingestion audit trail within the Babylon Datalake (`dataSync` collection).
@@ -18,7 +21,7 @@ Historical iterations of `babylon_data_loader` maintained a minimal, unindexed 3
 6. **Specification Discrepancy**: The data format diverged from Sections 5.2 and 6.1 of the authoritative MongoDB Atlas Datalake specification (`docs/specs/mongodb-atlas-datalake.md`).
 
 #### The Two-Phase Modernization:
-- **Phase 1 (Domain Model & Automated Indexing)**: Established the canonical 11-field `SyncLog` domain model ([`datalake/model/sync_log.go`](../../datalake/model/sync_log.go)), double-checked thread-safe automated index provisioning on `dataSync` (`idx_datasync_synced_at` and `idx_datasync_filename_synced_at`), bidirectional backward-compatible schema normalization (`Normalize()`), and the expanded repository contract.
+- **Phase 1 (Domain Model & Automated Indexing)**: Established the canonical 11-field `SyncLog` domain model (`datalake/model/sync_log.go`, superseded by `internal/domain/model/sync_log.go`), double-checked thread-safe automated index provisioning on `dataSync` (`idx_datasync_synced_at` and `idx_datasync_filename_synced_at`), bidirectional backward-compatible schema normalization (`Normalize()`), and the expanded repository contract.
 - **Phase 2 (Decoupled Storage & Centralized Orchestration)**: Decoupled storage repository methods (`storage/mongo_repository.go`) so that `BulkUpsertTransactions`, `BulkUpsertChaseTransactions`, and `BulkUpsertFidelityPositions` return pure `(repository.UpsertStats, error)` with zero audit side-effects (`recordSyncAuditLog` removed). Centralized complete ownership of audit log emission within `CSVFileProcessor` (`datalake/datalake.go`), wrapping the entire ingestion lifecycle (validation, extraction, parsing, mapping, storage, and archival) with end-to-end wall-clock timing and forensic failure capture. Aligned the desktop UI (`desktop/frontend/src/components/HistoryPanel.tsx`) and TypeScript bindings (`desktop/frontend/wailsjs/go/models.ts`) to display rich status badges, duration, duplicate counts, and file lineage verified by 17 Vitest tests.
 
 > [!NOTE]
@@ -126,7 +129,7 @@ const (
 
 ### 3.2. Canonical `SyncLog` Schema Specification
 
-Defined in [`datalake/model/sync_log.go`](../../datalake/model/sync_log.go):
+Defined in `datalake/model/sync_log.go` (superseded by `internal/domain/model/sync_log.go`):
 
 | Field Name | BSON Tag | JSON Tag | Go Type | Description | Spec Section |
 | :--- | :--- | :--- | :--- | :--- | :--- |

@@ -34,7 +34,7 @@ flowchart TD
 | **Cloud Provider** | Amazon Web Services (AWS) | Native AWS deployment matching Babylon infrastructure |
 | **Region** | `us-west-2` (Oregon) | Co-located with S3 landing bucket and Lambda functions |
 | **Cluster Identifier** | `babylon-datalake` | Standardized Babylon naming convention |
-| **Target Database** | `datalake` | Defined in [`storage/mongo.go`](../../storage/mongo.go) (`const dbName = "datalake"`) |
+| **Target Database** | `datalake` | Defined in `internal/infra/storage/mongo` (`const dbName = "datalake"`) |
 | **Connection Protocol**| DNS Seedlist SRV (`mongodb+srv://`) | Automated replica set discovery, TLS negotiation |
 
 ---
