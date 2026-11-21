@@ -506,6 +506,31 @@ Phase 5 completes the decommissioning of legacy architecture components, permane
 | **O-8** | **Tracked Binary Cleanup** | **Closed / Enforced**: Tracked 13.3 MB executable binary `app` permanently removed from git tracking in Phase 5F (PR #110); `/app` added to `.gitignore`. |
 | **O-9** | **External Workspace Script Maintenance** | **Closed / Enforced**: External script `tools/upload-fidelity-csv.sh` updated to invoke `go run ./cmd/cli ingest` concurrently with Phase 5B root `main.go` deletion (PR #106). |
 
+---
+
+## 22. Phase 5J Deployment Infrastructure Cleanup & Spec Synchronization Implementation Log
+
+Phase 5J synchronizes the deployment infrastructure and architecture specifications in the `babylon_deploy` repository following the hexagonal architecture modernization in `babylon_data_loader` ([Issue #104](https://github.com/ajponte/babylon_data_loader/issues/104), [PR #8](https://github.com/ajponte/babylon_deploy/pull/8)).
+
+### 22.1 Scope & Operational Summary
+
+With the transition of `babylon-data-loader` on AWS Lambda to pure in-memory streaming through `s3.ObjectStore` and `cmd/lambda/handler.go` (`S3EventHandler`), local disk staging to `/tmp` was permanently decommissioned. Phase 5J eliminates obsolete environment variables from Terraform infrastructure definitions and aligns deployment documentation with hexagonal runtime semantics.
+
+### 22.2 Infrastructure & Specification Changes
+
+| Repository | File / Component | Role | Architectural Impact & Rationale | Verification Proof |
+| :--- | :--- | :--- | :--- | :--- |
+| `babylon_deploy` | `terraform/modules/data-loader/main.tf` | Terraform Infrastructure | Removed obsolete `LAMBDA_TMP_DIR = "/tmp"` environment variable from `aws_lambda_function.data_loader`, leaving strictly `MONGO_SECRET_ID`. Eliminates dead configuration drift. | `terraform validate` (Valid)<br>`git grep "LAMBDA_TMP_DIR"` (0 matches) |
+| `babylon_deploy` | `docs/specs/data-loader-infrastructure-cicd.md` | Deployment Specification | Updated Section 6.1 (`#### 2. Data Loader Compute Module`) environment variable inventory to document `MONGO_SECRET_ID` as the sole operational configuration parameter. | Verified documentation parity |
+| `babylon_deploy` | `docs/specs/data-loader-serverless-pipeline.md` | Architecture Specification | Updated Section 5.1 architecture diagram (removed `/tmp` staging subgraph; shows direct in-memory streaming via `s3.ObjectStore`), Section 5.2 sequence diagram (removed local disk write/cleanup; reflects `OpenReadStream` and archival copy/delete), and Section 6.1 implementation notes (removed `/tmp` staging and `DefaultIngestRunner` references). | `git grep "DefaultIngestRunner"` (0 matches)<br>`git grep "/tmp/unprocessed"` (0 matches) |
+
+### 22.3 Architectural Invariants & Verification Proofs
+
+1. **Zero Occurrences of `LAMBDA_TMP_DIR`**: Confirmed zero occurrences of `LAMBDA_TMP_DIR` across active infrastructure (`terraform/`) and specifications (`docs/specs/`) in `babylon_deploy` (`git -C babylon_deploy grep -rn "LAMBDA_TMP_DIR"` returns 0 results).
+2. **Zero Occurrences of `DefaultIngestRunner`**: Confirmed zero occurrences of legacy `DefaultIngestRunner` across all deployment documentation (`git -C babylon_deploy grep -rn "DefaultIngestRunner"` returns 0 results).
+3. **Terraform Integrity**: Validated syntax and structural correctness via `terraform fmt -check -recursive` (0 diff) and `terraform validate` (`Success! The configuration is valid.`).
+4. **Pure In-Memory Streaming Parity**: Verified that Lambda compute definitions across both repositories strictly reflect in-memory S3 streaming without scratch disk dependencies, satisfying Decision P7 and hexagonal architecture boundaries.
+
 
 
 
